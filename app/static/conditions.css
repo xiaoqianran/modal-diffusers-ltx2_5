@@ -144,6 +144,10 @@ button.danger { background:#4a211e;color:#ffaaa1; }
 .video-modal video { display:block;height:auto;margin:auto;max-height:calc(100vh - 110px);max-width:calc(100vw - 84px);width:auto; }
 .modal-close { background:#302f2c;color:var(--ink);font-size:22px;height:36px;padding:0;place-items:center;position:fixed;right:18px;top:18px;width:36px;z-index:2; }
 .modal-actions { justify-content:center;margin-top:12px; }
+.header-tools,.language-switch { align-items:center;display:flex;gap:8px; }
+.language-switch { background:#151611;border:1px solid #444638;border-radius:999px;padding:3px; }
+.language-switch button { background:transparent;border-radius:999px;color:var(--muted);font-size:10px;padding:5px 8px;width:auto; }
+.language-switch button.active { background:var(--acid);color:#111; }
 @media (max-width: 560px) {
   .condition-row { grid-template-columns: 1fr 1fr; }
   .condition-row label:first-child { grid-column: 1 / -1; }

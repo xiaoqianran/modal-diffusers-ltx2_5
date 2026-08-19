@@ -1,4 +1,5 @@
 const form = document.querySelector('#form');
+const tr = (ja, en) => window.LTX_I18N?.language === 'en' ? en : ja;
 const submit = document.querySelector('#submit');
 const mode = document.querySelector('#mode');
 const upscale = document.querySelector('#upscale');
@@ -45,7 +46,7 @@ async function ensureSession() {
     sessionNumber = +stored;
   } else {
     const response = await fetch('/api/sessions', { method: 'POST' });
-    if (!response.ok) throw new Error('セッションを開始できません');
+    if (!response.ok) throw new Error(tr('セッションを開始できません', 'Could not start a session'));
     sessionNumber = (await response.json()).session_number;
     sessionStorage.setItem('ltx25SessionNumber', sessionNumber);
   }
@@ -98,10 +99,10 @@ function getLoras() {
     strength: +row.querySelector('input').value,
   })).filter((item) => item.id);
   if (new Set(selected.map((item) => item.id)).size !== selected.length) {
-    throw new Error('同じLoRAを複数回選択することはできません');
+    throw new Error(tr('同じLoRAを複数回選択することはできません', 'The same LoRA cannot be selected more than once'));
   }
   if (mode.value === 'iclora' && selected.some((item) => !availableLoras.find((entry) => entry.id === item.id)?.generic_iclora_compatible)) {
-    throw new Error('この汎用IC-LoRAモードでは参照縮小率1のIC-LoRAだけを使用できます');
+    throw new Error(tr('この汎用IC-LoRAモードでは参照縮小率1のIC-LoRAだけを使用できます', 'This generic IC-LoRA mode accepts only IC-LoRAs with reference downscale factor 1'));
   }
   return selected;
 }
@@ -126,7 +127,7 @@ function buildPrompt() {
   const base = promptInput.value.trim();
   if (!multishot.checked) return base;
   const shots = getShots();
-  if (!shots.length) throw new Error('Native Multishotのショットを1つ以上入力してください');
+  if (!shots.length) throw new Error(tr('Native Multishotのショットを1つ以上入力してください', 'Enter at least one Native Multishot shot'));
   const continuity = 'Keep character identity, wardrobe, environment, lighting, voice, and visual style consistent across every shot.';
   return [base, continuity, ...shots.map((shot, index) => `${index ? 'Hard cut to' : 'Shot'} ${index + 1}: ${shot}`)].join('\n\n');
 }
@@ -446,7 +447,7 @@ async function collectConditions(selectedMode) {
     if (numFrames === null) {
       const invalid = [...rows.querySelectorAll('.condition-position')]
         .some((input) => ![0, 100].includes(+input.value));
-      if (invalid) throw new Error('自動尺では参照条件の配置位置を0%または100%にしてください');
+      if (invalid) throw new Error(tr('自動尺では参照条件の配置位置を0%または100%にしてください', 'With automatic duration, place references at 0% or 100%'));
     }
     const latentFrames = numFrames === null ? null : Math.floor((numFrames - 1) / 8) + 1;
     for (const row of rows.querySelectorAll('.condition-row')) {
@@ -462,17 +463,17 @@ async function collectConditions(selectedMode) {
     }
   } else if (selectedMode === 'iclora') {
     const file = document.querySelector('#icLoraReference input[type="file"]').files[0];
-    if (!file) throw new Error('IC-LoRAの参照画像または動画を選択してください');
+    if (!file) throw new Error(tr('IC-LoRAの参照画像または動画を選択してください', 'Select an IC-LoRA reference image or video'));
     const asset = await upload(file);
     conditions.push({ asset_id: asset.id, kind: asset.kind, index: 1, strength: 1 });
   } else if (selectedMode === 'retake') {
     const file = document.querySelector('#retakeSource input[type="file"]').files[0];
-    if (!file) throw new Error('Retakeの元動画を選択してください');
+    if (!file) throw new Error(tr('Retakeの元動画を選択してください', 'Select a source video for Retake'));
     const asset = await upload(file);
     conditions.push({ asset_id: asset.id, kind: 'video', index: 0, strength: 1 });
   } else if (selectedMode === 'extend') {
     const file = document.querySelector('#extendSource input[type="file"]').files[0];
-    if (!file) throw new Error('Extendの元動画を選択してください');
+    if (!file) throw new Error(tr('Extendの元動画を選択してください', 'Select a source video for Extend'));
     const asset = await upload(file);
     conditions.push({ asset_id: asset.id, kind: 'video', index: 0, strength: 1 });
   } else if (selectedMode === 'a2v') {
@@ -593,7 +594,10 @@ async function loadHistory() {
 document.querySelector('#enhancePrompt').onclick = enhancePrompt;
 document.querySelector('#refreshHistory').onclick = loadHistory;
 document.querySelector('#deleteHistory').onclick = async () => {
-  if (!selectedHistoryIds.length || !confirm(`選択した${selectedHistoryIds.length}件の履歴と動画ファイルを削除しますか？`)) return;
+  if (!selectedHistoryIds.length || !confirm(tr(
+    `選択した${selectedHistoryIds.length}件の履歴と動画ファイルを削除しますか？`,
+    `Delete ${selectedHistoryIds.length} selected history item(s) and video file(s)?`,
+  ))) return;
   const button = document.querySelector('#deleteHistory');
   button.disabled = true;
   try {
@@ -604,7 +608,7 @@ document.querySelector('#deleteHistory').onclick = async () => {
     selectedHistoryIds = [];
     await loadHistory();
   } catch (error) {
-    alert(`削除できません: ${error.message}`);
+    alert(`${tr('削除できません', 'Could not delete')}: ${error.message}`);
     updateHistorySelection();
   }
 };
@@ -621,7 +625,7 @@ document.querySelector('#concatHistory').onclick = async () => {
     const result = await response.json();
     openVideoModal(result.video_url, result.filename);
   } catch (error) {
-    alert(`結合できません: ${error.message}`);
+    alert(`${tr('結合できません', 'Could not merge')}: ${error.message}`);
   } finally {
     button.textContent = '選択順に結合';
     updateHistorySelection();
@@ -652,7 +656,7 @@ form.addEventListener('submit', async (event) => {
     let audioAssetId = null;
     if (data.get('mode') === 'a2v') {
       const audioFile = document.querySelector('#audioSource input[type="file"]').files[0];
-      if (!audioFile) throw new Error('Audio → Videoの入力音声を選択してください');
+      if (!audioFile) throw new Error(tr('Audio → Videoの入力音声を選択してください', 'Select input audio for Audio → Video'));
       audioAssetId = (await upload(audioFile)).id;
     }
     const body = {
