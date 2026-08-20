@@ -19,7 +19,7 @@
 
 ## 順次ダウンロード・NF4量子化
 
-巨大コンポーネントを同時に保持しないスクリプトを先に実行します。各コンポーネントは専用キャッシュへ取得され、NF4保存物の再ロード検証に成功した場合だけ、そのキャッシュが削除されます。中断後は同じコマンドで再開できます。
+巨大コンポーネントを同時に保持しないスクリプトを先に実行します。各コンポーネントは専用キャッシュへ取得され、NF4保存物または追加チェックポイントの再ロード検証に成功した場合だけ、そのキャッシュが削除されます。中断後は同じコマンドで再開できます。LTX-2.5本体に加えて、[Pixel Spatial Upscaler IC-LoRA](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler)の利用条件にも事前に同意してください。
 
 ```bash
 docker build -t ltx25-server .
@@ -30,7 +30,7 @@ docker run --rm --gpus 'device=0' \
   python scripts/download_quantize_ltx25.py
 ```
 
-既定では処理開始時の空きが80GiBを下回ると停止します。高品質生成用の潜在アップサンプラーは取得しますが、`transformer_full`、LoRA、diffusion decoderは取得しません。
+既定では処理開始時の空きが80GiBを下回ると停止します。高品質生成用の潜在アップサンプラーと公式Pixel Spatial Upscaler IC-LoRAを取得しますが、`transformer_full`、任意のユーザーLoRA、diffusion decoderは取得しません。既存環境へPixel IC-LoRAだけ追加する場合は`python scripts/download_quantize_ltx25.py --component pixel_upscaler`を実行します。
 
 ## Dockerで起動
 
@@ -61,14 +61,41 @@ API仕様は <http://localhost:8000/docs> で確認できます。
 - `i2v`: 1枚の先頭画像から音声付き動画
 - `flf2v`: 先頭画像と末尾画像を両方固定した補間動画
 - `condition`: 最大8個の画像／動画を任意の潜在フレーム位置と強度で指定
+- `t2i`: プロンプトから静止画1枚（蒸留2段生成 → 2倍解像度PNG）
+- `refine_image`: 入力画像の2倍解像度再解釈／バリエーション静止画
+- `ref2i`: 参照画像の同一性を保った新しい場面の静止画
 
-Web UIでは生成方式とレンダリングを個別に指定します。`2倍高解像度化`はT2AV、I2V、FLF2V、Reference条件のすべてで利用でき、768×512の基準サイズから1536×1024、縦長は512×768から1024×1536を出力します。この処理はlatent 2倍アップスケールと3-step refineの組み合わせです。OFFの場合は8-step単段生成です。I2V/FLF2Vの先頭画像を選ぶと、Web UIが画像の縦横比に合わせて基準サイズを自動選択します。APIの`quality=high/draft`は後方互換用に残っていますが、新規クライアントは`upscale=true/false`を使用してください。
+Web UIでは生成方式とレンダリングを個別に指定します。横長は768×512、768×448、960×544、1280×704、1920×1088、縦長はそれらを転置した512×768、448×768、544×960、704×1280、1088×1920、正方形は512×512を選択できます。`2倍高解像度化`はT2AV、I2V、FLF2V、Reference条件で利用でき、最大960×544（縦長は544×960）の基準サイズから1920×1088（1088×1920）を出力します。方式は、従来のlatent 2倍アップスケールと3-step refineを行う`Latent Upscale`と、初段の低解像度映像を参照latentとして公式IC-LoRAで細部を再生成する`Pixel IC-LoRA`から選択します。Pixel方式は構図・動き・被写体を参照しますが、存在しない高周波ディテールを創作するためピクセル忠実な拡大ではありません。APIでは`upscale_method=latent/pixel`を指定します。1280×704以上のプリセットはVRAM消費が大きい直接生成専用で、選択すると2倍高解像度化は解除されます。OFFの場合は8-step単段生成です。I2V/FLF2Vの先頭画像を選ぶと、Web UIが画像の縦横比に合わせて標準基準サイズを自動選択します。APIの`quality=high/draft`は後方互換用に残っていますが、新規クライアントは`upscale=true/false`を使用してください。
 
 `2倍フレームレート化`は独立して選択できます。Temporal Latent Upscale と3-step refineにより、121フレーム/24fpsを241フレーム/48fpsへ変換し、動画と音声の尺は維持します。APIでは`temporal_upscale=true`を指定します。空間・時間の両方を選んだ場合もrefineは1回です。初回セットアップ済み環境では `scripts/download_quantize_ltx25.py --component temporal` を一度実行してください。
 
 `Retake`では元動画と開始・終了秒を指定し、選択した時間領域だけをlatent上で再生成します。元動画のFPSと解像度は自動取得され、範囲外の映像・音声は維持されます。映像のみ、音声のみ、または両方の再生成を選択できます。元動画は8n+1フレームかつ縦横32の倍数である必要があります。
 
 `Extend`では元動画の先頭または末尾へ1〜20秒の新しい映像・音声を追加します。参照範囲をclean latentのprefix/suffixとして固定するため、境界の被写体・動作・構図を引き継ぎます。元動画のFPSと解像度は自動採用され、参照範囲と延長範囲は8フレーム単位へ調整されます。1回の生成に使う参照＋延長は最大481フレームです。
+
+### 静止画モード（t2i / refine_image / ref2i）
+
+動画パイプラインを流用して静止画PNGを生成する3モードです（レシピは`scratch_t2i_probe/`の実証プローブに基づく）。出力は`outputs/t2i_*.png`／`refine_*.png`／`ref2i_*.png`へ保存され、履歴DBには`image_url`として記録されます（MP4は作成しません）。LoRA合成・シード・進捗・キューは動画モードと同様に機能します。
+
+- **`t2i`**: `num_frames=9`固定・蒸留2段（8σ → 2x latent upsample → 3σ refine）・VAEデコードで、基準解像度の2倍（既定512²→1024²）の中央フレームをPNG化します。`decoder: "diffusion"`を指定した場合のみ、NATTENカーネルの最小サイズ制約（kernel 11×11×11 > 9フレーム）を満たすため内部で`num_frames`を17へ昇格し（ログに明示）、diffusion decoderでデコードします。
+- **`refine_image`**: 入力画像（`/api/assets`で登録、`conditions`の`index: 0`に指定）を条件に、t2iと同じ2段レシピで2倍解像度に再解釈します。`strength`（0.1〜1.0、既定1.0）で参照の効きを調整します。デコードはVAE固定です。strength=1.0の実測で入力とのmean abs diffは約0.099（プローブP6と一致）。
+- **`ref2i`**: 参照画像1〜複数（`conditions`スキーマ流用、各latent index／strength指定可）＋場面プロンプトから、30-step基本スケジュール（guidance 3.0）で短い内部動画を生成し、`frame_position: "last"`（既定）または`"center"`のフレームをPNG化します。`num_frames`は25/41/49（既定49、参照から離れた場面ほど大きい値が有効）。デコードはVAE固定で、`decoder: "diffusion"`を指定しても警告ログ付きでVAEへフォールバックします（画像条件×diffusion decoderはブラーする実証結果のため）。
+
+```bash
+# t2i（既定: 512²基準 → 1024² PNG）
+curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+  -d '{"mode":"t2i","prompt":"A photorealistic portrait, golden hour light","width":512,"height":512,"seed":42}'
+
+# refine_image（入力画像の2x再解釈）
+curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+  -d "{\"mode\":\"refine_image\",\"prompt\":\"...\",\"width\":512,\"height\":512,\"strength\":1.0,\"conditions\":[{\"asset_id\":\"$ASSET_ID\",\"kind\":\"image\",\"index\":0}]}"
+
+# ref2i（参照→新場面の静止画、末尾フレーム抽出）
+curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+  -d "{\"mode\":\"ref2i\",\"prompt\":\"The same woman, new scene...\",\"width\":512,\"height\":512,\"num_frames\":49,\"frame_position\":\"last\",\"conditions\":[{\"asset_id\":\"$ASSET_ID\",\"kind\":\"image\",\"index\":0,\"strength\":1.0}]}"
+```
+
+実測（RTX PRO 6000 Blackwell 96GB、`OFFLOAD_MODE=model`、512²基準、seed=42）: t2i 46.5s（初回モデルロード込み。ロード後の生成本体は約6〜8s）／ピークVRAM 17.9GB、t2i+diffusion decoder 約30s（ウォーム）、refine_image 30.0s（ウォーム）、ref2i nf=49 45.5s（ウォーム、denoise約34s）。Web UIでは3モードをモード選択から使え、結果はギャラリーにPNGタイルで表示（ダウンロード可）、「この画像を I2V/FLF2V の先頭画像に使う」ボタンで生成PNGをそのままI2Vの先頭画像欄へセットできます。
 
 `Audio → Video`ではWAV/MP3/M4A/FLAC/OGG/AACをAudio VAEでlatent化し、音声モダリティを固定したまま映像だけを生成します。音声開始位置と最大20秒の使用時間を指定でき、任意の先頭画像も併用できます。出力にはVAE再構成音ではなく元の入力波形を使用します。
 
@@ -120,7 +147,7 @@ curl -X POST http://localhost:8000/api/jobs \
 - `MAX_UPLOAD_SIZE_MB`: 1ファイルの上限（既定500MB）
 - `LTX25_DECODER`: 2倍高解像度化後のデコード方式。`diffusion`（既定・diffusion decoderによる高品質デコード。NATTEN導入後の追加コストは約18秒）または`vae`（従来の畳み込みVAE・最速）。リクエストの`decoder`フィールドでジョブ単位に上書きできます。2倍高解像度化がOFFのジョブは常にVAEデコードです
 - `LTX25_VIDEO_CRF`: 出力MP4のlibx264 CRF（既定18）。全経路（draft/high、全デコーダ）に適用されます。従来の既定CRF~23より高ビットレートで、圧縮によるディテール損失を抑えます
-- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）または`bf16`（リリース重み約38GB）。`bf16`は96GB級GPU向けです（24GB級では`nf4`のまま使ってください）。text_encoderはどちらでもNF4です
+- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です
 
 ## 品質と速度の実測（RTX PRO 6000 Blackwell 96GB、512×512→出力1024²、121フレーム、seed=42）
 

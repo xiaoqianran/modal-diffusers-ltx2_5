@@ -20,6 +20,8 @@ from pathlib import Path
 REPO_ID = "Lightricks/LTX-2.5-Diffusers"
 REVISION = "69009ff070135c693ad1ad1ef2cc149c227963da"
 TEMPORAL_REVISION = "871165de037793df7d75c23a02dd7f45fd364c97"
+PIXEL_UPSCALER_REPO_ID = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
+PIXEL_UPSCALER_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
 DEFAULT_OUTPUT = Path("LTX-2.5-Diffusers-bnb-4bit")
 DEFAULT_MIN_FREE_GIB = 80
 GIB = 1024**3
@@ -243,6 +245,50 @@ def download_temporal_component(output_dir: Path, token: str, minimum_gib: int) 
     log(f"[temporal] complete ({weights.stat().st_size / GIB:.2f} GiB)")
 
 
+def download_pixel_upscaler(output_dir: Path, cache_root: Path, token: str, minimum_gib: int) -> None:
+    """Fetch and validate the official LTX-2.5 x2 Pixel Spatial Upscaler IC-LoRA."""
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    destination_dir = output_dir / "pixel_spatial_upscaler"
+    destination = destination_dir / PIXEL_UPSCALER_FILENAME
+    cache_dir = cache_root / "pixel-upscaler-hub-cache"
+
+    def verify(path: Path) -> None:
+        with safe_open(path, framework="pt", device="cpu") as weights:
+            metadata = weights.metadata() or {}
+            keys = list(weights.keys())
+        factor = int(metadata.get("reference_downscale_factor", 2))
+        if factor != 2 or not keys:
+            raise RuntimeError(
+                f"Unexpected Pixel Spatial Upscaler checkpoint (factor={factor}, tensors={len(keys)})"
+            )
+
+    if destination.is_file():
+        verify(destination)
+        log("[pixel_upscaler] already verified; skipping")
+        remove_dedicated_cache(cache_dir, cache_root)
+        return
+
+    require_free_space(output_dir.parent, minimum_gib, "Pixel Spatial Upscaler download")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    log("[pixel_upscaler] downloading the official x2 IC-LoRA into its private cache")
+    downloaded = Path(hf_hub_download(
+        repo_id=PIXEL_UPSCALER_REPO_ID,
+        filename=PIXEL_UPSCALER_FILENAME,
+        token=token,
+        cache_dir=cache_dir,
+    ))
+    verify(downloaded)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    shutil.copy2(downloaded, temporary)
+    verify(temporary)
+    temporary.replace(destination)
+    remove_dedicated_cache(cache_dir, cache_root)
+    log(f"[pixel_upscaler] complete ({destination.stat().st_size / GIB:.2f} GiB)")
+
+
 def quantize_text_encoder(output_dir: Path, cache_root: Path, token: str, minimum_gib: int) -> None:
     import torch
     from transformers import BitsAndBytesConfig, Gemma4UnifiedForConditionalGeneration
@@ -337,7 +383,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-free-gib", type=int, default=DEFAULT_MIN_FREE_GIB)
     parser.add_argument(
         "--component",
-        choices=("all", "base", "quality", "temporal", "text_encoder", "transformer"),
+        choices=("all", "base", "quality", "temporal", "pixel_upscaler", "text_encoder", "transformer"),
         default="all",
         help="Run one stage or all stages in order.",
     )
@@ -353,7 +399,9 @@ def main() -> int:
 
     log(f"Output: {output_dir}")
     log(f"Pinned source: {REPO_ID}@{REVISION}")
-    stages = ("base", "quality", "temporal", "text_encoder", "transformer") if args.component == "all" else (args.component,)
+    stages = (
+        "base", "quality", "temporal", "pixel_upscaler", "text_encoder", "transformer"
+    ) if args.component == "all" else (args.component,)
     try:
         if "base" in stages:
             download_base(output_dir, token, args.min_free_gib)
@@ -361,6 +409,8 @@ def main() -> int:
             download_quality_components(output_dir, token, args.min_free_gib)
         if "temporal" in stages:
             download_temporal_component(output_dir, token, args.min_free_gib)
+        if "pixel_upscaler" in stages:
+            download_pixel_upscaler(output_dir, cache_root, token, args.min_free_gib)
         if "text_encoder" in stages:
             quantize_text_encoder(output_dir, cache_root, token, args.min_free_gib)
         if "transformer" in stages:

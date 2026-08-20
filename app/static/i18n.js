@@ -21,11 +21,14 @@
     'AIでLTX-2.5向けに変換': 'Optimize for LTX-2.5 with AI', '外部LLMの設定が必要です': 'External LLM configuration is required',
     '複数ショットを1回の生成でつなぐ': 'Connect multiple shots in one generation', '＋ ショットを追加': '+ Add shot', 'ネガティブプロンプト': 'Negative prompt',
     '追加学習': 'Adapters', '再読込': 'Reload', 'loras/ を確認中…': 'Checking loras/…',
-    'レンダリング': 'Rendering', '基準解像度': 'Base resolution', '横 768 × 512': 'Landscape 768 × 512', 'IC-LoRA推奨 768 × 448': 'IC-LoRA recommended 768 × 448', '縦 512 × 768': 'Portrait 512 × 768', '正方形 512 × 512': 'Square 512 × 512',
+    'レンダリング': 'Rendering', '基準解像度': 'Base resolution', '横長': 'Landscape', '縦長': 'Portrait', '正方形': 'Square',
+    '横 768 × 512（標準）': 'Landscape 768 × 512 (standard)', '横 768 × 448（IC-LoRA推奨）': 'Landscape 768 × 448 (IC-LoRA recommended)', '横 960 × 544（540p / 2倍で1080p）': 'Landscape 960 × 544 (540p / 2× to 1080p)', '横 1280 × 704（720p・直接生成）': 'Landscape 1280 × 704 (720p direct)', '横 1920 × 1088（1080p・直接生成）': 'Landscape 1920 × 1088 (1080p direct)',
+    '縦 512 × 768（標準）': 'Portrait 512 × 768 (standard)', '縦 448 × 768（IC-LoRA向け）': 'Portrait 448 × 768 (for IC-LoRA)', '縦 544 × 960（540p / 2倍で1080p）': 'Portrait 544 × 960 (540p / 2× to 1080p)', '縦 704 × 1280（720p・直接生成）': 'Portrait 704 × 1280 (720p direct)', '縦 1088 × 1920（1080p・直接生成）': 'Portrait 1088 × 1920 (1080p direct)', '正方形 512 × 512': 'Square 512 × 512',
     'デコーダー': 'Decoder', 'Diffusion（高精細）': 'Diffusion (high detail)', 'VAE（高速）': 'VAE (fast)',
     'フレーム数': 'Frames', '動画尺（秒）': 'Video duration (seconds)', '8n+1フレームへ自動調整': 'Automatically align to 8n+1 frames',
     '動画の長さを自動決定': 'Determine video duration automatically', 'プロンプトの動作に合わせてduration headが決定': 'The duration head selects a length based on the prompt action',
     '最短（秒）': 'Minimum (seconds)', '最長（秒）': 'Maximum (seconds)', '2倍高解像度化': '2× resolution upscale', '2倍フレームレート化': '2× frame-rate upscale', '尺は維持': 'duration preserved',
+    '高解像度化方式': 'Upscaling method', 'Latent Upscale（高速・忠実）': 'Latent Upscale (fast, faithful)', 'Pixel IC-LoRA（細部を生成）': 'Pixel IC-LoRA (generative detail)', 'Pixel IC-LoRAは低解像度の初段映像を参照して2倍で再生成します': 'Pixel IC-LoRA uses the low-resolution first-stage video as reference and regenerates it at 2× resolution',
     '生成結果': 'Generated video', '設定を選び、生成を開始してください。': 'Choose settings and start generation.', '準備中': 'Preparing', 'MP4をダウンロード': 'Download MP4', '生成に失敗しました': 'Generation failed', '生成する': 'Generate', '生成条件': 'Generation settings',
     'このセッションの生成履歴': 'Generation history for this session', '選択順に結合': 'Merge in selection order', '選択削除': 'Delete selected', '更新': 'Refresh', '履歴を読み込み中…': 'Loading history…', '閉じる': 'Close',
     'テキストから同期した映像と音声を生成します。': 'Generate synchronized video and audio from text.',
@@ -43,7 +46,21 @@
     '外部LLMで変換中…': 'Rewriting with the external LLM…', 'このセッションの生成履歴はまだありません。': 'No generations in this session yet.',
     'クリックで原寸表示・入力欄へドラッグできます': 'Click for full-size playback or drag into an input', '選択': 'Select', 'ダウンロード': 'Download',
     '結合中…': 'Merging…', '入力ファイルを準備中': 'Preparing input files', 'キューで待機中': 'Waiting in queue', '映像と音声を生成中': 'Generating video and audio',
-    '構図、アクション、カメラ、セリフ…': 'Composition, action, camera, dialogue…', '選択した参照画像': 'Selected reference image'
+    '構図、アクション、カメラ、セリフ…': 'Composition, action, camera, dialogue…', '選択した参照画像': 'Selected reference image',
+    '静止画 T2I（Text → Image）': 'Still image T2I (Text → Image)',
+    '画像リファイン（2x 再解釈・静止画）': 'Image refine (2x reinterpretation, still image)',
+    '参照→静止画（新しい場面）': 'Reference → Image (new scene)',
+    'プロンプトから静止画を1枚生成します（蒸留2段生成 → 2倍解像度PNG）。': 'Generate one still image from a prompt (distilled two-stage → 2x-resolution PNG).',
+    '入力画像をLTX-2.5のスタイルで2倍解像度に再解釈した静止画を生成します。': 'Reinterpret the input image at 2x resolution in the LTX-2.5 style.',
+    '参照画像のキャラクター・スタイルを保ったまま、新しい場面の静止画を生成します。': 'Generate a new-scene still image while preserving the referenced character and style.',
+    '入力画像': 'Input image', 'ここへ画像をドロップ、またはクリックして選択': 'Drop an image here, or click to select',
+    '反映強度（strength）': 'Reference strength', '内部フレーム数': 'Internal frames', '取り出しフレーム': 'Extracted frame',
+    '末尾（既定）': 'Last (default)', '中央': 'Center',
+    '25（速い・変化小）': '25 (fast, small change)', '49（既定・変化大）': '49 (default, large change)',
+    '参照から離れるほど大きいフレーム数が有効': 'More frames help when moving far from the reference',
+    'この画像を I2V/FLF2V の先頭画像に使う': 'Use this image as the I2V/FLF2V first frame',
+    '先頭画像に使う': 'Use as first frame', '静止画を生成中': 'Generating still image',
+    '生成静止画': 'Generated still image', 'クリックで原寸表示': 'Click for full size'
   }));
 
   function translateText(value) {
@@ -62,6 +79,7 @@
         .replace(/^基準(.+) → (.+) ＋ 3-step Refine → 最終(.+)$/, 'Base $1 → $2 + 3-step refine → final $3')
         .replace(/^基準(.+) → 最終(.+)$/, 'Base $1 → final $2')
         .replace(/^8-step単段生成 → 最終(.+)（VAEデコード）$/, 'Single 8-step pass → final $1 (VAE decode)')
+        .replace(/^8-step単段生成 → 最終(.+)（VAEデコード）。高解像度の直接生成はVRAMを多く使用します$/, 'Single 8-step pass → final $1 (VAE decode). Direct high-resolution generation uses substantially more VRAM')
         .replace(/^空間Latent ×2$/, 'Spatial latent ×2')
         .replace(/^時間Latent ×2（(.+)）$/, 'Temporal latent ×2 ($1)')
         .replace(/^(.+)で変換しました$/, 'Rewritten with $1')

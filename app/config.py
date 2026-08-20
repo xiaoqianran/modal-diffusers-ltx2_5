@@ -29,8 +29,11 @@ class Settings(BaseSettings):
     ltx25_decoder: str = "diffusion"
     # libx264 CRF for all output videos (lower = higher quality). Env: LTX25_VIDEO_CRF
     ltx25_video_crf: int = 18
-    # Transformer weights: "nf4" (bnb 4bit, default) or "bf16" (release weights,
-    # ~38GB, for 96GB-class GPUs). Env: LTX25_TRANSFORMER_PRECISION
+    # Transformer weights: "nf4" (bnb 4bit, default), "fp8" (bf16-equivalent
+    # quality via layerwise casting storage=fp8_e4m3fn / compute=bf16, resident
+    # ~18GB / peak ~29GB, for 48GB-class GPUs; requires the ~38GB bf16
+    # transformer shards in the HF cache) or "bf16" (release weights, ~38GB,
+    # for 96GB-class GPUs). Env: LTX25_TRANSFORMER_PRECISION
     ltx25_transformer_precision: str = "nf4"
 
 

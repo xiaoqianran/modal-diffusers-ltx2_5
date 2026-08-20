@@ -67,6 +67,23 @@ def test_validation():
     temporal = GenerateRequest(prompt="x", upscale=False, temporal_upscale=True, decoder="diffusion")
     assert temporal.temporal_upscale is True
 
+    direct_1080p = GenerateRequest(prompt="x", width=1920, height=1088, upscale=False)
+    assert (direct_1080p.width, direct_1080p.height) == (1920, 1088)
+    portrait_1080p = GenerateRequest(prompt="x", width=1088, height=1920, upscale=False)
+    assert (portrait_1080p.width, portrait_1080p.height) == (1088, 1920)
+    latent_1080p = GenerateRequest(prompt="x", width=960, height=544, upscale=True)
+    assert latent_1080p.upscale is True
+    pixel_1080p = GenerateRequest(
+        prompt="x", width=960, height=544, upscale=True, upscale_method="pixel"
+    )
+    assert pixel_1080p.upscale_method == "pixel"
+    with pytest.raises(ValueError):
+        GenerateRequest(prompt="x", upscale=False, upscale_method="pixel")
+    with pytest.raises(ValueError):
+        GenerateRequest(prompt="x", mode="t2i", upscale_method="pixel")
+    with pytest.raises(ValueError):
+        GenerateRequest(prompt="x", width=1280, height=704, upscale=True)
+
     with pytest.raises(ValueError):
         GenerateRequest(prompt="x", loras=[{"id": "style.safetensors"}, {"id": "style.safetensors"}])
     with pytest.raises(ValueError):

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>LTX-2.5 Studio</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260819-4">
+  <link rel="stylesheet" href="/static/style.css?v=20260820-6">
   <link rel="stylesheet" href="/static/conditions.css?v=20260819-5">
 </head>
 <body>
@@ -28,6 +28,9 @@
             <option value="retake">Retake（指定区間を再生成）</option>
             <option value="extend">Extend（動画を前後へ延長）</option>
             <option value="a2v">Audio → Video</option>
+            <option value="t2i">静止画 T2I（Text → Image）</option>
+            <option value="refine_image">画像リファイン（2x 再解釈・静止画）</option>
+            <option value="ref2i">参照→静止画（新しい場面）</option>
           </select>
         </label>
         <p id="modeHelp" class="hint"></p>
@@ -54,6 +57,16 @@
             <label>参照範囲（秒）<input name="extend_context_seconds" type="number" min="0.5" max="20" step="0.5" value="3"></label>
           </div>
         </section>
+        <section id="refineEditor" class="conditions" hidden>
+          <label class="file-field drop-zone" id="refineSource"><b>入力画像</b><span class="drop-copy">ここへ画像をドロップ、またはクリックして選択</span><input type="file" accept="image/jpeg,image/png,image/webp"><small class="file-name">JPG / PNG / WebP</small><span class="drop-preview" hidden><img alt="選択した参照画像"></span></label>
+          <label>反映強度（strength）<input name="refine_strength" id="refineStrength" type="range" min="0.1" max="1" step="0.05" value="1"><small id="refineStrengthValue">1.00 · 入力画像を強く保持</small></label>
+        </section>
+        <section id="ref2iOptions" class="conditions" hidden>
+          <div class="grid">
+            <label>内部フレーム数<select name="ref2i_frames"><option value="25">25（速い・変化小）</option><option value="41">41</option><option value="49" selected>49（既定・変化大）</option></select><small>参照から離れるほど大きいフレーム数が有効</small></label>
+            <label>取り出しフレーム<select name="ref2i_frame_position"><option value="last" selected>末尾（既定）</option><option value="center">中央</option></select></label>
+          </div>
+        </section>
         <section id="audioVideoEditor" class="conditions" hidden>
           <label class="file-field drop-zone" id="audioSource"><b>入力音声</b><span class="drop-copy">ここへ音声をドロップ、またはクリックして選択</span><input type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,audio/aac,.m4a"><small class="file-name">WAV / MP3 / M4A / FLAC / OGG / AAC</small></label>
           <label class="file-field drop-zone" id="audioFirstFrame"><b>先頭画像（任意）</b><span class="drop-copy">映像の外観を固定する場合に選択</span><input type="file" accept="image/jpeg,image/png,image/webp"><small class="file-name">JPG / PNG / WebP</small></label>
@@ -76,7 +89,7 @@
         <section class="setting-group">
           <div class="setting-title"><span>RENDER</span><b>レンダリング</b></div>
         <div class="grid">
-          <label>基準解像度<select name="size" id="size"><option value="768x512">横 768 × 512</option><option value="768x448">IC-LoRA推奨 768 × 448</option><option value="512x768">縦 512 × 768</option><option value="512x512">正方形 512 × 512</option></select></label>
+          <label>基準解像度<select name="size" id="size"><optgroup label="横長"><option value="768x512">横 768 × 512（標準）</option><option value="768x448">横 768 × 448（IC-LoRA推奨）</option><option value="960x544">横 960 × 544（540p / 2倍で1080p）</option><option value="1280x704">横 1280 × 704（720p・直接生成）</option><option value="1920x1088">横 1920 × 1088（1080p・直接生成）</option></optgroup><optgroup label="縦長"><option value="512x768">縦 512 × 768（標準）</option><option value="448x768">縦 448 × 768（IC-LoRA向け）</option><option value="544x960">縦 544 × 960（540p / 2倍で1080p）</option><option value="704x1280">縦 704 × 1280（720p・直接生成）</option><option value="1088x1920">縦 1088 × 1920（1080p・直接生成）</option></optgroup><optgroup label="正方形"><option value="512x512">正方形 512 × 512</option></optgroup></select></label>
           <label>デコーダー<select name="decoder" id="decoder"><option value="diffusion">Diffusion（高精細）</option><option value="vae">VAE（高速）</option></select></label>
           <label id="frameField">フレーム数<input name="num_frames" type="number" min="9" max="481" step="8" value="121"><small id="durationEstimate">約5.0秒</small></label>
           <label id="secondsField">動画尺（秒）<input name="duration_seconds" type="number" min="0.33" max="20" step="any" value="5.0"><small id="secondsHelp">8n+1フレームへ自動調整</small></label>
@@ -86,25 +99,28 @@
         <label class="render-toggle"><input name="auto_duration" id="autoDuration" type="checkbox"><span><b>動画の長さを自動決定</b><small>プロンプトの動作に合わせてduration headが決定</small></span></label>
         <div id="durationRange" class="duration-range" hidden><label>最短（秒）<input name="min_seconds" type="number" min="1" max="19" step="0.5" value="1"></label><label>最長（秒）<input name="max_seconds" type="number" min="2" max="20" step="0.5" value="8"></label></div>
         <label class="render-toggle"><input name="upscale" id="upscale" type="checkbox" checked><span><b>2倍高解像度化</b><small>Latent Upscale ＋ 3-step Refine</small></span></label>
+        <label id="upscaleMethodField">高解像度化方式<select name="upscale_method" id="upscaleMethod"><option value="latent">Latent Upscale（高速・忠実）</option><option value="pixel">Pixel IC-LoRA（細部を生成）</option></select><small>Pixel IC-LoRAは低解像度の初段映像を参照して2倍で再生成します</small></label>
         <label class="render-toggle"><input name="temporal_upscale" id="temporalUpscale" type="checkbox"><span><b>2倍フレームレート化</b><small>Temporal Latent Upscale ＋ 3-step Refine（尺は維持）</small></span></label>
         <p id="renderHelp" class="hint">基準768 × 512 → 最終1536 × 1024</p>
         </section>
       </form>
       <aside class="right-column">
-        <section class="preview panel">
+        <div class="right-primary">
+          <section class="preview panel">
           <div id="empty"><div class="orb"></div><h2>生成結果</h2><p>設定を選び、生成を開始してください。</p></div>
           <div id="working" hidden><div class="spinner"></div><h2 id="state">準備中</h2><div class="bar"><i id="bar"></i></div><p id="percent">0%</p></div>
-          <div id="result" hidden><video id="video" controls playsinline></video><a id="download" download>MP4をダウンロード</a></div>
+          <div id="result" hidden><video id="video" controls playsinline></video><img id="resultImage" alt="生成画像" hidden><a id="download" download>MP4をダウンロード</a><button type="button" id="useAsFirstFrame" class="secondary" hidden>この画像を I2V/FLF2V の先頭画像に使う</button></div>
           <div id="error" hidden><h2>生成に失敗しました</h2><pre id="errorText"></pre></div>
-        </section>
-        <button id="submit" type="submit" form="form">生成する <span>→</span></button>
-        <section class="generation-summary panel"><div class="setting-title"><span>SETTINGS</span><b>生成条件</b></div><dl id="conditionSummary"></dl></section>
+          </section>
+          <button id="submit" type="submit" form="form">生成する <span>→</span></button>
+          <details class="generation-summary panel" open><summary class="setting-title"><span>SETTINGS</span><b>生成条件</b><i class="accordion-chevron" aria-hidden="true">⌄</i></summary><dl id="conditionSummary"></dl></details>
+        </div>
+        <section class="history panel"><div class="section-head"><div><span class="eyebrow">HISTORY</span><h2>このセッションの生成履歴</h2></div><div class="history-actions"><span id="historySelection">0件選択</span><button type="button" id="concatHistory" class="secondary" disabled>選択順に結合</button><button type="button" id="deleteHistory" class="secondary danger" disabled>選択削除</button><button type="button" id="refreshHistory" class="secondary">更新</button></div></div><div id="historyList" class="history-list"><p class="hint">履歴を読み込み中…</p></div></section>
       </aside>
     </section>
-    <section class="history panel"><div class="section-head"><div><span class="eyebrow">HISTORY</span><h2>このセッションの生成履歴</h2></div><div class="history-actions"><span id="historySelection">0件選択</span><button type="button" id="concatHistory" class="secondary" disabled>選択順に結合</button><button type="button" id="deleteHistory" class="secondary danger" disabled>選択削除</button><button type="button" id="refreshHistory" class="secondary">更新</button></div></div><div id="historyList" class="history-list"><p class="hint">履歴を読み込み中…</p></div></section>
   </main>
   <dialog id="videoModal" class="video-modal"><button type="button" id="closeVideoModal" class="modal-close" aria-label="閉じる">×</button><video id="modalVideo" controls playsinline></video><div class="modal-actions"><a id="modalDownload" download>MP4をダウンロード</a></div></dialog>
-  <script src="/static/i18n.js?v=20260819-1"></script>
-  <script src="/static/app.js?v=20260819-14"></script>
+  <script src="/static/i18n.js?v=20260820-1"></script>
+  <script src="/static/app.js?v=20260820-3"></script>
 </body>
 </html>

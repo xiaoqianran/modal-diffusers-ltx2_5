@@ -12,7 +12,32 @@ from typing import Callable
 
 from .config import Settings
 from .encoding import encode_video_crf
-from .schemas import GenerateRequest
+from .schemas import STILL_IMAGE_MODES, GenerateRequest
+
+
+PIXEL_UPSCALER_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
+
+# fp8 layerwise-casting skip list, verified by module enumeration against
+# Lightricks/LTX-2.5-Diffusers subfolder=transformer at the pinned revision
+# (faithful copy of scratch_fp8_probe/fp8_common.py::FP8_SKIP_MODULES_PATTERN;
+# protects embeddings / patchify / AdaLN / scale-shift / gate projections and
+# casts only the big attention/FF Linear layers inside transformer_blocks).
+FP8_SKIP_MODULES_PATTERN = (
+    "norm",
+    "^proj_in$",
+    "^proj_out$",
+    "^audio_proj_in$",
+    "^audio_proj_out$",
+    "time_embed",
+    "audio_time_embed",
+    "av_cross_attn_video_scale_shift",
+    "av_cross_attn_audio_scale_shift",
+    "av_cross_attn_video_a2v_gate",
+    "av_cross_attn_audio_v2a_gate",
+    "prompt_adaln",
+    "audio_prompt_adaln",
+    "to_gate_logits",  # small per-block gate projections, keep precise
+)
 
 
 def _patch_flex_for_real_kernels() -> None:
@@ -128,6 +153,38 @@ class LTXGenerator:
                     subfolder="transformer",
                     revision=self.config.model_revision,
                     torch_dtype=torch.bfloat16,
+                )
+            elif self.config.ltx25_transformer_precision == "fp8":
+                # Verified recipe from scratch_fp8_probe/ (F1-F5): load the bf16 Hub
+                # shards on CPU, then apply diffusers layerwise casting
+                # (storage=fp8_e4m3fn / compute=bf16) *while still on CPU*. Casting
+                # on GPU instead needs a transient ~43GB bf16-on-GPU peak that OOMs
+                # a real 48GB card (probe F4b established the CPU-cast path as the
+                # 48GB-class recipe). Afterwards the module joins the normal
+                # offload_mode handling below (model_cpu_offload verified: F2/F4).
+                from diffusers.hooks import apply_layerwise_casting
+
+                fp8_t0 = time.time()
+                transformer = LTX2VideoTransformer3DModel.from_pretrained(
+                    self.config.model_id,
+                    subfolder="transformer",
+                    revision=self.config.model_revision,
+                    torch_dtype=torch.bfloat16,
+                )
+                apply_layerwise_casting(
+                    transformer,
+                    storage_dtype=torch.float8_e4m3fn,
+                    compute_dtype=torch.bfloat16,
+                    skip_modules_pattern=FP8_SKIP_MODULES_PATTERN,
+                    non_blocking=False,
+                )
+                resident_gb = sum(
+                    p.numel() * p.element_size() for p in transformer.parameters()
+                ) / 1024**3
+                print(
+                    f"[ltx25] transformer precision=fp8 (layerwise cast applied on CPU "
+                    f"in {time.time() - fp8_t0:.1f}s, resident weights {resident_gb:.1f}GB)",
+                    flush=True,
                 )
             else:
                 transformer = LTX2VideoTransformer3DModel.from_pretrained(
@@ -316,6 +373,25 @@ class LTXGenerator:
             samples = np.pad(samples, ((0, 0), (0, wanted - samples.shape[1])))
         return samples[:, :wanted]
 
+    def _cast_lora_layers_to_bf16(self, pipe) -> None:
+        """fp8 LoRA compatibility workaround (verified probe F5): lora_A/lora_B
+        Linear layers created by load_lora_weights() *after* layerwise casting are
+        materialized at the base layer's current storage dtype (fp8_e4m3fn), and the
+        forward pass then fails with NotImplementedError '"addmm_cuda" not
+        implemented for Float8_e4m3fn'. Cast the (tiny) LoRA modules back to bf16.
+        No-op for nf4/bf16 precisions."""
+        if self.config.ltx25_transformer_precision != "fp8":
+            return
+        import torch
+
+        n_cast = 0
+        for name, module in pipe.transformer.named_modules():
+            if "lora_A" in name or "lora_B" in name:
+                module.to(torch.bfloat16)
+                n_cast += 1
+        if n_cast:
+            print(f"[ltx25] fp8 LoRA compat: cast {n_cast} lora_A/lora_B modules to bf16", flush=True)
+
     def generate(self, request: GenerateRequest, target: Path, progress: Callable[[float], None]) -> dict[str, float]:
         pipe = self.load()
         adapter_names = []
@@ -333,13 +409,206 @@ class LTXGenerator:
                 adapter_names.append(adapter_name)
             if adapter_names:
                 pipe.set_adapters(adapter_names, adapter_weights=[item.strength for item in request.loras])
+                self._cast_lora_layers_to_bf16(pipe)
+            if request.mode in STILL_IMAGE_MODES:
+                return self._generate_still_impl(request, target, progress)
             return self._generate_impl(request, target, progress)
         finally:
-            if request.loras:
+            if request.loras or request.upscale_method == "pixel":
                 try:
                     pipe.unload_lora_weights()
                 except Exception as exc:
                     print(f"[ltx25] LoRA cleanup failed: {exc}", flush=True)
+
+    def _generate_still_impl(
+        self, request: GenerateRequest, target: Path, progress: Callable[[float], None]
+    ) -> dict[str, float]:
+        """Still-image modes (t2i / refine_image / ref2i), kept independent from the
+        video path. Recipes are faithful ports of the verified probes under
+        scratch_t2i_probe/ (P3 for t2i, P4_nf17 for t2i+diffusion decoder, P6/P6b for
+        refine_image, P7a/P7b for ref2i)."""
+        import numpy as np
+        import torch
+        from PIL import Image
+        from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
+        from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES, STAGE_2_DISTILLED_SIGMA_VALUES
+        from diffusers.utils import load_image
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        pipe = self.load()
+        generator = torch.Generator(device="cpu").manual_seed(request.seed)
+
+        image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
+        input_dir = self.config.input_dir.resolve()
+        conditions = []
+        for condition in request.conditions:
+            matches = list(input_dir.glob(f"{condition.asset_id}.*"))
+            if len(matches) != 1:
+                raise ValueError(f"Input asset not found: {condition.asset_id}")
+            source = matches[0]
+            if condition.kind != "image" or source.suffix.lower() not in image_suffixes:
+                raise ValueError(f"Still-image modes accept image assets only: {condition.asset_id}")
+            strength = request.strength if request.mode == "refine_image" else condition.strength
+            conditions.append(
+                LTX2VideoCondition(frames=load_image(str(source)), index=condition.index, strength=strength)
+            )
+
+        # t2i (no image conditioning) follows the configured default decoder — the
+        # diffusion decoder is dramatically sharper for pure text-to-still (probe P4).
+        # Image-conditioned stills stay on VAE (diffusion decoder blurs them, probe P8).
+        if request.mode == "t2i":
+            decoder_kind = request.decoder or self.config.ltx25_decoder
+        else:
+            decoder_kind = request.decoder or "vae"
+        if request.mode in {"refine_image", "ref2i"} and decoder_kind == "diffusion":
+            # Probe result: image-conditioned latents through the diffusion decoder blur.
+            print(
+                f"[ltx25] {request.mode}: diffusion decoder is not supported for "
+                "image-conditioned still output (probe: blurred results); falling back to the VAE decoder",
+                flush=True,
+            )
+            decoder_kind = "vae"
+
+        # Sharpness A/B (Q5): for pure text-to-still, a clarity suffix measurably
+        # improves fine detail at zero cost. Image-conditioned stills keep the
+        # user's prompt untouched (untested there; fidelity to the input matters more).
+        still_prompt = request.prompt
+        still_negative = request.negative_prompt
+        if request.mode == "t2i":
+            still_prompt = f"{still_prompt.rstrip()} sharp focus, crisp fine detail, high clarity, minimal haze."
+            extra_neg = "soft focus, hazy, bloom"
+            still_negative = f"{still_negative}, {extra_neg}" if still_negative else extra_neg
+
+        def progress_callback(offset: float, span: float, step_count: int):
+            def on_step(_pipe, step: int, _timestep, callback_kwargs):
+                progress(min(offset + ((step + 1) / step_count) * span, 0.96))
+                return callback_kwargs
+
+            return on_step
+
+        if request.mode == "ref2i":
+            # Probe P7a/P7b: single-stage base 30-step schedule, tiled VAE decode.
+            with torch.no_grad():
+                video_np, _audio = pipe(
+                    prompt=still_prompt,
+                    negative_prompt=still_negative,
+                    conditions=conditions,
+                    width=request.width,
+                    height=request.height,
+                    num_frames=request.num_frames,
+                    frame_rate=request.fps,
+                    num_inference_steps=request.steps,
+                    guidance_scale=request.guidance_scale,
+                    stg_scale=1.0,
+                    modality_scale=3.0,
+                    audio_guidance_scale=7.0,
+                    audio_stg_scale=1.0,
+                    audio_modality_scale=3.0,
+                    enable_prompt_enhancement=request.enhance_prompt,
+                    generator=generator,
+                    output_type="np",
+                    return_dict=False,
+                    callback_on_step_end=progress_callback(0.0, 0.9, request.steps),
+                )
+            frames = video_np[0]
+            frame_index = frames.shape[0] - 1 if request.frame_position == "last" else frames.shape[0] // 2
+        else:
+            # t2i / refine_image: distilled two-stage
+            # (8 sigmas -> 2x latent upsample -> 3-sigma refine), probes P3 / P6.
+            num_frames = request.num_frames or 9
+            use_diffusion_decoder = request.mode == "t2i" and decoder_kind == "diffusion"
+            if use_diffusion_decoder and num_frames < 17:
+                # NATTEN na3d needs >= its (11,11,11) kernel per tile: nf=9 fails, nf=17 works
+                # (probes P4 vs P4_nf17). Promote internally.
+                print(
+                    f"[ltx25] t2i: diffusion decoder requires num_frames>=17 "
+                    f"(NATTEN kernel size); promoting num_frames {num_frames} -> 17",
+                    flush=True,
+                )
+                num_frames = 17
+            with torch.no_grad():
+                video, audio = pipe(
+                    prompt=still_prompt,
+                    negative_prompt=still_negative,
+                    conditions=conditions or None,
+                    width=request.width,
+                    height=request.height,
+                    num_frames=num_frames,
+                    frame_rate=request.fps,
+                    sigmas=DISTILLED_SIGMA_VALUES,
+                    guidance_scale=1.0,
+                    audio_guidance_scale=1.0,
+                    stg_scale=0.0,
+                    audio_stg_scale=0.0,
+                    modality_scale=1.0,
+                    audio_modality_scale=1.0,
+                    enable_prompt_enhancement=request.enhance_prompt,
+                    generator=generator,
+                    output_type="latent",
+                    return_dict=False,
+                    callback_on_step_end=progress_callback(0.0, 0.45, len(DISTILLED_SIGMA_VALUES)),
+                )
+                progress(0.5)
+                video = self._upsample_pipe(
+                    latents=video,
+                    height=request.height,
+                    width=request.width,
+                    num_frames=num_frames,
+                    output_type="latent",
+                    return_dict=False,
+                )[0]
+                video, audio = pipe(
+                    prompt=still_prompt,
+                    negative_prompt=still_negative,
+                    latents=video,
+                    audio_latents=audio,
+                    width=request.width * 2,
+                    height=request.height * 2,
+                    num_frames=num_frames,
+                    frame_rate=request.fps,
+                    sigmas=STAGE_2_DISTILLED_SIGMA_VALUES,
+                    noise_scale=STAGE_2_DISTILLED_SIGMA_VALUES[0],
+                    guidance_scale=1.0,
+                    audio_guidance_scale=1.0,
+                    stg_scale=0.0,
+                    audio_stg_scale=0.0,
+                    modality_scale=1.0,
+                    audio_modality_scale=1.0,
+                    generator=generator,
+                    output_type="latent" if use_diffusion_decoder else "np",
+                    return_dict=False,
+                    callback_on_step_end=progress_callback(
+                        0.52, 0.3, len(STAGE_2_DISTILLED_SIGMA_VALUES)
+                    ),
+                )
+                if use_diffusion_decoder:
+                    progress(0.85)
+                    decode_pipe = self.load_diffusion_decoder()
+                    decode_generator = torch.Generator(device="cpu").manual_seed(request.seed)
+                    video = decode_pipe(
+                        latents=video.to("cuda"),
+                        generator=decode_generator,
+                        output_type="np",
+                        return_dict=False,
+                        denormalize=False,  # latent-path outputs are already denormalized
+                    )[0]
+            frames = video[0]
+            frame_index = frames.shape[0] // 2
+
+        frame = (np.clip(frames[frame_index], 0, 1) * 255).round().astype("uint8")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(frame).save(target)
+        print(
+            f"[ltx25] {request.mode}: saved frame {frame_index}/{frames.shape[0]} "
+            f"({frame.shape[1]}x{frame.shape[0]}) -> {target.name}",
+            flush=True,
+        )
+        progress(1.0)
+        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        gc.collect()
+        torch.cuda.empty_cache()
+        return {"peak_vram_gb": peak_vram_gb}
 
     def _generate_impl(self, request: GenerateRequest, target: Path, progress: Callable[[float], None]) -> dict[str, float]:
         import torch
@@ -628,6 +897,7 @@ class LTXGenerator:
             # Auto-duration returns unpacked video latents [B, C, latent_F, H, W].
             generated_num_frames = (video.shape[2] - 1) * pipe.vae_temporal_compression_ratio + 1
         if use_refine:
+            pixel_reference_latents = video.detach().clone() if request.upscale_method == "pixel" else None
             progress(0.58)
             if request.upscale:
                 video = self._upsample_pipe(
@@ -655,6 +925,71 @@ class LTXGenerator:
                 generated_num_frames = (generated_num_frames - 1) * 2 + 1
             progress(0.64)
             stage2_span = 0.14 if use_diffusion_decoder else 0.32
+            restore_stage2_prepare = None
+            if request.upscale_method == "pixel":
+                pixel_lora = (
+                    self.config.quantized_model_dir.resolve()
+                    / "pixel_spatial_upscaler"
+                    / PIXEL_UPSCALER_FILENAME
+                )
+                if not pixel_lora.is_file():
+                    raise RuntimeError(
+                        "Pixel Spatial Upscaler IC-LoRA is missing. Run "
+                        "scripts/download_quantize_ltx25.py --component pixel_upscaler first."
+                    )
+                try:
+                    pipe.load_lora_weights(pixel_lora, adapter_name="pixel_spatial_upscaler")
+                    names = [f"job_lora_{index}" for index in range(len(request.loras))]
+                    pipe.set_adapters(
+                        [*names, "pixel_spatial_upscaler"],
+                        adapter_weights=[*[item.strength for item in request.loras], 1.0],
+                    )
+                    self._cast_lora_layers_to_bf16(pipe)
+                except Exception as exc:
+                    raise RuntimeError(f"Pixel Spatial Upscaler IC-LoRA could not be loaded: {exc}") from exc
+
+                # Diffusers does not yet expose VideoConditionByReferenceLatent. Append the
+                # clean half-resolution Stage-1 latent exactly as the official LTX DFR
+                # pipeline does, and scale its spatial RoPE coordinates into the target grid.
+                original_prepare_latents = pipe.prepare_latents
+
+                def prepare_pixel_reference(this, *args, **kwargs):
+                    latents, mask, clean, coords = original_prepare_latents(*args, **kwargs)
+                    reference = this._normalize_latents(
+                        pixel_reference_latents,
+                        this.vae.latents_mean,
+                        this.vae.latents_std,
+                        this.vae.config.scaling_factor,
+                    ).to(device=latents.device, dtype=latents.dtype)
+                    reference_tokens = this._pack_latents(
+                        reference,
+                        this.transformer_spatial_patch_size,
+                        this.transformer_temporal_patch_size,
+                    ).expand(latents.shape[0], -1, -1)
+                    reference_mask = torch.ones(
+                        (*reference_tokens.shape[:2], 1), device=latents.device, dtype=mask.dtype
+                    )
+                    reference_coords = this.transformer.rope.prepare_video_coords(
+                        latents.shape[0],
+                        reference.shape[2],
+                        reference.shape[3],
+                        reference.shape[4],
+                        latents.device,
+                        fps=final_fps,
+                    )
+                    reference_coords[:, 1:, :, :] *= 2
+                    combined_coords = (
+                        reference_coords if coords is None else torch.cat([coords, reference_coords], dim=2)
+                    )
+                    return (
+                        torch.cat([latents, torch.zeros_like(reference_tokens)], dim=1),
+                        torch.cat([mask, reference_mask], dim=1),
+                        torch.cat([clean, reference_tokens], dim=1),
+                        combined_coords,
+                    )
+
+                restore_stage2_prepare = original_prepare_latents
+                pipe.prepare_latents = types.MethodType(prepare_pixel_reference, pipe)
             try:
                 video, audio = pipe(
                     prompt=request.prompt,
@@ -687,6 +1022,9 @@ class LTXGenerator:
                     pipe.prepare_audio_latents = restore_audio_prepare
                     pipe.audio_scheduler = previous_audio_scheduler
                 raise
+            finally:
+                if restore_stage2_prepare is not None:
+                    pipe.prepare_latents = restore_stage2_prepare
         if restore_audio_prepare is not None:
             pipe.prepare_audio_latents = restore_audio_prepare
             pipe.audio_scheduler = previous_audio_scheduler

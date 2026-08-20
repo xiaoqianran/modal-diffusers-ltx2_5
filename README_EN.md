@@ -19,7 +19,7 @@ The model has approximately 19 billion parameters and requires substantial stora
 
 ## Sequential download and NF4 quantization
 
-Run the provided script first. It avoids retaining multiple large components at once. Each component is downloaded into a dedicated cache, and that cache is removed only after the saved NF4 component has passed a reload test. An interrupted download can be resumed with the same command.
+Run the provided script first. It avoids retaining multiple large components at once. Each component is downloaded into a dedicated cache, and that cache is removed only after the saved NF4 component or additional checkpoint has passed a reload test. An interrupted download can be resumed with the same command. Accept the terms for both the main LTX-2.5 model and the [Pixel Spatial Upscaler IC-LoRA](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler) before starting.
 
 ```bash
 docker build -t ltx25-server .
@@ -30,7 +30,7 @@ docker run --rm --gpus 'device=0' \
   python scripts/download_quantize_ltx25.py
 ```
 
-By default, the script stops if less than 80 GiB is available when processing begins. It downloads the latent upsampler required for high-quality generation, but it does not download `transformer_full`, LoRAs, or the diffusion decoder.
+By default, the script stops if less than 80 GiB is available when processing begins. It downloads the latent upsamplers and official Pixel Spatial Upscaler IC-LoRA, but not `transformer_full`, arbitrary user LoRAs, or the diffusion decoder. To add only the Pixel IC-LoRA to an existing installation, run `python scripts/download_quantize_ltx25.py --component pixel_upscaler`.
 
 ## Run with Docker
 
@@ -61,14 +61,41 @@ The API specification is available at <http://localhost:8000/docs>.
 - `i2v`: one first-frame image to video with audio
 - `flf2v`: interpolation with both the first and last images fixed
 - `condition`: up to eight images or videos at arbitrary latent-frame positions and strengths
+- `t2i`: one still image from a prompt (distilled two-stage → 2x-resolution PNG)
+- `refine_image`: a 2x reinterpretation / variation still of an input image
+- `ref2i`: a new-scene still that preserves the referenced identity
 
-The web UI separates generation mode from rendering options. **2× resolution upscale** is available for T2AV, I2V, FLF2V, and Reference conditions. It produces 1536×1024 from a 768×512 base, or 1024×1536 from a 512×768 portrait base. This path combines 2× latent upscaling with a 3-step refinement pass. When disabled, generation uses a single 8-step pass. Selecting the first image in I2V or FLF2V automatically adjusts the base aspect ratio. The API field `quality=high/draft` remains for backward compatibility; new clients should use `upscale=true/false`.
+The web UI separates generation mode from rendering options. Landscape presets are 768×512, 768×448, 960×544, 1280×704, and 1920×1088; portrait presets transpose these dimensions to 512×768, 448×768, 544×960, 704×1280, and 1088×1920; 512×512 is also available. **2× resolution upscale** is available for T2AV, I2V, FLF2V, and Reference conditions up to a 960×544 base (544×960 portrait), producing 1920×1088 (1088×1920 portrait). Choose `Latent Upscale` for the existing 2× latent interpolation plus 3-step refinement path, or `Pixel IC-LoRA` to append the low-resolution first-stage video as reference latents and generatively synthesize detail with the official IC-LoRA. Pixel mode preserves composition, motion, and subjects but is not a pixel-faithful scaler because it invents high-frequency detail. Set `upscale_method=latent` or `pixel` through the API. The 1280×704 and larger presets are direct-generation-only because of their substantially higher VRAM requirements; selecting one disables spatial upscaling. When upscaling is disabled, generation uses a single 8-step pass. Selecting the first image in I2V or FLF2V automatically chooses a standard base orientation. The API field `quality=high/draft` remains for backward compatibility; new clients should use `upscale=true/false`.
 
 **2× frame-rate upscale** can be enabled independently. Temporal Latent Upscale plus 3-step refinement converts 121 frames at 24 fps into 241 frames at 48 fps while preserving the video and audio duration. Set `temporal_upscale=true` through the API. When both spatial and temporal upscaling are enabled, refinement still runs only once. On an existing installation, run `scripts/download_quantize_ltx25.py --component temporal` once to download the required component.
 
 **Retake** regenerates only a selected time range in the source video at the latent level. The source resolution and frame rate are detected automatically, and video/audio outside the selected range are preserved. You can regenerate video, audio, or both. Source videos must contain `8n+1` frames and have dimensions divisible by 32.
 
 **Extend** adds 1–20 seconds of new video and audio to the beginning or end of a source video. The reference range is fixed as a clean-latent prefix or suffix, preserving subject, motion, and composition at the boundary. The source resolution and frame rate are adopted automatically, and reference/extension ranges are aligned to eight-frame intervals. A single generation can contain at most 481 reference-plus-extension frames.
+
+### Still-image modes (t2i / refine_image / ref2i)
+
+Three modes reuse the video pipeline to produce still PNGs (recipes follow the verified probes under `scratch_t2i_probe/`). Outputs are saved as `outputs/t2i_*.png` / `refine_*.png` / `ref2i_*.png` and recorded in the history DB as `image_url` (no MP4 is written). LoRA blending, seeds, progress, and the job queue work exactly as in the video modes.
+
+- **`t2i`**: fixed `num_frames=9`, distilled two-stage (8 sigmas → 2x latent upsample → 3-sigma refine), VAE decode; the center frame is saved at twice the base resolution (default 512² → 1024²). When `decoder: "diffusion"` is requested, `num_frames` is internally promoted to 17 (logged) to satisfy the NATTEN kernel-size constraint (11×11×11 > 9 frames), and the diffusion decoder is used.
+- **`refine_image`**: conditions the same two-stage recipe on an input image (registered via `/api/assets`, passed as `conditions` with `index: 0`). `strength` (0.1–1.0, default 1.0) controls how strongly the reference is preserved. Decoding is always VAE. At strength 1.0 the measured mean abs diff vs. the input is ~0.099 (matches probe P6).
+- **`ref2i`**: one or more reference images (reusing the `conditions` schema with per-image latent index/strength) plus a new-scene prompt, run single-stage on the base 30-step schedule (guidance 3.0); the `frame_position: "last"` (default) or `"center"` frame is extracted. `num_frames` is selectable from 25/41/49 (default 49; larger values help when moving far from the reference). Decoding is always VAE — requesting `decoder: "diffusion"` falls back to VAE with a warning (image-conditioned diffusion decoding blurs, per the probes).
+
+```bash
+# t2i (default: 512² base → 1024² PNG)
+curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+  -d '{"mode":"t2i","prompt":"A photorealistic portrait, golden hour light","width":512,"height":512,"seed":42}'
+
+# refine_image (2x reinterpretation of an input image)
+curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+  -d "{\"mode\":\"refine_image\",\"prompt\":\"...\",\"width\":512,\"height\":512,\"strength\":1.0,\"conditions\":[{\"asset_id\":\"$ASSET_ID\",\"kind\":\"image\",\"index\":0}]}"
+
+# ref2i (reference → new-scene still, last frame extracted)
+curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+  -d "{\"mode\":\"ref2i\",\"prompt\":\"The same woman, new scene...\",\"width\":512,\"height\":512,\"num_frames\":49,\"frame_position\":\"last\",\"conditions\":[{\"asset_id\":\"$ASSET_ID\",\"kind\":\"image\",\"index\":0,\"strength\":1.0}]}"
+```
+
+Measured (RTX PRO 6000 Blackwell 96GB, `OFFLOAD_MODE=model`, 512² base, seed=42): t2i 46.5 s including the first model load (the generation itself takes ~6–8 s once loaded) with 17.9 GB peak VRAM; t2i + diffusion decoder ~30 s warm; refine_image 30.0 s warm; ref2i at nf=49 45.5 s warm (~34 s denoise). In the web UI the three modes appear in the mode selector, results render as PNG tiles in the gallery (downloadable), and a "use this image as the I2V/FLF2V first frame" button drops a generated PNG straight into the I2V first-image field.
 
 **Audio → Video** encodes WAV, MP3, M4A, FLAC, OGG, or AAC through the Audio VAE and generates only the video modality while keeping the audio latent fixed. You can select an audio start point and up to 20 seconds of audio, with an optional first-frame image. The original input waveform, rather than VAE-reconstructed audio, is used in the output.
 
@@ -120,7 +147,7 @@ Use the returned `id` with `GET /api/jobs/{id}`. Once the job reaches `completed
 - `MAX_UPLOAD_SIZE_MB`: maximum size per uploaded file; default 500 MB
 - `LTX25_DECODER`: decoder after 2× latent upscale. `diffusion` uses the high-quality diffusion decoder and adds about 18 seconds with NATTEN; `vae` uses the faster convolutional VAE. The request-level `decoder` field overrides this setting. Jobs without 2× upscaling always use VAE decoding.
 - `LTX25_VIDEO_CRF`: libx264 CRF for output MP4 files; default 18. Applied to every path and decoder. This uses a higher bitrate than the former effective default of approximately CRF 23, reducing compression-related detail loss.
-- `LTX25_TRANSFORMER_PRECISION`: `nf4` for the default bitsandbytes 4-bit transformer, or `bf16` for the approximately 38 GB release weights. `bf16` is intended for 96 GB-class GPUs; keep `nf4` on 24 GB-class GPUs. The text encoder remains NF4 in both modes.
+- `LTX25_TRANSFORMER_PRECISION`: `nf4` for the default bitsandbytes 4-bit transformer, `fp8` for the bf16 release weights compressed in place with layerwise casting (fp8_e4m3fn storage / bf16 compute), or `bf16` for the approximately 38 GB release weights. `fp8` matches bf16 quality while keeping measured peak VRAM at 26.5 GB for stills and 28.9 GB for 121-frame video, making it the recommended mode for 48 GB-class GPUs (the cast is applied on the CPU, so there is no transient ~38 GB GPU-side peak; requires the ~38 GB bf16 transformer shards in the HF cache). `bf16` is intended for 96 GB-class GPUs; keep `nf4` on 24 GB-class GPUs. The text encoder remains NF4 in every mode.
 
 ## Measured quality and performance
 

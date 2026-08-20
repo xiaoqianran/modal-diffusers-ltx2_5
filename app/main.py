@@ -167,6 +167,9 @@ def enhance_prompt(request: PromptEnhanceRequest):
         "retake": "Describe only the replacement action and sound for the selected time region; preserve continuity with the source video.",
         "extend": "Describe only what happens in the newly extended portion, continuing motion, identity, scene, and sound seamlessly.",
         "a2v": "Describe visuals that synchronize precisely with the supplied fixed audio; do not invent replacement dialogue or sound.",
+        "t2i": "Describe a single still image: composition, subject, lighting, texture, and mood. No motion or audio.",
+        "refine_image": "Describe the supplied reference image faithfully so it can be re-rendered at higher fidelity; preserve identity, composition, and wardrobe.",
+        "ref2i": "Keep the referenced character identity, wardrobe, and style while describing a new scene, pose, or lighting for one still image.",
     }
     shot_text = "\n".join(f"Shot {i + 1}: {shot}" for i, shot in enumerate(request.shots) if shot.strip())
     user_text = request.prompt + (f"\n\nRequested shot plan:\n{shot_text}" if shot_text else "")

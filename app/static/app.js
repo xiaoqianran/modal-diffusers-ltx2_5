@@ -3,6 +3,7 @@ const tr = (ja, en) => window.LTX_I18N?.language === 'en' ? en : ja;
 const submit = document.querySelector('#submit');
 const mode = document.querySelector('#mode');
 const upscale = document.querySelector('#upscale');
+const upscaleMethod = document.querySelector('#upscaleMethod');
 const temporalUpscale = document.querySelector('#temporalUpscale');
 const decoder = document.querySelector('#decoder');
 const size = document.querySelector('#size');
@@ -12,6 +13,9 @@ const icLoraEditor = document.querySelector('#icLoraEditor');
 const retakeEditor = document.querySelector('#retakeEditor');
 const extendEditor = document.querySelector('#extendEditor');
 const audioVideoEditor = document.querySelector('#audioVideoEditor');
+const refineEditor = document.querySelector('#refineEditor');
+const ref2iOptions = document.querySelector('#ref2iOptions');
+const STILL_MODES = ['t2i', 'refine_image', 'ref2i'];
 const rows = document.querySelector('#conditionRows');
 const promptInput = document.querySelector('#prompt');
 const multishot = document.querySelector('#multishot');
@@ -32,6 +36,9 @@ const modeHelp = {
   retake: '元動画の指定時間範囲だけを再生成し、範囲外を維持します。',
   extend: '元動画の動きと音を参照し、先頭または末尾へ新しい区間を追加します。',
   a2v: '入力音声を固定し、発話・音楽・効果音のタイミングに同期する映像を生成します。',
+  t2i: 'プロンプトから静止画を1枚生成します（蒸留2段生成 → 2倍解像度PNG）。',
+  refine_image: '入力画像をLTX-2.5のスタイルで2倍解像度に再解釈した静止画を生成します。',
+  ref2i: '参照画像のキャラクター・スタイルを保ったまま、新しい場面の静止画を生成します。',
 };
 
 function show(id) {
@@ -39,6 +46,25 @@ function show(id) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function responseError(response) {
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    return response.statusText || `HTTP ${response.status}`;
+  }
+  const detail = payload?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((item) => {
+      const field = Array.isArray(item?.loc) ? item.loc.filter((part) => part !== 'body').join('.') : '';
+      return [field, item?.msg].filter(Boolean).join(': ');
+    }).filter(Boolean).join('\n') || response.statusText;
+  }
+  if (detail && typeof detail === 'object') return detail.message || JSON.stringify(detail);
+  return response.statusText || `HTTP ${response.status}`;
+}
 
 async function ensureSession() {
   const stored = sessionStorage.getItem('ltx25SessionNumber');
@@ -182,8 +208,9 @@ function updateConditionSummary() {
   const referenceCount = mode.value === 'a2v'
     ? (document.querySelector('#audioFirstFrame input[type="file"]')?.files.length || 0)
     : mode.value === 'iclora' ? (document.querySelector('#icLoraReference input[type="file"]')?.files.length || 0)
-    : ['retake', 'extend'].includes(mode.value) ? 1 : mode.value === 'condition'
+    : ['retake', 'extend'].includes(mode.value) ? 1 : ['condition', 'ref2i'].includes(mode.value)
     ? rows.querySelectorAll('.condition-row').length
+    : mode.value === 'refine_image' ? (document.querySelector('#refineSource input[type="file"]')?.files.length || 0)
     : mode.value === 'flf2v' ? 2 : mode.value === 'i2v' ? 1 : 0;
   const values = [
     ['生成方式', mode.options[mode.selectedIndex].textContent],
@@ -194,6 +221,7 @@ function updateConditionSummary() {
     ['基準解像度', `${width} × ${height}`],
     ['最終解像度', `${finalWidth} × ${finalHeight}`],
     ['2倍高解像度化', upscale.checked ? 'ON' : 'OFF'],
+    ['高解像度化方式', upscale.checked ? upscaleMethod.options[upscaleMethod.selectedIndex].textContent : 'なし'],
     ['2倍フレームレート化', temporalUpscale.checked ? 'ON' : 'OFF'],
     ['デコーダー', (upscale.checked || temporalUpscale.checked) ? decoder.options[decoder.selectedIndex].textContent : 'VAE（高速）'],
     ['Multishot', multishot.checked ? `${Math.max(getShots().length, shotRows.children.length)} shots` : 'OFF'],
@@ -208,11 +236,14 @@ function updateConditionSummary() {
   }
   summary.replaceChildren();
   values.forEach(([term, description]) => {
+    const item = document.createElement('div');
+    item.className = 'summary-item';
     const dt = document.createElement('dt');
     const dd = document.createElement('dd');
     dt.textContent = term;
     dd.textContent = description;
-    summary.append(dt, dd);
+    item.append(dt, dd);
+    summary.append(item);
   });
 }
 
@@ -259,6 +290,29 @@ function releaseThumbnails(container) {
 
 function updateRenderHelp() {
   const [width, height] = size.value.split('x').map(Number);
+  if (STILL_MODES.includes(mode.value)) {
+    const twoStage = mode.value !== 'ref2i';
+    upscale.checked = twoStage;
+    upscale.disabled = true;
+    temporalUpscale.checked = false;
+    temporalUpscale.disabled = true;
+    upscaleMethod.value = 'latent';
+    upscaleMethod.disabled = true;
+    decoder.disabled = mode.value !== 't2i';
+    if (mode.value !== 't2i') decoder.value = 'vae';
+    document.querySelector('#renderHelp').textContent = twoStage
+      ? `静止画: 基準${width} × ${height} → 2x Latent Upscale ＋ 3-step Refine → ${width * 2} × ${height * 2} PNG`
+      : `静止画: 30-step単段生成 → ${width} × ${height} PNG（選択フレームを抽出）`;
+    return;
+  }
+  const canSpatialUpscale = width * height <= 960 * 544;
+  if (!canSpatialUpscale && upscale.checked) upscale.checked = false;
+  const sourceEditMode = ['retake', 'extend', 'iclora'].includes(mode.value);
+  upscale.disabled = !canSpatialUpscale || sourceEditMode;
+  const pixelSupported = upscale.checked && !STILL_MODES.includes(mode.value)
+    && !['retake', 'extend', 'iclora'].includes(mode.value);
+  upscaleMethod.disabled = !pixelSupported;
+  if (!pixelSupported) upscaleMethod.value = 'latent';
   const outputWidth = upscale.checked ? width * 2 : width;
   const outputHeight = upscale.checked ? height * 2 : height;
   const useRefine = upscale.checked || temporalUpscale.checked;
@@ -266,11 +320,15 @@ function updateRenderHelp() {
   if (!useRefine) decoder.value = 'vae';
   const fps = +form.elements.fps.value || 24;
   const renderSteps = [];
-  if (upscale.checked) renderSteps.push('空間Latent ×2');
+  if (upscale.checked) renderSteps.push(
+    upscaleMethod.value === 'pixel' ? 'Pixel IC-LoRA ×2' : '空間Latent ×2'
+  );
   if (temporalUpscale.checked) renderSteps.push(`時間Latent ×2（${fps} → ${fps * 2} FPS）`);
-  document.querySelector('#renderHelp').textContent = useRefine
+  let help = useRefine
     ? `基準${width} × ${height} → ${renderSteps.join(' ＋ ')} ＋ 3-step Refine → 最終${outputWidth} × ${outputHeight}`
     : `8-step単段生成 → 最終${outputWidth} × ${outputHeight}（VAEデコード）`;
+  if (!canSpatialUpscale) help += '。高解像度の直接生成はVRAMを多く使用します';
+  document.querySelector('#renderHelp').textContent = help;
 }
 
 function matchSizeToImage(file) {
@@ -366,15 +424,21 @@ function addCondition() {
 
 function renderMode() {
   const selected = mode.value;
+  const still = STILL_MODES.includes(selected);
   document.querySelector('#modeHelp').textContent = modeHelp[selected];
   releaseThumbnails(simple);
   simple.replaceChildren();
   simple.hidden = !['i2v', 'flf2v'].includes(selected);
-  advanced.hidden = selected !== 'condition';
+  advanced.hidden = !['condition', 'ref2i'].includes(selected);
   icLoraEditor.hidden = selected !== 'iclora';
   retakeEditor.hidden = selected !== 'retake';
   extendEditor.hidden = selected !== 'extend';
   audioVideoEditor.hidden = selected !== 'a2v';
+  refineEditor.hidden = selected !== 'refine_image';
+  ref2iOptions.hidden = selected !== 'ref2i';
+  document.querySelector('#frameField').hidden = still;
+  document.querySelector('#secondsField').hidden = still;
+  autoDuration.closest('label').hidden = still;
   const sourceEdit = ['retake', 'extend', 'iclora'].includes(selected);
   upscale.disabled = sourceEdit;
   temporalUpscale.disabled = sourceEdit;
@@ -383,13 +447,23 @@ function renderMode() {
     temporalUpscale.checked = false;
     decoder.value = 'vae';
   }
+  if (!still && !sourceEdit) {
+    upscale.disabled = false;
+    temporalUpscale.disabled = false;
+    decoder.disabled = false;
+  }
   if (selected === 'i2v') simple.append(fileField('先頭画像', 0));
   if (selected === 'flf2v') simple.append(fileField('先頭画像', 0), fileField('末尾画像', -1));
-  if (selected === 'condition' && !rows.children.length) addCondition();
+  if (['condition', 'ref2i'].includes(selected) && !rows.children.length) addCondition();
   if (selected === 'iclora') {
     size.value = '768x448';
     autoDuration.checked = false;
     autoDuration.disabled = true;
+  } else if (still) {
+    size.value = '512x512';
+    autoDuration.checked = false;
+    autoDuration.disabled = true;
+    updateDurationUI();
   } else {
     autoDuration.disabled = false;
   }
@@ -398,6 +472,7 @@ function renderMode() {
 
 mode.addEventListener('change', renderMode);
 upscale.addEventListener('change', updateRenderHelp);
+upscaleMethod.addEventListener('change', updateRenderHelp);
 temporalUpscale.addEventListener('change', updateRenderHelp);
 size.addEventListener('change', updateRenderHelp);
 autoDuration.addEventListener('change', updateDurationUI);
@@ -422,6 +497,13 @@ bindDropZone(document.querySelector('#extendSource'));
 bindDropZone(document.querySelector('#audioSource'));
 bindDropZone(document.querySelector('#audioFirstFrame'));
 bindDropZone(document.querySelector('#icLoraReference'));
+bindDropZone(document.querySelector('#refineSource'));
+const refineStrength = document.querySelector('#refineStrength');
+refineStrength.addEventListener('input', () => {
+  const value = +refineStrength.value;
+  document.querySelector('#refineStrengthValue').textContent =
+    `${value.toFixed(2)}${value >= 0.9 ? ' · 入力画像を強く保持' : ' · 小さいほどバリエーション'}`;
+});
 updateRenderHelp();
 syncSecondsFromFrames();
 updateDurationUI();
@@ -431,7 +513,7 @@ async function upload(file) {
   const data = new FormData();
   data.append('file', file);
   const response = await fetch('/api/assets', { method: 'POST', body: data });
-  if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+  if (!response.ok) throw new Error(await responseError(response));
   return response.json();
 }
 
@@ -482,6 +564,30 @@ async function collectConditions(selectedMode) {
       const asset = await upload(image);
       conditions.push({ asset_id: asset.id, kind: 'image', index: 0, strength: 1 });
     }
+  } else if (selectedMode === 'refine_image') {
+    const file = document.querySelector('#refineSource input[type="file"]').files[0];
+    if (!file) throw new Error(tr('リファインする入力画像を選択してください', 'Select an input image to refine'));
+    const asset = await upload(file);
+    if (asset.kind !== 'image') throw new Error(tr('画像リファインでは画像のみ使用できます', 'Image refine accepts images only'));
+    conditions.push({ asset_id: asset.id, kind: 'image', index: 0, strength: 1 });
+  } else if (selectedMode === 'ref2i') {
+    const numFrames = +form.elements.ref2i_frames.value;
+    const latentFrames = Math.floor((numFrames - 1) / 8) + 1;
+    for (const row of rows.querySelectorAll('.condition-row')) {
+      const file = row.querySelector('.condition-file').files[0];
+      if (!file) throw new Error(tr('参照→静止画の参照画像を選択してください', 'Select reference image(s) for Reference → Image'));
+      const asset = await upload(file);
+      if (asset.kind !== 'image') throw new Error(tr('参照→静止画では画像のみ使用できます', 'Reference → Image accepts images only'));
+      const position = +row.querySelector('.condition-position').value;
+      const index = position >= 100 ? -1 : position <= 0 ? 0 : Math.round((position / 100) * (latentFrames - 1));
+      conditions.push({
+        asset_id: asset.id,
+        kind: 'image',
+        index,
+        strength: +row.querySelector('.condition-strength').value,
+      });
+    }
+    if (!conditions.length) throw new Error(tr('参照→静止画には参照画像が1枚以上必要です', 'Reference → Image requires at least one reference image'));
   }
   return conditions;
 }
@@ -497,7 +603,7 @@ async function enhancePrompt() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: promptInput.value, mode: mode.value, shots: multishot.checked ? getShots() : [] }),
     });
-    if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+    if (!response.ok) throw new Error(await responseError(response));
     const result = await response.json();
     promptInput.value = result.prompt;
     if (multishot.checked) {
@@ -516,6 +622,26 @@ function escapeHtml(value) {
   const node = document.createElement('span');
   node.textContent = value;
   return node.innerHTML;
+}
+
+async function useAsFirstFrame(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(response.statusText);
+    const blob = await response.blob();
+    const file = new File([blob], url.split('/').pop() || 'still.png', { type: blob.type || 'image/png' });
+    mode.value = 'i2v';
+    renderMode();
+    const input = simple.querySelector('.file-field input[type="file"]');
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change'));
+    updateConditionSummary();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (error) {
+    alert(`${tr('画像を先頭画像に設定できません', 'Could not set the image as the first frame')}: ${error.message}`);
+  }
 }
 
 function updateHistorySelection() {
@@ -558,9 +684,14 @@ async function loadHistory() {
       const request = job.request;
       const date = new Date(job.created_at).toLocaleString('ja-JP');
       const checked = selectedHistoryIds.includes(job.id) ? ' checked' : '';
-      const video = job.video_url ? `<video src="${job.video_url}" controls preload="metadata" draggable="true" data-history-url="${job.video_url}" data-job-id="${job.id}" title="クリックで原寸表示・入力欄へドラッグできます"></video>` : '';
-      const controls = job.video_url ? `<div class="history-card-actions"><label class="history-select"><input type="checkbox" data-job-id="${job.id}"${checked}> 選択</label><a href="${job.video_url}" download="${job.id}.mp4">ダウンロード</a></div>` : '';
-      const render = [request.upscale ? '2x resolution' : '', request.temporal_upscale ? '2x FPS' : ''].filter(Boolean).join(' + ') || 'base';
+      const imageName = job.image_url ? job.image_url.split('/').pop() : '';
+      const video = job.image_url
+        ? `<img src="${job.image_url}" class="history-image" data-image-url="${job.image_url}" loading="lazy" alt="生成静止画" title="クリックで原寸表示">`
+        : job.video_url ? `<video src="${job.video_url}" controls preload="metadata" draggable="true" data-history-url="${job.video_url}" data-job-id="${job.id}" title="クリックで原寸表示・入力欄へドラッグできます"></video>` : '';
+      const controls = job.image_url
+        ? `<div class="history-card-actions"><label class="history-select"><input type="checkbox" data-job-id="${job.id}"${checked}> 選択</label><a href="${job.image_url}" download="${imageName}">ダウンロード</a><button type="button" class="use-first-frame" data-image-url="${job.image_url}">先頭画像に使う</button></div>`
+        : job.video_url ? `<div class="history-card-actions"><label class="history-select"><input type="checkbox" data-job-id="${job.id}"${checked}> 選択</label><a href="${job.video_url}" download="${job.id}.mp4">ダウンロード</a></div>` : '';
+      const render = [request.upscale ? `2x ${request.upscale_method === 'pixel' ? 'Pixel IC-LoRA' : 'latent'}` : '', request.temporal_upscale ? '2x FPS' : ''].filter(Boolean).join(' + ') || 'base';
       const metrics = job.generation_seconds == null ? '' : ` · ${job.generation_seconds.toFixed(1)}秒 · VRAM ${job.peak_vram_gb?.toFixed(2) ?? '?'} GB`;
       return `<article class="history-item"><div class="history-meta"><b>#${job.session_number} · ${job.status}</b><span>${date}</span></div>${video}${controls}<p>${escapeHtml(request.prompt)}</p><small>${request.mode} · seed ${request.seed} · ${render}${metrics}</small></article>`;
     }).join('');
@@ -576,6 +707,12 @@ async function loadHistory() {
       video.addEventListener('click', () => {
         if (!dragged) openVideoModal(video.dataset.historyUrl, `${video.dataset.jobId}.mp4`);
       });
+    });
+    list.querySelectorAll('img.history-image').forEach((image) => {
+      image.addEventListener('click', () => window.open(image.dataset.imageUrl, '_blank'));
+    });
+    list.querySelectorAll('.use-first-frame').forEach((button) => {
+      button.addEventListener('click', () => useAsFirstFrame(button.dataset.imageUrl));
     });
     list.querySelectorAll('.history-select input').forEach((checkbox) => {
       checkbox.addEventListener('change', () => {
@@ -603,7 +740,7 @@ document.querySelector('#deleteHistory').onclick = async () => {
   try {
     for (const id of selectedHistoryIds) {
       const response = await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+      if (!response.ok) throw new Error(await responseError(response));
     }
     selectedHistoryIds = [];
     await loadHistory();
@@ -621,7 +758,7 @@ document.querySelector('#concatHistory').onclick = async () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_ids: selectedHistoryIds }),
     });
-    if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+    if (!response.ok) throw new Error(await responseError(response));
     const result = await response.json();
     openVideoModal(result.video_url, result.filename);
   } catch (error) {
@@ -659,17 +796,24 @@ form.addEventListener('submit', async (event) => {
       if (!audioFile) throw new Error(tr('Audio → Videoの入力音声を選択してください', 'Select input audio for Audio → Video'));
       audioAssetId = (await upload(audioFile)).id;
     }
+    const selectedMode = data.get('mode');
+    const still = STILL_MODES.includes(selectedMode);
     const body = {
       session_number: sessionNumber,
-      mode: data.get('mode'),
-      upscale: data.get('upscale') === 'on',
-      temporal_upscale: data.get('temporal_upscale') === 'on',
-      decoder: data.get('decoder'),
+      mode: selectedMode,
+      upscale: still ? selectedMode !== 'ref2i' : data.get('upscale') === 'on',
+      upscale_method: still ? 'latent' : (data.get('upscale_method') || 'latent'),
+      temporal_upscale: still ? false : data.get('temporal_upscale') === 'on',
+      decoder: still && selectedMode !== 't2i' ? 'vae' : data.get('decoder'),
       prompt: buildPrompt(),
       negative_prompt: data.get('negative_prompt'),
       width,
       height,
-      num_frames: autoDuration.checked ? null : +data.get('num_frames'),
+      num_frames: still
+        ? (selectedMode === 'ref2i' ? +data.get('ref2i_frames') : 9)
+        : (autoDuration.checked ? null : +data.get('num_frames')),
+      strength: selectedMode === 'refine_image' ? +(data.get('refine_strength') || 1) : 1,
+      frame_position: data.get('ref2i_frame_position') || 'last',
       min_seconds: autoDuration.checked ? +data.get('min_seconds') : 1,
       max_seconds: autoDuration.checked ? +data.get('max_seconds') : 8,
       fps: +data.get('fps'),
@@ -692,10 +836,11 @@ form.addEventListener('submit', async (event) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+    if (!response.ok) throw new Error(await responseError(response));
     let job = await response.json();
     while (['queued', 'running'].includes(job.status)) {
-      document.querySelector('#state').textContent = job.status === 'queued' ? 'キューで待機中' : '映像と音声を生成中';
+      document.querySelector('#state').textContent = job.status === 'queued'
+        ? 'キューで待機中' : still ? '静止画を生成中' : '映像と音声を生成中';
       const percent = Math.round(job.progress * 100);
       document.querySelector('#bar').style.width = `${percent}%`;
       document.querySelector('#percent').textContent = `${percent}%`;
@@ -705,8 +850,30 @@ form.addEventListener('submit', async (event) => {
     }
     if (job.status === 'failed') throw new Error(job.error);
     const video = document.querySelector('#video');
-    video.src = job.video_url;
-    document.querySelector('#download').href = job.video_url;
+    const resultImage = document.querySelector('#resultImage');
+    const download = document.querySelector('#download');
+    const useButton = document.querySelector('#useAsFirstFrame');
+    if (job.image_url) {
+      video.pause();
+      video.removeAttribute('src');
+      video.hidden = true;
+      resultImage.src = job.image_url;
+      resultImage.hidden = false;
+      download.href = job.image_url;
+      download.download = job.image_url.split('/').pop();
+      download.textContent = tr('PNGをダウンロード', 'Download PNG');
+      useButton.hidden = false;
+      useButton.onclick = () => useAsFirstFrame(job.image_url);
+    } else {
+      resultImage.hidden = true;
+      resultImage.removeAttribute('src');
+      useButton.hidden = true;
+      video.hidden = false;
+      video.src = job.video_url;
+      download.href = job.video_url;
+      download.setAttribute('download', '');
+      download.textContent = tr('MP4をダウンロード', 'Download MP4');
+    }
     lastJobMetrics = {
       generation_seconds: job.generation_seconds,
       peak_vram_gb: job.peak_vram_gb,

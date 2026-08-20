@@ -13,6 +13,9 @@ from .config import Settings
 from .generator import LTXGenerator
 from .schemas import GenerateRequest
 
+# Output filename prefixes for still-image modes (PNG instead of MP4).
+STILL_IMAGE_PREFIXES = {"t2i": "t2i", "refine_image": "refine", "ref2i": "ref2i"}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -27,6 +30,7 @@ class Job:
     progress: float = 0.0
     error: str | None = None
     video_url: str | None = None
+    image_url: str | None = None
     created_at: str = ""
     updated_at: str = ""
     generation_seconds: float | None = None
@@ -40,6 +44,7 @@ class Job:
             "progress": self.progress,
             "error": self.error,
             "video_url": self.video_url,
+            "image_url": self.image_url,
             "request": self.request,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -79,6 +84,9 @@ class JobManager:
                 db.execute("ALTER TABLE jobs ADD COLUMN generation_seconds REAL")
             if "peak_vram_gb" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN peak_vram_gb REAL")
+            if "image_url" not in columns:
+                # Still-image modes (t2i / refine_image / ref2i) record a PNG here.
+                db.execute("ALTER TABLE jobs ADD COLUMN image_url TEXT")
             now = utc_now()
             db.execute(
                 "UPDATE jobs SET status='failed', error='Server restarted before completion', updated_at=? "
@@ -96,15 +104,16 @@ class JobManager:
         with self._connect() as db:
             db.execute(
                 """INSERT INTO jobs (
-                id, session_number, request_json, status, progress, error, video_url,
+                id, session_number, request_json, status, progress, error, video_url, image_url,
                 created_at, updated_at, generation_seconds, peak_vram_gb
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET status=excluded.status, progress=excluded.progress,
-                error=excluded.error, video_url=excluded.video_url, updated_at=excluded.updated_at,
+                error=excluded.error, video_url=excluded.video_url, image_url=excluded.image_url,
+                updated_at=excluded.updated_at,
                 generation_seconds=excluded.generation_seconds, peak_vram_gb=excluded.peak_vram_gb""",
                 (
                     job.id, job.session_number, job.request.model_dump_json(), job.status, job.progress,
-                    job.error, job.video_url, job.created_at, job.updated_at,
+                    job.error, job.video_url, job.image_url, job.created_at, job.updated_at,
                     job.generation_seconds, job.peak_vram_gb,
                 ),
             )
@@ -115,7 +124,9 @@ class JobManager:
             id=row["id"], session_number=row["session_number"],
             request=GenerateRequest.model_validate(json.loads(row["request_json"])),
             status=row["status"], progress=row["progress"], error=row["error"],
-            video_url=row["video_url"], created_at=row["created_at"], updated_at=row["updated_at"],
+            video_url=row["video_url"],
+            image_url=row["image_url"] if "image_url" in row.keys() else None,
+            created_at=row["created_at"], updated_at=row["updated_at"],
             generation_seconds=row["generation_seconds"], peak_vram_gb=row["peak_vram_gb"],
         )
 
@@ -170,6 +181,8 @@ class JobManager:
         with self._connect() as db:
             db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
         (self.config.output_dir / f"{job_id}.mp4").unlink(missing_ok=True)
+        for prefix in STILL_IMAGE_PREFIXES.values():
+            (self.config.output_dir / f"{prefix}_{job_id}.png").unlink(missing_ok=True)
         return True
 
     def _update_progress(self, job: Job, value: float):
@@ -186,13 +199,19 @@ class JobManager:
             job.status = "running"
             self._save(job)
             try:
-                target = self.config.output_dir / f"{job.id}.mp4"
+                still_prefix = STILL_IMAGE_PREFIXES.get(job.request.mode)
+                target = self.config.output_dir / (
+                    f"{still_prefix}_{job.id}.png" if still_prefix else f"{job.id}.mp4"
+                )
                 started = time.monotonic()
                 metrics = self.generator.generate(job.request, target, lambda value: self._update_progress(job, value))
                 job.generation_seconds = time.monotonic() - started
                 if metrics:
                     job.peak_vram_gb = metrics.get("peak_vram_gb")
-                job.video_url = f"/outputs/{job.id}.mp4"
+                if still_prefix:
+                    job.image_url = f"/outputs/{target.name}"
+                else:
+                    job.video_url = f"/outputs/{job.id}.mp4"
                 job.status = "completed"
             except Exception as exc:
                 job.error = str(exc)
