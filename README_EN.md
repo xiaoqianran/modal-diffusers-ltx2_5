@@ -221,10 +221,10 @@ Verification scripts used during development are included: CUDA Graph equivalenc
 
 ## License
 
-The application code originally implemented in this repository is provided under the [MIT License](LICENSE).
+The application code originally implemented in this repository is provided under the [Apache License 2.0](LICENSE).
 
 > [!IMPORTANT]
-> The MIT License does not apply to LTX model weights, LTX-derived LoRAs or checkpoints, Gemma models, or other third-party components.
+> The Apache License 2.0 does not apply to LTX model weights, LTX-derived LoRAs or checkpoints, Gemma models, or other third-party components.
 
 LTX-2/LTX-2.5 and derivatives are governed by the [LTX-2 Community License Agreement](https://github.com/Lightricks/LTX-2/blob/main/LICENSE). It includes use restrictions and redistribution obligations. Commercial use by entities with annual revenue of USD 10 million or more requires a paid commercial license from Lightricks. Review the latest original agreement before using or distributing the model, LoRAs, or generated output. See [LTX Model Licensing](https://ltx.io/model/license) for commercial licensing information.
 

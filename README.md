@@ -218,10 +218,10 @@ fps=16指定は**4.0秒（64フレーム）周期のモーション揺らぎ**�
 
 ## ライセンス
 
-このリポジトリで独自に実装したアプリケーションコードは[MIT License](LICENSE)で提供します。
+このリポジトリで独自に実装したアプリケーションコードは[Apache License 2.0](LICENSE)で提供します。
 
 > [!IMPORTANT]
-> MIT LicenseはLTXモデルの重み、LTX由来のLoRA／チェックポイント、Gemmaモデル、その他の第三者製コンポーネントには適用されません。
+> Apache License 2.0はLTXモデルの重み、LTX由来のLoRA／チェックポイント、Gemmaモデル、その他の第三者製コンポーネントには適用されません。
 
 LTX-2/LTX-2.5およびその派生物には、Lightricksの[LTX-2 Community License Agreement](https://github.com/Lightricks/LTX-2/blob/main/LICENSE)が適用されます。用途制限、配布時のライセンス同梱・告知義務などがあり、年間売上が1,000万米ドル以上の事業体による商用利用にはLightricksとの有償商用ライセンスが必要です。モデル、LoRA、生成結果を利用または配布する前に、必ず原文の最新版を確認してください。商用ライセンスについては[LTX Model Licensing](https://ltx.io/model/license)を参照してください。
 
