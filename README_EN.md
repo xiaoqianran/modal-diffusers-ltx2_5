@@ -175,6 +175,18 @@ RTX PRO 6000 Blackwell 96 GB, 512×512 base to 1024² output, 121 frames, seed 4
 
 ## Realtime generation and acceleration (measured 2026-09)
 
+### Purpose and limitations (read this first)
+
+The **goal of this acceleration stack is minimizing latency for serving/realtime workloads — small resolutions × few steps × repeated identical settings** (generation faster than playback). Use it with these limitations in mind:
+
+- **It barely helps large-resolution, many-step quality generation.** CUDA Graph gains concentrate where CPU kernel launches dominate (-20% at 384×288, -4% at 512×288); at 1024×576+, 8 steps, or the 2x-upscale path, GPU execution dominates and the gain is a few percent.
+- **Incompatible with low-VRAM operation.** CUDA Graph requires `OFFLOAD_MODE=none` (everything resident); it cannot be combined with model/sequential offload (the 24-48 GB-class memory-saving configurations). Memory saving and minimum latency are separate axes.
+- **Only nvfp4 is a verified combination.** `fp8` (layerwise casting) + CUDA Graph is unverified (interaction with the casting hooks).
+- **Jobs using LoRA automatically fall back to eager** (no graph benefit).
+- **Every new shape (resolution / frame count / fps / mode) pays a one-time capture cost (+1.5-2 s)** — one-off generation with ever-changing settings cannot amortize it.
+- torch.compile on top showed no measured gain (see the compile section).
+- Model-level quality limits (the fps=16 periodic wobble, long-clip stalls) are not solved by acceleration — see the quality notes below.
+
 With nvfp4 + CUDA Graph + NVENC combined, **streaming generation faster than playback (realtime ratio < 1.0x)** is achievable. All measurements below: RTX PRO 6000 Blackwell 96 GB (sm_120), distilled sigmas, 4 steps, ~5-second clips, t2av, `LTX25_TRANSFORMER_PRECISION=nvfp4 OFFLOAD_MODE=none LTX25_CUDA_GRAPH=1 LTX25_NVENC_PRESET=p4`.
 
 ### CUDA Graph gains (bit-identical, measured)

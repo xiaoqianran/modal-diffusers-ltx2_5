@@ -172,6 +172,18 @@ curl -X POST http://localhost:8000/api/jobs \
 
 ## リアルタイム生成と高速化（2026-09 実測）
 
+### 目的と限界(まず読むこと)
+
+この高速化スタックの**目的は「小解像度 × 少ステップ × 同一設定の連投」というサービング/リアルタイム用途のレイテンシ最小化**です(生成時間 < 再生時間の達成)。以下の限界を理解した上で使ってください:
+
+- **大解像度・多ステップの品質重視生成にはほぼ効きません**。CUDA Graph の利得は CPU カーネル起動が律速になる小 shape に集中し(384×288 で -20%、512×288 で -4%)、1024×576 以上・8step・2倍高解像度化パスでは GPU 実行が支配的で数%程度です
+- **低 VRAM 運用とは両立しません**。CUDA Graph は `OFFLOAD_MODE=none`(全常駐)前提で、model/sequential オフロード(24〜48GB 級の省 VRAM 構成)とは併用不可。省 VRAM と最速化は別軸の選択です
+- **検証済みの組み合わせは nvfp4 のみ**。`fp8`(layerwise casting)+ CUDA Graph は hook 機構との相互作用が未検証です
+- **LoRA を使うジョブは自動で eager に落ちます**(graph の恩恵なし)
+- **shape(解像度・フレーム数・fps・モード)を変えるたびに初回 capture 費(+1.5〜2s)**が乗るため、毎回設定を変える一発生成の使い方では償却できません
+- torch.compile の併用は実測で利得なし(§compile 参照)
+- モデル自体の品質限界(fps=16 の周期揺らぎ、長尺の stall)は高速化では解決しません — 下記の品質節を参照
+
 nvfp4 + CUDA Graph + NVENC の組み合わせで、**生成時間 < 再生時間（リアルタイム比 1.0x 未満）のストリーミング生成**が成立します。実測はすべて RTX PRO 6000 Blackwell 96GB（sm_120）、蒸留σ・4step・約5秒クリップ・t2av、`LTX25_TRANSFORMER_PRECISION=nvfp4 OFFLOAD_MODE=none LTX25_CUDA_GRAPH=1 LTX25_NVENC_PRESET=p4`。
 
 ### CUDA Graph の効果（bit一致・実測）
