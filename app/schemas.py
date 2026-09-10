@@ -6,6 +6,10 @@ from pydantic import BaseModel, Field, model_validator
 class ConditionInput(BaseModel):
     asset_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     kind: Literal["image", "video"]
+    # 注意: index は diffusers LTX-2.5 の条件付けの流儀どおり「latent インデックス」
+    # (ピクセルフレーム ÷ 8、-1 は最終 latent)。ピクセルフレーム番号ではない。
+    # 例: 121 フレーム動画は latent 0〜15、中央付近は index=7(≒フレーム56)。
+    # le=60 は 481 フレーム(20秒上限)の最終 latent に対応する。
     index: int = Field(default=0, ge=-1, le=60)
     strength: float = Field(default=1.0, ge=0.0, le=1.0)
 
@@ -77,6 +81,17 @@ class GenerateRequest(BaseModel):
     fps: float = Field(default=24.0, ge=8.0, le=60.0)
     steps: int = Field(default=30, ge=1, le=100)
     guidance_scale: float = Field(default=3.0, ge=0.0, le=20.0)
+    # リップシンク調整ノブ(2026-09-03 追加、2026-09-04 訂正。既定 None = 1.0 固定)。
+    # 【重要な訂正】「映像が音声をどれだけ聞くか」を決めるのは **modality_scale(映像側)**。
+    # pipeline_ltx2.py の実装: video_modality_delta = (modality_scale-1) ×
+    # (音声あり予測 − 音声なし予測)。audio_modality_scale は**音声予測**にしか効かず、
+    # a2v では音声ラテントが凍結されるため出力に対して完全な no-op(追加 forward の
+    # コスト ~+0.9s@8step だけ払う)。同一seed比較で出力が小数点まで一致することを
+    # 実測済み(2026-09-04)。リップシンク目的では modality_scale を使うこと。
+    # audio_guidance_scale も同様に a2v では実効なしの疑いが強い(音声CFG)。
+    modality_scale: float | None = Field(default=None, ge=0.0, le=15.0)
+    audio_guidance_scale: float | None = Field(default=None, ge=0.0, le=15.0)
+    audio_modality_scale: float | None = Field(default=None, ge=0.0, le=15.0)
     seed: int = Field(default=42, ge=0, le=2**63 - 1)
     enhance_prompt: bool = False
     conditions: list[ConditionInput] = Field(default_factory=list, max_length=8)
@@ -185,8 +200,21 @@ class GenerateRequest(BaseModel):
             self.temporal_upscale = False
             self.decoder = "vae"
         if self.mode == "extend":
-            if len(self.conditions) != 1 or self.conditions[0].kind != "video":
-                raise ValueError("extend mode requires one source video")
+            extend_videos = [c for c in self.conditions if c.kind == "video"]
+            extend_images = [c for c in self.conditions if c.kind == "image"]
+            if len(extend_videos) != 1:
+                raise ValueError("extend mode requires exactly one source video condition")
+            # 任意の画像キーフレーム(2026-09-05 追加、シーンMVのドリフト再アンカー/
+            # 延長区間内カット用): index は「生成窓(context+延長)の latent インデックス」、
+            # -1 = 最終 latent(終端アンカー)。index 0 は context 先頭を上書きして
+            # しまう(first-frame conditioning 意味論)ため禁止。context 区間内への
+            # 指定は generator 側で検出してエラーにする。
+            if any(c.index == 0 for c in extend_images):
+                raise ValueError(
+                    "extend image keyframes must use index -1 (terminal anchor) or a "
+                    "positive latent index inside the extension region (index 0 would "
+                    "overwrite the context start)"
+                )
             self.upscale = False
             self.upscale_method = "latent"
             self.temporal_upscale = False
@@ -194,8 +222,22 @@ class GenerateRequest(BaseModel):
         if self.mode == "a2v":
             if not self.audio_asset_id:
                 raise ValueError("a2v mode requires an audio asset")
-            if len(self.conditions) > 1 or any(c.kind != "image" or c.index != 0 for c in self.conditions):
-                raise ValueError("a2v mode accepts at most one first-frame image")
+            # 2026-08-31 拡張(mv_studio_V3 の FLF長尺連鎖プローブ): 末尾フレーム
+            # (index=-1)の画像条件も受け付ける。generator.py の a2v 実装は
+            # 「音声凍結フックを通常パイプラインへ被せ、conditions は素通し」の
+            # 構造で flf2v と同じ条件経路に乗るため、スキーマ緩和だけで
+            # 「a2v(音声同期)+先頭/末尾フレーム条件」が成立する見込み。
+            # 従来の画像0〜1枚(index=0)は完全後方互換。
+            a2v_allowed = {("image", 0), ("image", -1)}
+            a2v_got = [(c.kind, c.index) for c in self.conditions]
+            if (
+                len(self.conditions) > 2
+                or any(pair not in a2v_allowed for pair in a2v_got)
+                or len(set(a2v_got)) != len(a2v_got)
+            ):
+                raise ValueError(
+                    "a2v mode accepts at most a first-frame (index 0) and a last-frame (index -1) image condition"
+                )
         if len({item.id for item in self.loras}) != len(self.loras):
             raise ValueError("the same LoRA cannot be selected more than once")
         return self

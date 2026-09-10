@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import copy
 import math
+import os
 import subprocess
 import threading
 import time
@@ -102,6 +103,97 @@ class _ProgressRamp:
         self._progress(self._hi)
 
 
+class GenerationInterrupted(Exception):
+    """Raised from `progress_callback()` when a `POST /api/interrupt` request has been
+    accepted for the currently-running job.
+
+    Only checked at diffusers `callback_on_step_end` boundaries (i.e. once per
+    denoise step), so reaction time is bounded by one step's wall-clock cost --
+    this mirrors the H3 backend's `core/runner.py::GenerationInterrupted` (same
+    endpoint name/shape, same HTTP 499 on the caller side) so `mv_studio_V2` does not
+    need to special-case either backend. This does not abort any in-flight CUDA op;
+    it only stops the pipeline from starting its *next* step. The existing
+    `JobManager._run()`'s `except Exception` / `finally: self._save(job)` path already
+    handles marking the job failed and releasing the worker for the next job, so no
+    additional cleanup is required here.
+    """
+
+
+class _InterruptController:
+    """Process-wide single-flight interrupt flag.
+
+    Only one job runs at a time (`JobManager._run()`'s single worker thread pulls
+    from a `queue.Queue` one at a time), so a single flag is enough. Guarded by a
+    lock since it is written from the FastAPI request-handling thread and read from
+    the worker thread.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._requested = False
+        self._job_id: str | None = None
+
+    def begin(self, job_id: str | None) -> None:
+        """Call exactly once, right before a job's `generate()` call starts, so a
+        stale interrupt request from a previous job cannot instantly kill this one."""
+        with self._lock:
+            self._requested = False
+            self._job_id = job_id
+
+    def request(self, job_id: str | None) -> bool:
+        """Request an interrupt. If `job_id` is given and does not match the
+        currently-running job, does nothing and returns False (so a request racing
+        with the start of an unrelated job cannot kill it). Returns True if the flag
+        was actually set."""
+        with self._lock:
+            if self._job_id is None:
+                return False
+            if job_id is not None and job_id != self._job_id:
+                return False
+            self._requested = True
+            return True
+
+    def check(self) -> None:
+        """Call from a step-boundary callback. Raises `GenerationInterrupted` if an
+        interrupt has been requested for the currently-running job."""
+        with self._lock:
+            requested = self._requested
+        if requested:
+            raise GenerationInterrupted("generation was stopped by an interrupt request")
+
+    def current_job_id(self) -> str | None:
+        with self._lock:
+            return self._job_id
+
+    def end(self) -> None:
+        """Call once the job has finished (success, failure, or interruption)."""
+        with self._lock:
+            self._job_id = None
+            self._requested = False
+
+
+interrupt_controller = _InterruptController()
+
+
+
+def _subsample_distilled_sigmas(sigmas, steps):
+    """蒸留σ列の間引き(steps<len のときのみ。先頭・末尾を含む等間隔選択)。"""
+    try:
+        steps = int(steps or 0)
+    except (TypeError, ValueError):
+        return sigmas
+    n = len(sigmas)
+    if steps <= 0 or steps >= n:
+        return sigmas
+    if steps == 1:
+        picked = [sigmas[0]]
+    else:
+        idx = [round(i * (n - 1) / (steps - 1)) for i in range(steps)]
+        picked = [sigmas[i] for i in idx]
+    print(f"[ltx25] distilled sigma subsample: {steps}/{n} steps -> {picked}", flush=True)
+    return picked
+
+
 class LTXGenerator:
     """Lazily loads the gated model so health checks remain cheap."""
 
@@ -111,6 +203,7 @@ class LTXGenerator:
         self._upsample_pipe = None
         self._temporal_upsample_pipe = None
         self._diffusion_decode_pipe = None
+        self._graph_runner = None
         self._load_lock = threading.Lock()
 
     def load(self):
@@ -186,6 +279,36 @@ class LTXGenerator:
                     f"in {time.time() - fp8_t0:.1f}s, resident weights {resident_gb:.1f}GB)",
                     flush=True,
                 )
+            elif self.config.ltx25_transformer_precision == "nvfp4":
+                # Official Blackwell-native FP4 distilled transformer (single-file
+                # ComfyUI format). Loaded straight onto the GPU by app/nvfp4.py:
+                # quantized Linears become NVFP4Linear (torch._scaled_mm FP4 GEMM,
+                # ~3.4x raw / ~1.8x per-layer vs bf16 incl. activation-quant cost).
+                # The bnb transformer_dir is only used for its config.json (same
+                # architecture); its weights are not read.
+                import json as _json
+
+                from .nvfp4 import load_nvfp4_transformer
+
+                nvfp4_ckpt = self.config.ltx25_nvfp4_ckpt
+                if not nvfp4_ckpt:
+                    from huggingface_hub import hf_hub_download
+
+                    nvfp4_ckpt = hf_hub_download(
+                        "Lightricks/LTX-2.5",
+                        "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors",
+                    )
+                with open(transformer_dir / "config.json") as fh:
+                    nvfp4_cfg = _json.load(fh)
+                nvfp4_t0 = time.time()
+                transformer = load_nvfp4_transformer(
+                    str(nvfp4_ckpt), nvfp4_cfg, torch.device("cuda")
+                )
+                print(
+                    f"[ltx25] transformer precision=nvfp4 loaded in "
+                    f"{time.time() - nvfp4_t0:.1f}s (FP4 GEMM, resident ~19GB)",
+                    flush=True,
+                )
             else:
                 transformer = LTX2VideoTransformer3DModel.from_pretrained(
                     transformer_dir, dtype=torch.bfloat16
@@ -231,10 +354,154 @@ class LTXGenerator:
                 upsample_pipe.enable_model_cpu_offload()
                 if temporal_upsample_pipe is not None:
                     temporal_upsample_pipe.enable_model_cpu_offload()
+            if self.config.ltx25_compile_blocks != "off":
+                # per-block torch.compile(app/compileblocks.py)。CUDA Graph の
+                # install より前に適用する(graph は compile 済みブロックの呼び出しを
+                # capture する必要がある)。compiled eager 単体は素の eager より遅い
+                # ため、graph 無効時・nvfp4 以外・offload 有効時は適用しない。
+                _cb = self.config.ltx25_compile_blocks
+                if (
+                    self.config.ltx25_transformer_precision == "nvfp4"
+                    and self.config.ltx25_cuda_graph
+                    and self.config.offload_mode == "none"
+                ):
+                    from .compileblocks import apply_block_compile
+
+                    apply_block_compile(pipe.transformer, _cb)
+                else:
+                    print(
+                        f"[ltx25] LTX25_COMPILE_BLOCKS={_cb} ignored: requires "
+                        "precision=nvfp4 + LTX25_CUDA_GRAPH=1 + OFFLOAD_MODE=none "
+                        f"(got precision={self.config.ltx25_transformer_precision!r}, "
+                        f"cuda_graph={self.config.ltx25_cuda_graph}, "
+                        f"offload={self.config.offload_mode!r})",
+                        flush=True,
+                    )
+            if self.config.ltx25_cuda_graph:
+                # transformer.forward 全体の CUDA Graph 化(app/cudagraph.py 参照)。
+                # OFFLOAD_MODE=none 限定: model/sequential offload は重みのデバイスが
+                # リクエスト間で動き、capture 済み graph が焼き込んだアドレスと
+                # 食い違って黙って壊れるため適用しない。
+                if self.config.offload_mode == "none":
+                    from .cudagraph import ForwardGraphRunner
+
+                    self._graph_runner = ForwardGraphRunner(
+                        pipe.transformer,
+                        max_captures=self.config.ltx25_cuda_graph_max_captures,
+                    )
+                    self._graph_runner.install()
+                    print(
+                        "[ltx25] CUDA graph capture enabled for transformer.forward "
+                        f"(max_captures={self.config.ltx25_cuda_graph_max_captures})",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[ltx25] LTX25_CUDA_GRAPH=1 ignored: requires OFFLOAD_MODE=none "
+                        f"(got {self.config.offload_mode!r})",
+                        flush=True,
+                    )
             self._pipe = pipe
             self._upsample_pipe = upsample_pipe
             self._temporal_upsample_pipe = temporal_upsample_pipe
         return self._pipe
+
+    def unload(self) -> dict:
+        """Release every pipeline/model reference so VRAM returns to (near) zero while
+        the process stays alive (Phase 5a resident switching). The next generate()
+        simply goes through load() again -- load() only checks `self._pipe is None`,
+        so dropping the references restores the exact lazy-load entry state.
+        Callers must ensure no job is running (app.main checks before calling)."""
+        freed = []
+        with self._load_lock:
+            if self._graph_runner is not None:
+                # capture 済み graph は transformer の重み・mempool を参照し続けるため、
+                # パイプライン参照を落とす前に破棄しないと VRAM が返らない。
+                self._graph_runner.reset()
+                self._graph_runner.uninstall()
+                self._graph_runner = None
+                freed.append("cuda_graphs")
+            for attr in ("_pipe", "_upsample_pipe", "_temporal_upsample_pipe",
+                         "_diffusion_decode_pipe"):
+                if getattr(self, attr) is not None:
+                    setattr(self, attr, None)
+                    freed.append(attr.lstrip("_"))
+            gc.collect()
+            allocated_gb = None
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    allocated_gb = round(torch.cuda.memory_allocated() / 1024**3, 3)
+            except Exception:  # torch never imported / no CUDA: nothing to free
+                pass
+        return {"freed": freed, "allocated_gb": allocated_gb}
+
+    def _configure_decode_tiling(self, num_frames: int, height: int, width: int) -> None:
+        """decode 直前にタイル構成を決める(ジョブごと、decoder は常駐共有のため毎回設定)。
+
+        既定タイル(768^2x80f / stride 704^2x56f)は 24GB 級を想定した保守値で、
+        大出力ではタイル数と重複(オーバーラップ)計算が膨らむ(1536x896x121f で
+        12 タイル・重複 約1.4x)。ここでは **空き VRAM の範囲で最大のタイル**
+        (最小の分割数)を選ぶ: 分割は幅→高さ→フレームの順に増やし、
+        タイル体積 <= 予算(空きVRAM / 0.34GB/Mpx / 1.25 マージン、
+        probes/probe_decode_tiling.py の実測係数)を満たす最初の構成を採る。
+        1024x576x121f では単一タイルになり decode 9.6s -> 7.9s(継ぎ目も消える)。
+        LTX25_DECODE_SINGLE_TILE: auto(既定)/ on(常に単一タイル、VRAM検査なし)/
+        off(常に既定タイル)。"""
+        import torch
+
+        decoder = self._diffusion_decode_pipe.diffusion_decoder
+        mode = self.config.ltx25_decode_single_tile
+        if mode == "off":
+            decoder.enable_tiling()  # 既定値へ戻す
+            return
+
+        OVERLAP_PX = 64   # 既定タイルと同じ空間オーバーラップ(768-704)
+        OVERLAP_F = 8     # 時間方向(既定24は保守的すぎるため最小の8n)
+        free_gb = torch.cuda.mem_get_info()[0] / 1024**3
+        budget_mpx = free_gb / (0.34 * 1.25) * 1e6
+
+        def tile_dims(nw: int, nh: int, nf: int) -> tuple[int, int, int]:
+            tw = -(-width // nw) + (OVERLAP_PX if nw > 1 else 0)
+            th = -(-height // nh) + (OVERLAP_PX if nh > 1 else 0)
+            tf = -(-num_frames // nf) + (OVERLAP_F if nf > 1 else 0)
+            return tw, th, tf
+
+        # 幅→高さ→フレームの順で分割を増やし、予算に収まる最初の構成を採用
+        candidates = [(1, 1, 1), (2, 1, 1), (2, 2, 1), (3, 2, 1), (2, 2, 2),
+                      (3, 2, 2), (3, 3, 2), (4, 3, 2)]
+        chosen = None
+        for nw, nh, nf in candidates:
+            tw, th, tf = tile_dims(nw, nh, nf)
+            if mode == "on" or tw * th * tf <= budget_mpx:
+                chosen = (nw, nh, nf, tw, th, tf)
+                break
+        if chosen is None:
+            decoder.enable_tiling()
+            print(
+                f"[ltx25] decode tiling: default tiles (budget {budget_mpx/1e6:.0f}Mpx "
+                f"too small for {width}x{height}x{num_frames}f)",
+                flush=True,
+            )
+            return
+        nw, nh, nf, tw, th, tf = chosen
+        # stride は「各次元の刻み = ceil(dim/n)」。オーバーラップは tile_min 側にだけ
+        # 足してあるため、分割数1の次元では引かない(引くと2タイル化してしまう)。
+        decoder.enable_tiling(
+            tile_sample_min_height=th,
+            tile_sample_min_width=tw,
+            tile_sample_min_num_frames=tf,
+            tile_sample_stride_height=th - (OVERLAP_PX if nh > 1 else 0),
+            tile_sample_stride_width=tw - (OVERLAP_PX if nw > 1 else 0),
+            tile_sample_stride_num_frames=tf - (OVERLAP_F if nf > 1 else 0),
+        )
+        print(
+            f"[ltx25] decode tiling: {nw}x{nh}x{nf} tiles of {tw}x{th}x{tf}f "
+            f"(free {free_gb:.1f}GB, budget {budget_mpx/1e6:.0f}Mpx)",
+            flush=True,
+        )
 
     def load_diffusion_decoder(self):
         """Lazily load the LTX-2.5 diffusion decoder pipeline (~0.83GB, kept resident)."""
@@ -353,6 +620,26 @@ class LTXGenerator:
         if result.returncode != 0:
             raise RuntimeError(f"Extend media merge failed: {result.stderr.strip()[-500:]}")
 
+    def _get_mel_transform_16k(self, device):
+        """a2v 条件付け用 MelSpectrogram(16kHz 固定パラメータ)のデバイス別キャッシュ。
+
+        毎リクエストの構築(フィルタバンク計算 + .to(device))を省く(高速化②-2)。
+        パラメータは従来のインライン構築と完全同一。
+        """
+        cache = getattr(self, "_mel_transform_cache", None)
+        if cache is None:
+            cache = {}
+            self._mel_transform_cache = cache
+        key = str(device)
+        if key not in cache:
+            import torchaudio
+            cache[key] = torchaudio.transforms.MelSpectrogram(
+                sample_rate=16000, n_fft=1024, win_length=1024, hop_length=160,
+                f_min=0.0, f_max=8000.0, n_mels=64, center=True, pad_mode="reflect",
+                power=1.0, mel_scale="slaney", norm="slaney",
+            ).to(device)
+        return cache[key]
+
     @staticmethod
     def _decode_audio_file(source: Path, sample_rate: int, start: float, duration: float):
         """Decode a selected region to stereo float32 with ffmpeg."""
@@ -396,6 +683,14 @@ class LTXGenerator:
         pipe = self.load()
         adapter_names = []
         lora_root = self.config.lora_dir.resolve()
+        # LoRA を載せるジョブ(job loras / pixel upscale の IC-LoRA)は CUDA graph 不可:
+        # capture は重みテンソルのアドレスを焼き込むため、adapter の付け外しをまたぐ
+        # replay は stale な重みを黙って使う。eager に落とし、ジョブ後に capture を捨てる。
+        _graph_lora_guard = self._graph_runner is not None and (
+            bool(request.loras) or request.upscale_method == "pixel"
+        )
+        if _graph_lora_guard:
+            self._graph_runner.enabled = False
         try:
             for index, item in enumerate(request.loras):
                 path = (lora_root / item.id).resolve()
@@ -419,6 +714,11 @@ class LTXGenerator:
                     pipe.unload_lora_weights()
                 except Exception as exc:
                     print(f"[ltx25] LoRA cleanup failed: {exc}", flush=True)
+            if _graph_lora_guard:
+                # unload_lora_weights 後の構造復元を信用せず、防御的に capture を捨てる
+                # (次の非 LoRA ジョブが ~1s で再 capture する)。
+                self._graph_runner.reset()
+                self._graph_runner.enabled = True
 
     def _generate_still_impl(
         self, request: GenerateRequest, target: Path, progress: Callable[[float], None]
@@ -482,6 +782,10 @@ class LTXGenerator:
 
         def progress_callback(offset: float, span: float, step_count: int):
             def on_step(_pipe, step: int, _timestep, callback_kwargs):
+                # Step-boundary interrupt check (see GenerationInterrupted's docstring):
+                # runs once per denoise step, right where diffusers already calls back
+                # into us, so no extra hook into the pipeline internals is needed.
+                interrupt_controller.check()
                 progress(min(offset + ((step + 1) / step_count) * span, 0.96))
                 return callback_kwargs
 
@@ -585,6 +889,9 @@ class LTXGenerator:
                 if use_diffusion_decoder:
                     progress(0.85)
                     decode_pipe = self.load_diffusion_decoder()
+                    self._configure_decode_tiling(
+                        num_frames, request.height * 2, request.width * 2
+                    )
                     decode_generator = torch.Generator(device="cpu").manual_seed(request.seed)
                     video = decode_pipe(
                         latents=video.to("cuda"),
@@ -637,10 +944,13 @@ class LTXGenerator:
             if len(matches) != 1:
                 raise ValueError(f"Input asset not found: {condition.asset_id}")
             source = matches[0]
-            if request.mode in {"retake", "extend"}:
+            if request.mode in {"retake", "extend"} and condition.kind == "video":
                 source_edit_path = source
                 source_frames = load_video(str(source))
                 continue
+            # extend の画像条件はキーフレームアンカー(schemas.py の extend 分岐参照)。
+            # 通常の LTX2VideoCondition として下の共通経路へ流し、prepare_extend 側で
+            # context ロックとマージする(index は生成窓の latent インデックス)。
             if condition.kind == "image" and source.suffix.lower() in image_suffixes:
                 frames = load_image(str(source))
                 if request.mode == "iclora":
@@ -657,6 +967,10 @@ class LTXGenerator:
 
         def progress_callback(offset: float, span: float, step_count: int):
             def on_step(_pipe, step: int, _timestep, callback_kwargs):
+                # Step-boundary interrupt check (see GenerationInterrupted's docstring):
+                # runs once per denoise step, right where diffusers already calls back
+                # into us, so no extra hook into the pipeline internals is needed.
+                interrupt_controller.check()
                 progress(min(offset + ((step + 1) / step_count) * span, 0.96))
                 return callback_kwargs
 
@@ -742,6 +1056,28 @@ class LTXGenerator:
             extend_context_duration = context_intervals / effective_fps
             extend_duration = extension_intervals / effective_fps
 
+            # 画像キーフレームアンカーの位置検証(2026-09-05): index は生成窓の
+            # latent インデックス。context 区間(latent 0..context_end)への指定は
+            # ロック済み領域と衝突するため拒否し、窓外も黙殺(pipeline 側は warning
+            # でスキップする)ではなく明示エラーにする。
+            last_latent = (effective_num_frames - 1) // 8
+            context_end_latent = context_intervals // 8 if request.extend_direction == "end" else -1
+            for _c in request.conditions:
+                if _c.kind != "image":
+                    continue
+                resolved_idx = _c.index if _c.index >= 0 else last_latent
+                if resolved_idx > last_latent:
+                    raise ValueError(
+                        f"extend image keyframe latent index {_c.index} exceeds the "
+                        f"generation window (last latent {last_latent})"
+                    )
+                if request.extend_direction == "end" and resolved_idx <= context_end_latent:
+                    raise ValueError(
+                        f"extend image keyframe latent index {_c.index} falls inside the "
+                        f"locked context region (latents 0..{context_end_latent}); use a "
+                        f"larger index or -1"
+                    )
+
             pixels = pipe.video_processor.preprocess_video(
                 context_frames, height=effective_height, width=effective_width
             ).to(device=pipe._execution_device, dtype=pipe.vae.dtype)
@@ -751,7 +1087,14 @@ class LTXGenerator:
             original_prepare_latents = pipe.prepare_latents
 
             def prepare_extend(this, *args, **kwargs):
-                latents, _mask, _clean, coords = original_prepare_latents(*args, **kwargs)
+                # 元の prepare_latents は画像キーフレーム条件を処理済みの
+                # (latents, mask, clean, coords) を返す(キーフレームは base 系列の
+                # 後ろに追加トークンとして連結される)。旧実装は mask/clean を
+                # 丸ごと自前のものに差し替えていたため条件が無効化されていた。
+                # 2026-09-05: base 区間(先頭 base_len トークン)だけ context ロックを
+                # 適用し、キーフレーム由来の mask/clean/coords は温存するマージ方式へ
+                # 変更(キーフレーム無しなら従来と同値)。
+                latents, orig_mask, orig_clean, coords = original_prepare_latents(*args, **kwargs)
                 normalized_context = this._normalize_latents(
                     context_latents, this.vae.latents_mean, this.vae.latents_std, this.vae.config.scaling_factor
                 ).to(device=latents.device, dtype=latents.dtype)
@@ -773,24 +1116,53 @@ class LTXGenerator:
                 mask = this._pack_latents(
                     keep, this.transformer_spatial_patch_size, this.transformer_temporal_patch_size
                 )
-                latents = latents * (1 - mask) + clean * mask
-                return latents, mask, clean, coords
+                base_len = mask.shape[1]
+                latents[:, :base_len] = latents[:, :base_len] * (1 - mask) + clean * mask
+                merged_mask = orig_mask.clone()
+                merged_mask[:, :base_len] = torch.maximum(orig_mask[:, :base_len], mask)
+                merged_clean = orig_clean.clone()
+                merged_clean[:, :base_len] = orig_clean[:, :base_len] * (1 - mask) + clean * mask
+                return latents, merged_mask, merged_clean, coords
 
             restore_prepare_latents = original_prepare_latents
             pipe.prepare_latents = types.MethodType(prepare_extend, pipe)
 
+        # LTX25_STAGE_DEBUG=1: リアルタイム経路の未計測区間を分解する一時計測
+        # (2026-09-03 調査、既定OFFで挙動不変)。a2v 前処理は ffprobe + ffmpeg×2 の
+        # subprocess 3回 + MelSpectrogram 毎回構築 + audio_vae.encode を含む。
+        _stage_debug = os.getenv("LTX25_STAGE_DEBUG", "0").strip() == "1"
+        _a2v_prep_t0 = time.time()
         if request.mode == "a2v":
             matches = list(input_dir.glob(f"{request.audio_asset_id}.*"))
             if len(matches) != 1:
                 raise ValueError("Audio input asset not found")
             audio_source = matches[0]
-            probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(audio_source)],
-                capture_output=True, text=True,
-            )
-            if probe.returncode != 0:
-                raise ValueError("Input audio duration could not be read")
-            remaining = float(probe.stdout.strip()) - request.audio_start
+            # 高速化②-1: 尺の取得は torchaudio.info(メタデータのみ・subprocess なし)を
+            # 優先し、読めないコンテナだけ従来の ffprobe(プロセス起動 ~40ms)へ落とす。
+            # デコード本体は従来どおり ffmpeg のまま(リサンプラを替えると a2v の
+            # 条件付け mel が数値的に変わるため、意図的に触らない)。
+            # 注意: torchaudio.info はこの venv の torchaudio には存在しない
+            # (AttributeError、2026-09-03 実機確認)。PCM wav なら標準 wave モジュールで
+            # ヘッダから正確な尺が取れる(依存ゼロ・subprocess ゼロ)。
+            total_duration = None
+            if audio_source.suffix.lower() == ".wav":
+                try:
+                    import wave as _wave
+                    with _wave.open(str(audio_source), "rb") as _w:
+                        _n, _sr = _w.getnframes(), _w.getframerate()
+                    if _n > 0 and _sr > 0:
+                        total_duration = _n / float(_sr)
+                except Exception:
+                    total_duration = None
+            if total_duration is None:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(audio_source)],
+                    capture_output=True, text=True,
+                )
+                if probe.returncode != 0:
+                    raise ValueError("Input audio duration could not be read")
+                total_duration = float(probe.stdout.strip())
+            remaining = total_duration - request.audio_start
             requested_duration = request.audio_duration or min(remaining, 20.0)
             if remaining < 1 or requested_duration > remaining + 0.05:
                 raise ValueError("Selected audio range exceeds the input audio")
@@ -804,12 +1176,10 @@ class LTXGenerator:
                                         request.audio_start, actual_duration)
             )
             waveform = torch.from_numpy(audio_16k).unsqueeze(0).to(pipe._execution_device)
-            import torchaudio
-            mel_transform = torchaudio.transforms.MelSpectrogram(
-                sample_rate=16000, n_fft=1024, win_length=1024, hop_length=160,
-                f_min=0.0, f_max=8000.0, n_mels=64, center=True, pad_mode="reflect",
-                power=1.0, mel_scale="slaney", norm="slaney",
-            ).to(waveform.device)
+            # 高速化②-2: MelSpectrogram はパラメータ固定なのでプロセス内で1回だけ
+            # 構築してデバイス別にキャッシュする(毎リクエストの module 構築+
+            # フィルタバンク計算+.to(device) を省く。数値は同一 module の再利用なので不変)。
+            mel_transform = self._get_mel_transform_16k(waveform.device)
             mel = torch.log(torch.clamp(mel_transform(waveform), min=1e-5)).permute(0, 1, 3, 2)
             with torch.no_grad():
                 posterior = pipe.audio_vae.encode(mel.to(pipe.audio_vae.dtype), return_dict=False)[0]
@@ -849,6 +1219,8 @@ class LTXGenerator:
             previous_audio_scheduler = pipe.audio_scheduler
             pipe.prepare_audio_latents = types.MethodType(prepare_frozen_audio, pipe)
             pipe.audio_scheduler = frozen_scheduler
+            if _stage_debug:
+                print(f"[ltx25] STAGE_DEBUG a2v_prep {time.time() - _a2v_prep_t0:.3f}s", flush=True)
 
         decoder_kind = request.decoder or self.config.ltx25_decoder
         use_refine = request.upscale or request.temporal_upscale
@@ -865,16 +1237,34 @@ class LTXGenerator:
             "min_seconds": request.min_seconds,
             "max_seconds": request.max_seconds,
             "frame_rate": effective_fps,
-            "sigmas": DISTILLED_SIGMA_VALUES,
+            # 蒸留8σスケジュール。steps<8 を明示されたときだけ間引く(2026-09-04、
+            # リアルタイム高速化)。従来 request.steps はこの経路で黙殺されており
+            # 「4steps 指定」は効いていなかった。間引きは先頭・末尾を必ず含む
+            # 等間隔インデックス(例 4steps: idx 0,2,5,7)。蒸留の学習分布外に
+            # なるため品質は A/B 前提。steps>=8・未指定は従来どおり8σ固定。
+            "sigmas": _subsample_distilled_sigmas(DISTILLED_SIGMA_VALUES, request.steps),
             "guidance_scale": 1.0,
-            "audio_guidance_scale": 1.0,
+            # リップシンク調整ノブ(schemas.GenerateRequest の同名フィールド参照)。
+            # None(既定)なら従来どおり 1.0 固定 = 完全互換。
+            "audio_guidance_scale": (
+                request.audio_guidance_scale if request.audio_guidance_scale is not None else 1.0
+            ),
             "stg_scale": 0.0,
             "audio_stg_scale": 0.0,
-            "modality_scale": 1.0,
-            "audio_modality_scale": 1.0,
+            # 映像側 modality_scale がリップシンクの実効ノブ(schemas の訂正コメント参照)
+            "modality_scale": (
+                request.modality_scale if request.modality_scale is not None else 1.0
+            ),
+            "audio_modality_scale": (
+                request.audio_modality_scale if request.audio_modality_scale is not None else 1.0
+            ),
             "enable_prompt_enhancement": request.enhance_prompt,
             "generator": generator,
-            "output_type": "latent" if use_refine else "np",
+            # 非refine(リアルタイム)経路は "pt" で受ける(2026-09-03 高速化①):
+            # postprocess 済み (B,F,C,H,W)・GPU 上の float [0,1] が返るので、
+            # uint8 化を GPU で行ってから CPU へ下ろす(従来の "np" は float32
+            # ~190MB を CPU へ転送して numpy で clip/mul/round していた。実測 0.20s)。
+            "output_type": "latent" if use_refine else "pt",
             "return_dict": False,
             "callback_on_step_end": progress_callback(
                 0.0, 0.55 if use_refine else 0.96, len(DISTILLED_SIGMA_VALUES)
@@ -882,6 +1272,27 @@ class LTXGenerator:
         }
         if request.mode == "a2v":
             args["audio_latents"] = input_audio_latents
+        # LTX25_STAGE_DEBUG=1: pipe() 内部のコンポーネント別時間を計測する一時フック
+        # (text_encoder / video VAE decode / audio VAE decode / vocoder)。
+        # instance 属性で forward/decode を差し替え、finally で必ず原状復帰する。
+        _dbg_acc: dict = {}
+        _dbg_restore: list = []
+        if _stage_debug:
+            def _dbg_wrap(obj, attr, name):
+                orig = getattr(obj, attr)
+                def timed(*a, **k):
+                    t0 = time.time()
+                    try:
+                        return orig(*a, **k)
+                    finally:
+                        _dbg_acc[name] = _dbg_acc.get(name, 0.0) + (time.time() - t0)
+                setattr(obj, attr, timed)
+                _dbg_restore.append((obj, attr, orig))
+            _dbg_wrap(pipe.text_encoder, "forward", "text_encode")
+            _dbg_wrap(pipe.vae, "decode", "video_vae_decode")
+            _dbg_wrap(pipe.audio_vae, "decode", "audio_vae_decode")
+            _dbg_wrap(pipe.vocoder, "forward", "vocoder")
+        stage_t0 = time.time()
         try:
             video, audio = pipe(**args)
         except Exception:
@@ -892,11 +1303,48 @@ class LTXGenerator:
         finally:
             if restore_prepare_latents is not None:
                 pipe.prepare_latents = restore_prepare_latents
+            for _obj, _attr, _orig in _dbg_restore:
+                setattr(_obj, _attr, _orig)
+        if _stage_debug:
+            _parts = " ".join(f"{k}={v:.3f}s" for k, v in _dbg_acc.items())
+            print(
+                f"[ltx25] STAGE_DEBUG pipe_total {time.time() - stage_t0:.3f}s ({_parts})",
+                flush=True,
+            )
+        if not use_refine:
+            # 高速化①: uint8 変換を GPU で実行(output_type="pt" とセット)。
+            # (B,F,C,H,W) float [0,1] → (B,F,H,W,3) uint8 numpy。値は従来の
+            # np.clip*255→round(半数偶数丸め)→astype と bit 一致する
+            # (torch.round も half-to-even、float32 演算は IEEE で同一)。
+            # 以降の video の使われ方(video[0] を encode へ)は従来の "np" と
+            # 同じレイアウトなので下流は無変更。encode_video_crf 側の uint8
+            # 変換は dtype==uint8 のため素通りになる。
+            _cvt_t0 = time.time()
+            with torch.no_grad():
+                # .float() が必須: "pt" は VAE 出力の dtype(bf16)のまま返るが、
+                # 従来の "np" 経路は numpy 変換時に float32 へキャストしてから
+                # *255/round していた。bf16 のまま演算すると丸めが変わり
+                # framemd5 が一致しない(実測で確認)。float32 に揃えると
+                # 旧経路と同一の IEEE 演算列になる。
+                video = (
+                    video.permute(0, 1, 3, 4, 2)
+                    .float()
+                    .clamp(0.0, 1.0)
+                    .mul(255.0)
+                    .round()
+                    .to(torch.uint8)
+                    .cpu()
+                    .numpy()
+                )
+            if _stage_debug:
+                print(f"[ltx25] STAGE_DEBUG gpu_uint8_convert {time.time() - _cvt_t0:.3f}s", flush=True)
         generated_num_frames = effective_num_frames
         if generated_num_frames is None:
             # Auto-duration returns unpacked video latents [B, C, latent_F, H, W].
             generated_num_frames = (video.shape[2] - 1) * pipe.vae_temporal_compression_ratio + 1
         if use_refine:
+            print(f"[ltx25] stage timing: base denoise {time.time() - stage_t0:.1f}s", flush=True)
+            stage_t0 = time.time()
             pixel_reference_latents = video.detach().clone() if request.upscale_method == "pixel" else None
             progress(0.58)
             if request.upscale:
@@ -924,6 +1372,8 @@ class LTXGenerator:
                 )[0]
                 generated_num_frames = (generated_num_frames - 1) * 2 + 1
             progress(0.64)
+            print(f"[ltx25] stage timing: latent upsample {time.time() - stage_t0:.1f}s", flush=True)
+            stage_t0 = time.time()
             stage2_span = 0.14 if use_diffusion_decoder else 0.32
             restore_stage2_prepare = None
             if request.upscale_method == "pixel":
@@ -1025,6 +1475,7 @@ class LTXGenerator:
             finally:
                 if restore_stage2_prepare is not None:
                     pipe.prepare_latents = restore_stage2_prepare
+            print(f"[ltx25] stage timing: stage2 refine {time.time() - stage_t0:.1f}s", flush=True)
         if restore_audio_prepare is not None:
             pipe.prepare_audio_latents = restore_audio_prepare
             pipe.audio_scheduler = previous_audio_scheduler
@@ -1034,6 +1485,11 @@ class LTXGenerator:
             audio_wave = self._decode_audio(pipe, audio)[0].float().cpu()
             progress(0.80)
             decode_pipe = self.load_diffusion_decoder()
+            self._configure_decode_tiling(
+                generated_num_frames,
+                effective_height * (2 if request.upscale else 1),
+                effective_width * (2 if request.upscale else 1),
+            )
             decode_generator = torch.Generator(device="cpu").manual_seed(request.seed)
             decode_start = time.time()
             with _ProgressRamp(progress, 0.80, 0.955, tau_s=90.0), torch.no_grad():
@@ -1051,25 +1507,54 @@ class LTXGenerator:
             audio_wave = input_audio_wave
         target.parent.mkdir(parents=True, exist_ok=True)
         encode_target = target.with_suffix(".edit-generated.mp4") if request.mode in {"retake", "extend"} else target
-        encode_video_crf(
-            video[0],
-            fps=final_fps,
-            audio=audio_wave,
-            audio_sample_rate=sample_rate,
-            output_path=encode_target,
-            crf=self.config.ltx25_video_crf,
-        )
-        if request.mode == "retake":
-            self._finish_retake(source_edit_path, encode_target, target, request)
-            encode_target.unlink(missing_ok=True)
-        elif request.mode == "extend":
-            self._finish_extend(
-                source_edit_path, encode_target, target, request.extend_direction,
-                extend_context_duration, extend_duration,
+
+        def _encode_and_finalize():
+            encode_t0 = time.time()
+            encode_video_crf(
+                video[0],
+                fps=final_fps,
+                audio=audio_wave,
+                audio_sample_rate=sample_rate,
+                output_path=encode_target,
+                crf=self.config.ltx25_video_crf,
+                encoder=self.config.ltx25_video_encoder,
+                nvenc_preset=self.config.ltx25_nvenc_preset,
             )
-            encode_target.unlink(missing_ok=True)
-        progress(1.0)
+            print(f"[ltx25] stage timing: mp4 encode {time.time() - encode_t0:.1f}s", flush=True)
+            if request.mode == "retake":
+                self._finish_retake(source_edit_path, encode_target, target, request)
+                encode_target.unlink(missing_ok=True)
+            elif request.mode == "extend":
+                self._finish_extend(
+                    source_edit_path, encode_target, target, request.extend_direction,
+                    extend_context_duration, extend_duration,
+                )
+                encode_target.unlink(missing_ok=True)
+
+        # 高速化④: 基本モードの mp4 encode(実測 0.6s、CPU+NVENC のみで VRAM 不使用)は
+        # ジョブワーカーへ closure として返し、次ジョブの denoise と重ねられるようにする
+        # (jobs.py 側の encode 専用スレッドが実行し、完了時に completed へ遷移させる)。
+        # retake/extend は encode 後にファイル差し替えの後処理があるため従来どおり同期。
+        # LTX25_ASYNC_ENCODE=0 で従来の同期動作へ戻る。
+        defer_encode = (
+            os.getenv("LTX25_ASYNC_ENCODE", "1").strip() == "1"
+            and request.mode in {"t2v", "a2v", "i2v", "flf2v"}
+        )
         peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        if defer_encode:
+            gc.collect()
+            torch.cuda.empty_cache()
+            # progress(1.0) は encode 完了時に jobs 側が立てる(ここではまだ完了ではない)。
+            return {"peak_vram_gb": peak_vram_gb, "deferred_encode": _encode_and_finalize}
+        # 同期エンコード(retake/extend 等)も NVENC を開く**前**に torch の予約
+        # キャッシュを返す(2026-09-06)。従来はエンコード後にしか empty_cache して
+        # おらず、直前の大きいジョブでキャッシュが育っていると NVENC の
+        # avcodec_open2 が VRAM を確保できず失敗した(実機: 1024×576×361f の
+        # i2v 連発後の extend で "avcodec_open2(h264_nvenc)" エラー)。
+        gc.collect()
+        torch.cuda.empty_cache()
+        _encode_and_finalize()
+        progress(1.0)
         gc.collect()
         torch.cuda.empty_cache()
         return {"peak_vram_gb": peak_vram_gb}

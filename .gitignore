@@ -13,3 +13,8 @@ LTX-2.5-Diffusers-bnb-4bit/
 .ltx25-component-caches/
 scratch_ab/
 server.log
+LTX-2.5-Diffusers-bnb-4bit
+loras
+logs_server.log
+scratch_*/
+probes/__pycache__/

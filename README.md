@@ -147,7 +147,14 @@ curl -X POST http://localhost:8000/api/jobs \
 - `MAX_UPLOAD_SIZE_MB`: 1ファイルの上限（既定500MB）
 - `LTX25_DECODER`: 2倍高解像度化後のデコード方式。`diffusion`（既定・diffusion decoderによる高品質デコード。NATTEN導入後の追加コストは約18秒）または`vae`（従来の畳み込みVAE・最速）。リクエストの`decoder`フィールドでジョブ単位に上書きできます。2倍高解像度化がOFFのジョブは常にVAEデコードです
 - `LTX25_VIDEO_CRF`: 出力MP4のlibx264 CRF（既定18）。全経路（draft/high、全デコーダ）に適用されます。従来の既定CRF~23より高ビットレートで、圧縮によるディテール損失を抑えます
-- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です
+- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です。**`nvfp4`（2026-09追加・sm_120 Blackwell専用）**: Lightricks公式配布のBlackwellネイティブFP4蒸留transformer（常駐約19GB）を`torch._scaled_mm`のFP4 GEMMで直接実行します（`app/nvfp4.py`。GEMM素でbf16比3.2〜3.8倍、リアルタイム用途の最速構成。`LTX25_NVFP4_CKPT`でローカルファイルを指定可、未指定ならHF Hubから自動取得）
+- `LTX25_CUDA_GRAPH`: `1`でtransformer forward全体をCUDA Graph capture/replayし、denoiseのCPUカーネル起動コストを消します（`app/cudagraph.py`）。出力はeagerと**bit完全一致**。`OFFLOAD_MODE=none`前提（それ以外では警告して無効）。LoRAを使うジョブは自動でeagerに落ちます。効果は小解像度×少ステップほど大きい（下記「リアルタイム生成と高速化」参照）
+- `LTX25_CUDA_GRAPH_MAX_CAPTURES`: graphを保持するshape数の上限（既定8）。解像度・フレーム数・fps・モード（t2av/a2v）の組ごとに1本captureされ、**上限超過のshapeは警告ログの上、黙ってeagerにフォールバック**します。多shape運用では引き上げてください
+- `LTX25_COMPILE_BLOCKS`: 【実験的・非推奨】per-block torch.compile（`app/compileblocks.py`のdocstring参照）。probeではgraph単体に勝つがサーバE2Eでは利得なし・小解像度では退行、と実測済みのため既定`off`
+- `LTX25_VIDEO_ENCODER`: `nvenc`（既定・h264_nvenc）または`x264`。NVENC不在環境はx264へ自動フォールバック
+- `LTX25_NVENC_PRESET`: NVENCプリセット（`p1`最速〜`p7`最高品質、既定`p7`）。リアルタイム用途は`p4`でエンコード0.1〜0.15s短縮
+- `LTX25_DECODE_SINGLE_TILE`: diffusion decoderのタイル方針（`auto`既定/`on`/`off`）。空きVRAMが許せば単一タイル（約1.23倍速・継ぎ目なし）
+- `LTX25_STAGE_DEBUG`: `1`で段階別時間（text_encode/denoise/decode/encode）をログ出力（既定0）
 
 ## 品質と速度の実測（RTX PRO 6000 Blackwell 96GB、512×512→出力1024²、121フレーム、seed=42）
 
@@ -161,7 +168,41 @@ curl -X POST http://localhost:8000/api/jobs \
 
 **diffusion decoderは既定のVAEデコード比で細部品質を大きく改善します**。平滑領域の微細テクスチャ保持（min 128pxパッチ分散）が1.67→2.41へ向上し、VAEデコード特有の偽グレイン様の高周波ノイズが消えます（グローバルLaplacian分散36.3→25.2の低下はノイズ減少によるもの）。
 
-**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`app/generator.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため diffusion decoder の実用性が大きく上がったが、既定は互換性優先で `vae` のまま。
+**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`app/generator.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため、**既定デコーダは `diffusion` に変更済み**（`LTX25_DECODER=vae` で従来経路に戻せる）。
+
+## リアルタイム生成と高速化（2026-09 実測）
+
+nvfp4 + CUDA Graph + NVENC の組み合わせで、**生成時間 < 再生時間（リアルタイム比 1.0x 未満）のストリーミング生成**が成立します。実測はすべて RTX PRO 6000 Blackwell 96GB（sm_120）、蒸留σ・4step・約5秒クリップ・t2av、`LTX25_TRANSFORMER_PRECISION=nvfp4 OFFLOAD_MODE=none LTX25_CUDA_GRAPH=1 LTX25_NVENC_PRESET=p4`。
+
+### CUDA Graph の効果（bit一致・実測）
+
+| 条件（4step） | graphなし | graphあり |
+|---|---|---|
+| 512×288×121f | 2.48s | 2.38s（-4%） |
+| 384×288×81f | 2.30〜2.37s | **1.83〜1.88s（-20%）** |
+
+解像度が小さいほどCPUカーネル起動律速の比率が上がるため効果が大きくなります。映像framemd5・音声md5ともeagerと完全一致。新しいshapeの初回のみcapture費（+1.5〜2s）が乗ります。
+
+### リアルタイム解像度上限（約5秒クリップ・4step・リアルタイム比1.0x基準）
+
+| fps | 安全圏（≤0.90x） | ギリギリ（〜0.98x） |
+|---|---|---|
+| 20fps（97f） | 768×512 | 768×576 |
+| 24fps（121f） | 704×480 | 768×480 |
+
+8stepは境界が約半分（16fps基準で〜34万画素）。a2v（音声条件付け）はt2av比で平均+0.15sのみ（境界セルだけ注意）。
+
+### 【重要】fps=16 は品質NG
+
+fps=16指定は**4.0秒（64フレーム）周期のモーション揺らぎ**（一瞬停止/僅かな巻き戻り感）が構造的に発生します（LTX-2.5の学習が24/25fps中心で、RoPE時間座標が分布外になるため。同一seed・同一内容のA/Bで20fps・24fpsでは消失を確認）。**リアルタイム用途は20fps推奨**（品質クリーンかつ予算が24fpsより広い）。
+
+### 長尺単発生成
+
+704×416・8step・16fpsで30秒（APIの`num_frames≤481`上限）まで速度・VRAMとも成立（30秒クリップを29.4s・ピーク40.9GBで生成）。ただし**25秒級の長尺ではseed依存の「モーション停止→ジャンプ」が散発**します。`probes/detect_motion_stall.py`（約0.5s/本、検出時exit 1）を生成後QCに使い、検出時は別seedでリトライする運用を推奨します。
+
+### probes/
+
+開発時の検証スクリプト群を同梱しています: CUDA Graph の等価性・速度（`probe_cudagraph*.py`）、torch.compile 併用の検証記録（`probe_compile_*.py`、結論は「本番では利得なし」）、nvfp4 の量子化検証（`probe_nvfp4_*.py`）、モーション停止検出器（`detect_motion_stall.py`）。
 
 ## ライセンス
 

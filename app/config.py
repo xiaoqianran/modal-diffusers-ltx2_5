@@ -29,12 +29,55 @@ class Settings(BaseSettings):
     ltx25_decoder: str = "diffusion"
     # libx264 CRF for all output videos (lower = higher quality). Env: LTX25_VIDEO_CRF
     ltx25_video_crf: int = 18
+    # mp4 encoder: "nvenc" (h264_nvenc p7/tune hq, GPU; default -- measured
+    # PSNR 43.8dB vs x264 crf18 on identical frames, 1024x576x121f encode
+    # 3.3s -> 1.9s / 1536x896 6.9s -> 4.4s, falls back to x264 automatically
+    # when NVENC is unavailable) or "x264" (libx264 preset=slower, CPU).
+    # Env: LTX25_VIDEO_ENCODER
+    ltx25_video_encoder: str = "nvenc"
+    # NVENC のエンコードプリセット(p1=最速 .. p7=最遅・最高品質)。既定 p7 は
+    # MV 等の最終出力品質を優先した値。リアルタイム用途(低画素・短尺)では
+    # LTX25_NVENC_PRESET=p4 で mp4 encode を ~0.1-0.15s 短縮できる(2026-09-04)。
+    ltx25_nvenc_preset: str = "p7"
+    # Diffusion-decoder tiling: "auto" (single tile when free VRAM allows --
+    # ~1.23x faster and seam-free; falls back to default tiles otherwise),
+    # "on" (always single tile), "off" (always default 768^2x80f tiles).
+    # Probe (probes/probe_decode_tiling.py, 1024x576x121f): default 9.67s /
+    # single 7.85s, decode activations ~0.34GB per Mpixel of output volume.
+    # Env: LTX25_DECODE_SINGLE_TILE
+    ltx25_decode_single_tile: str = "auto"
     # Transformer weights: "nf4" (bnb 4bit, default), "fp8" (bf16-equivalent
     # quality via layerwise casting storage=fp8_e4m3fn / compute=bf16, resident
     # ~18GB / peak ~29GB, for 48GB-class GPUs; requires the ~38GB bf16
     # transformer shards in the HF cache) or "bf16" (release weights, ~38GB,
-    # for 96GB-class GPUs). Env: LTX25_TRANSFORMER_PRECISION
+    # for 96GB-class GPUs) or "nvfp4" (official Blackwell-native FP4 distilled
+    # transformer, resident ~19GB, FP4 tensor-core matmul via torch._scaled_mm;
+    # requires sm_120+. See app/nvfp4.py). Env: LTX25_TRANSFORMER_PRECISION
     ltx25_transformer_precision: str = "nf4"
+    # Optional local path to the ComfyUI-format nvfp4 checkpoint. When unset,
+    # hf_hub_download("Lightricks/LTX-2.5", "diffusion_models/ltx-2.5-22b-
+    # distilled-transformer-nvfp4.safetensors") resolves it (18.7GB, cached).
+    # Env: LTX25_NVFP4_CKPT
+    ltx25_nvfp4_ckpt: str | None = None
+    # transformer.forward 全体を CUDA Graph capture/replay して denoise の
+    # カーネル起動律速を潰す(app/cudagraph.py。実測 512x288x121f t2v 8steps:
+    # denoise 1.82s→0.48s(3.8x)、映像・音声とも eager と bit 一致)。
+    # OFFLOAD_MODE=none 前提(それ以外では警告して無効)。LoRA ジョブは自動で
+    # eager に落ちる。Env: LTX25_CUDA_GRAPH
+    ltx25_cuda_graph: bool = False
+    # capture を保持する shape 数の上限。超過分の新 shape は eager フォールバック。
+    # 1 shape あたり静的入出力バッファ+graph 中間メモリ(共有 mempool)を保持する。
+    # Env: LTX25_CUDA_GRAPH_MAX_CAPTURES
+    ltx25_cuda_graph_max_captures: int = 8
+    # 【実験的・非推奨】transformer_blocks の per-block torch.compile
+    # (app/compileblocks.py のモジュール docstring の結論を必ず読むこと)。
+    # "off"(既定)/ "islands" / "fusion"。probe では graph 単体に勝つが、
+    # サーバ E2E では同 shape で誤差範囲・リアルタイム小 shape では退行
+    # (2.39s vs 1.83s)のため本番では使わない。品質面も eager と bit 一致しない
+    # (軌道差、ユーザー判定では同等)。nvfp4 + LTX25_CUDA_GRAPH=1 +
+    # OFFLOAD_MODE=none が前提(それ以外は警告して無効)。
+    # Env: LTX25_COMPILE_BLOCKS
+    ltx25_compile_blocks: str = "off"
 
 
 settings = Settings()
