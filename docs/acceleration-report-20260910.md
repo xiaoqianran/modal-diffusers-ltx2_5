@@ -107,7 +107,110 @@ Lightricks 公式 LTX-2 パッケージの `cudagraph_capture.py`(v1.2.0+)の方
 - a2v は音声トークン数が t2av と異なるため **capture キーが別**。モードごとに初回 capture 費が乗る
 - graph は `OFFLOAD_MODE=none`(全常駐)前提。model/sequential オフロードとは併用不可
 
-## 7. まとめ
+## 7. 実装レシピ(レポート単独で再現するための詳細)
+
+### 7.1 CUDA Graph capture/replay(全文 ~170 行、`app/cudagraph.py`)
+
+**前提条件(1つでも欠けると成立しない)**:
+- transformer forward 内に CPU 依存の分岐・`.item()`・CPU テンソル生成が無いこと。LTX2 パイプラインは RoPE 座標(`video_coords`/`audio_coords`)を forward の外で事前計算して渡すためこれが成立する(渡さないと forward 内の座標計算が CPU テンソルを作り、capture 中の H2D copy で落ちる)
+- 蒸留経路であること(cfg=1・stg=0。STG 経路には `torch.zeros((B,))` の CPU テンソル生成がある)
+- 全モデル GPU 常駐(オフロード無し)、生成は単一スレッド、LoRA 無し
+
+**capture 手順(順序が重要)**:
+```python
+# 1. 全テンソル引数を clone して静的入力バッファを作る
+statics = {k: v.clone() for k, v in kwargs.items() if isinstance(v, torch.Tensor)}
+static_kwargs = {**kwargs, **statics}
+
+# 2. side stream で warmup 3回(Triton JIT・cuBLAS ワークスペース確保・
+#    カーネル選択を capture の外へ出す)
+side = torch.cuda.Stream()
+side.wait_stream(torch.cuda.current_stream())
+with torch.cuda.stream(side):
+    for _ in range(3):
+        orig_forward(**static_kwargs)
+torch.cuda.current_stream().wait_stream(side)
+torch.cuda.synchronize()
+
+# 3. cuBLAS ワークスペースをクリア(graph mempool への二重計上を防ぐ)
+torch._C._cuda_clearCublasWorkspaces()
+
+# 4. 入力を入れ直してから capture(warmup が書き換えた可能性への保険)
+for k, sbuf in statics.items():
+    sbuf.copy_(kwargs[k])
+
+# 5. 共有 mempool で capture(複数 shape の中間メモリを共有するため)
+pool = torch.cuda.graph_pool_handle()      # プロセスで1つ使い回す
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph, pool=pool, capture_error_mode="global"):
+    outputs = orig_forward(**static_kwargs)  # outputs の参照を保存
+```
+
+**replay 手順と出力の契約**:
+```python
+for k, sbuf in statics.items():
+    sbuf.copy_(new_kwargs[k])   # 静的バッファへ copy_
+graph.replay()
+return outputs                   # capture 時の静的出力バッファをそのまま返す
+```
+出力は静的バッファなので、**呼び出し側が次の replay より前に消費する**ことが契約。LTX2 パイプラインは transformer 出力を直後に `.float()` でコピーするため安全(自前パイプラインに組む場合はここを確認すること)。
+
+**差し替えとキー設計**:
+- 導入は `transformer.forward = runner`(インスタンス属性への代入。`nn.Module.__call__` はインスタンス属性の forward を優先するため、これだけで効く)
+- capture キー = 全テンソル引数の `(名前, shape, dtype, device)` + 非テンソル引数の値。キーごとに graph 1本
+- フォールバック: 未知型の引数 → eager / キー数が上限超過 → eager / capture 中の例外 → そのキーを恒久 eager 化(いずれもサービスを止めない)
+- 無効化が必要な条件: モデルオフロード(重みアドレスが動く)、LoRA の付け外し(同上。LoRA ジョブは eager に落とし、ジョブ後に全 capture を破棄)
+
+**検証**: 出力等価性は動画の framemd5 / 音声 md5(bit 一致するはず)。速度は cuda Event(ホスト側の時間はレイテンシ隠蔽で無意味 — §3 の罠)。
+
+### 7.2 NVFP4 checkpoint フォーマットと forward(`app/nvfp4.py`)
+
+**checkpoint(ComfyUI 単一ファイル形式)のテンソル仕様**(量子化層ごと):
+
+| テンソル | dtype / shape | 意味 |
+|---|---|---|
+| `<module>.weight` | U8 `[out, in/2]` | e2m1 を 2 値/byte パック。**high nibble = 先頭要素(cuBLAS 規約と逆、ロード時に byte 内スワップ必須)** |
+| `<module>.weight_scale` | F8_E4M3 `[out, in/16]` | 16 要素ブロックスケール。**既に cuBLAS blocked layout(swizzle 済み)で格納** — 正規の swizzle を重ねると二重適用で壊れる |
+| `<module>.weight_scale_2` | F32 スカラー | グローバルスケール |
+| `<module>.input_scale` | F32 スカラー | 活性化の静的スケール |
+
+非量子化層(norm / bias / adaln 等)は bf16。ヘッダの `_quantization_metadata` に量子化層一覧がある。
+
+**forward の演算列**:
+```
+x(bf16, [.., in]) → 2D化 → M を 16 の倍数へ pad
+  → Triton カーネルで動的量子化: (packed fp4 [M, in/2], scales F8 [M, in/16])
+  → 活性化側 scale を to_blocked() で swizzle(重み側はロード時に済ませてある)
+  → torch._scaled_mm(xq, W.T, scale_a, scale_b, out_dtype=bf16)
+  → × (input_scale × weight_scale_2) → + bias → 元 shape へ
+```
+`to_blocked` は cuBLAS の 128 行×4 列タイル並べ替え。**素の行順で渡してもエラーにならず黙って壊れる**ため、検証は必ず公式 bf16 重みとの出力照合で行う(層単体の自作 dequant との cosine 比較は「同じ誤解釈」で一致してしまい検出できない)。
+
+### 7.3 蒸留ステップ間引き
+
+公式蒸留 σ 列(8 段):
+```
+[1.0, 0.99609375, 0.9765625, 0.9375, 0.8515625, 0.578125, 0.28125, 0.109375]
+```
+steps=n(<8)指定時は**先頭と末尾を必ず含む等間隔**で n 個選ぶ(`round(linspace(0, 7, n))` のインデックス)。4step 実測 -31%、静止フレーム品質は破綻なし。
+
+### 7.4 エンコード側
+
+- `h264_nvenc`(preset は用途で p4〜p7)。NVENC 不在なら libx264 へ自動フォールバック
+- mp4 エンコードはワーカースレッドで**次ジョブの denoise と重畳**(効くのはクライアントが完了前に次ジョブを投入する場合のみ)
+- フレームの uint8 化は `output_type="pt"` で GPU 上 ×255。**bf16 のまま ×255 すると bit 不一致になる — `.float()` を挟むこと**(実測で確認した罠)
+
+### 7.5 ファイル対応表
+
+| 手法 | 実装 | 検証スクリプト |
+|---|---|---|
+| CUDA Graph | `app/cudagraph.py` + `app/generator.py`(install/ガード) | `probes/probe_cudagraph.py` / `probe_cudagraph_gputime.py` |
+| NVFP4 | `app/nvfp4.py` | `probes/probe_nvfp4_*.py` |
+| compile(負の結果) | `app/compileblocks.py` | `probes/probe_compile_*.py` |
+| steps 間引き | `app/generator.py` の `_subsample_distilled_sigmas()` | — |
+| stall 検出器 | — | `probes/detect_motion_stall.py` |
+
+## 8. まとめ
 
 - 蒸留 × FP4 × CUDA Graph × NVENC の4層で、22B 音声同時生成モデルの**リアルタイム越え(0.37x)**を単GPUで実証した
 - 効果の主戦場は「小解像度×少ステップ×固定 shape 連投」= serving 用途。ここは diffusers 直組みが ComfyUI に対して構造的優位を持つ領域で、だからこそ community に前例が無い
