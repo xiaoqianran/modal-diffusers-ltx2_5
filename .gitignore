@@ -18,3 +18,5 @@ loras
 logs_server.log
 scratch_*/
 probes/__pycache__/
+frontend/node_modules/
+frontend/dist/

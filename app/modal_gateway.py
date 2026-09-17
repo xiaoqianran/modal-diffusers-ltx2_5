@@ -12,7 +12,6 @@ import modal
 from fastapi import Body, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from .schemas import (
@@ -26,7 +25,6 @@ from .schemas import (
     SessionResponse,
 )
 
-BASE_DIR = Path(__file__).resolve().parent
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".gif"}
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac"}
@@ -84,8 +82,6 @@ def build_gateway(*, worker_cls, job_store, state_volume, state_root: str = "/da
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
-
     def key(job_id: str) -> str:
         return f"job:{job_id}"
 
@@ -134,10 +130,6 @@ def build_gateway(*, worker_cls, job_store, state_volume, state_root: str = "/da
             save(current)
             return current
         return get_record(record["id"]) or record
-
-    @app.get("/", include_in_schema=False)
-    def index():
-        return FileResponse(BASE_DIR / "static" / "index.html")
 
     @app.get("/api/health")
     def health():
