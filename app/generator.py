@@ -650,10 +650,12 @@ class LTXGenerator:
             raise RuntimeError(f"Extend media merge failed: {result.stderr.strip()[-500:]}")
 
     def _get_mel_transform_16k(self, device):
-        """a2v 条件付け用 MelSpectrogram(16kHz 固定パラメータ)のデバイス別キャッシュ。
+        """Return a cached pure-PyTorch Slaney MelSpectrogram transform for A2V.
 
-        毎リクエストの構築(フィルタバンク計算 + .to(device))を省く(高速化②-2)。
-        パラメータは従来のインライン構築と完全同一。
+        This intentionally avoids torchaudio: the production image currently uses a
+        newer torch CUDA wheel than the matching torchaudio wheels published for
+        cu130. Keeping the transform in torch avoids binary-version coupling while
+        preserving the previous 16 kHz / 64-bin / Slaney configuration.
         """
         cache = getattr(self, "_mel_transform_cache", None)
         if cache is None:
@@ -661,12 +663,69 @@ class LTXGenerator:
             self._mel_transform_cache = cache
         key = str(device)
         if key not in cache:
-            import torchaudio
-            cache[key] = torchaudio.transforms.MelSpectrogram(
-                sample_rate=16000, n_fft=1024, win_length=1024, hop_length=160,
-                f_min=0.0, f_max=8000.0, n_mels=64, center=True, pad_mode="reflect",
-                power=1.0, mel_scale="slaney", norm="slaney",
-            ).to(device)
+            import math
+            import torch
+
+            n_fft = 1024
+            win_length = 1024
+            hop_length = 160
+            sample_rate = 16000
+            n_mels = 64
+            n_freqs = n_fft // 2 + 1
+
+            def hz_to_mel(freq):
+                f_sp = 200.0 / 3.0
+                min_log_hz = 1000.0
+                min_log_mel = min_log_hz / f_sp
+                logstep = math.log(6.4) / 27.0
+                return torch.where(
+                    freq >= min_log_hz,
+                    min_log_mel + torch.log(torch.clamp(freq, min=min_log_hz) / min_log_hz) / logstep,
+                    freq / f_sp,
+                )
+
+            def mel_to_hz(mel):
+                f_sp = 200.0 / 3.0
+                min_log_hz = 1000.0
+                min_log_mel = min_log_hz / f_sp
+                logstep = math.log(6.4) / 27.0
+                return torch.where(
+                    mel >= min_log_mel,
+                    min_log_hz * torch.exp(logstep * (mel - min_log_mel)),
+                    f_sp * mel,
+                )
+
+            freqs = torch.linspace(0.0, sample_rate / 2.0, n_freqs, device=device)
+            mel_min = hz_to_mel(torch.tensor(0.0, device=device))
+            mel_max = hz_to_mel(torch.tensor(sample_rate / 2.0, device=device))
+            mel_points = torch.linspace(mel_min, mel_max, n_mels + 2, device=device)
+            hz_points = mel_to_hz(mel_points)
+            lower = hz_points[:-2, None]
+            center = hz_points[1:-1, None]
+            upper = hz_points[2:, None]
+            up_slope = (freqs[None, :] - lower) / torch.clamp(center - lower, min=1e-12)
+            down_slope = (upper - freqs[None, :]) / torch.clamp(upper - center, min=1e-12)
+            filterbank = torch.clamp(torch.minimum(up_slope, down_slope), min=0.0)
+            filterbank = filterbank * (2.0 / torch.clamp(hz_points[2:] - hz_points[:-2], min=1e-12))[:, None]
+            window = torch.hann_window(win_length, periodic=True, device=device)
+
+            def mel_transform(waveform):
+                shape = waveform.shape
+                flat = waveform.reshape(-1, shape[-1])
+                spectrum = torch.stft(
+                    flat,
+                    n_fft=n_fft,
+                    hop_length=hop_length,
+                    win_length=win_length,
+                    window=window,
+                    center=True,
+                    pad_mode="reflect",
+                    return_complex=True,
+                ).abs()
+                mel = torch.matmul(filterbank.to(spectrum.dtype), spectrum)
+                return mel.reshape(*shape[:-1], n_mels, mel.shape[-1])
+
+            cache[key] = mel_transform
         return cache[key]
 
     @staticmethod
