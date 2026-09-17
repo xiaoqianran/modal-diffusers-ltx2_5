@@ -32,6 +32,38 @@ docker run --rm --gpus 'device=0' \
 
 By default, the script stops if less than 80 GiB is available when processing begins. It downloads the latent upsamplers and official Pixel Spatial Upscaler IC-LoRA, but not `transformer_full`, arbitrary user LoRAs, or the diffusion decoder. To add only the Pixel IC-LoRA to an existing installation, run `python scripts/download_quantize_ltx25.py --component pixel_upscaler`.
 
+## Modal / RTX PRO 6000 NVFP4
+
+`modal_app.py` separates model preparation from GPU serving. A CPU-only Modal
+Function downloads the runtime artifacts into the persistent `ltx25-models`
+Volume. The RTX PRO 6000 container mounts that Volume read-only, assembles the
+NVFP4 pipeline once at container startup, and then serves the existing FastAPI
+application. LTX model weights and the diffusion decoder are never downloaded
+after the GPU has been allocated.
+
+```bash
+pip install -r requirements-modal.txt
+modal secret create huggingface HF_TOKEN=hf_...
+
+# CPU only: stage base components, text encoder, upsamplers, decoder and NVFP4
+modal run modal_app.py::prepare
+
+# The RTX PRO 6000 is allocated only when the serving container starts
+modal deploy modal_app.py
+```
+
+The production preset uses `LTX25_TRANSFORMER_PRECISION=nvfp4`,
+`OFFLOAD_MODE=none`, and `LTX25_CUDA_GRAPH=1`. Inputs, outputs, LoRAs, the
+SQLite history, and the small hardware-specific kernel cache live on the
+separate `ltx25-state` Volume. Resource names can be overridden with
+`LTX25_MODAL_MODEL_VOLUME`, `LTX25_MODAL_STATE_VOLUME`, and
+`LTX25_MODAL_HF_SECRET`.
+
+> NATTEN is a torch/CUDA/GPU-specific prebuilt kernel selected by `kernels` in
+> the GPU environment. It is not an LTX model weight. Its first download may
+> still happen during GPU container assembly, but `HF_HOME=/data/hf-cache`
+> persists it across later cold starts.
+
 ## Run with Docker
 
 ```bash

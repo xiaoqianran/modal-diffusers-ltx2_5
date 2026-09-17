@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     # Pinned default: opt in to newer Hub weights by changing MODEL_REVISION.
     model_revision: str | None = "69009ff070135c693ad1ad1ef2cc149c227963da"
     quantized_model_dir: Path = Path("LTX-2.5-Diffusers-bnb-4bit")
+    # Optional pre-staged component paths. Modal sets these to files/directories on
+    # a persistent Volume so GPU containers never download model artifacts.
+    ltx25_text_encoder_dir: Path | None = None
+    ltx25_transformer_config_dir: Path | None = None
+    ltx25_require_local_assets: bool = False
     hf_token: str | None = None
     offload_mode: str = "model"
     output_dir: Path = Path("outputs")

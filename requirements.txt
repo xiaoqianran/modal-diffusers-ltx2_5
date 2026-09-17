@@ -5,15 +5,14 @@ python-multipart>=0.0.20,<1
 httpx>=0.28,<1
 numpy>=1.26,<3
 Pillow>=10,<12
-# torch>=2.11 required for the NATTEN diffusion-decoder path (shi-labs/natten prebuilt
-# kernel variants exist for torch 2.11-2.13; cu130 build verified on sm_120 Blackwell).
-# Older torch still works: app/generator.py falls back to compiled flex-attention.
-torch>=2.11
-kernels>=0.16
-transformers @ git+https://github.com/huggingface/transformers.git
-diffusers @ git+https://github.com/huggingface/diffusers.git
+# Torch is installed separately from the official PyTorch cu130 wheel index in
+# Dockerfile so the CUDA build is explicit and reproducible on Blackwell.
+kernels==0.17.1
+transformers==5.17.0
+diffusers==0.40.0
 accelerate>=1.4
 huggingface-hub>=0.30
-bitsandbytes>=0.49,<0.51
+bitsandbytes==0.50.2
 imageio-ffmpeg>=0.6
 imageio>=2.35,<3
+av>=14,<17

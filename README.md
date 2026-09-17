@@ -32,6 +32,58 @@ docker run --rm --gpus 'device=0' \
 
 既定では処理開始時の空きが80GiBを下回ると停止します。高品質生成用の潜在アップサンプラーと公式Pixel Spatial Upscaler IC-LoRAを取得しますが、`transformer_full`、任意のユーザーLoRA、diffusion decoderは取得しません。既存環境へPixel IC-LoRAだけ追加する場合は`python scripts/download_quantize_ltx25.py --component pixel_upscaler`を実行します。
 
+## Modal / RTX PRO 6000 NVFP4
+
+`modal_app.py` 将准备阶段和 GPU 推理解耦：模型下载在 CPU Function 中完成并写入
+`ltx25-models` Volume；RTX PRO 6000 只读挂载该 Volume，在容器启动时完成 NVFP4
+模型装配并开始服务。GPU 侧不会下载 LTX 权重或 diffusion decoder。
+
+```bash
+pip install -r requirements-modal.txt
+modal secret create huggingface HF_TOKEN=hf_...
+
+# CPU only: 下载 base/text encoder/upsamplers/diffusion decoder/NVFP4 checkpoint
+modal run modal_app.py::prepare
+
+# 部署；只有 GPU 服务容器实际启动时才申请 RTX PRO 6000
+modal deploy modal_app.py
+```
+
+生产预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`、
+`LTX25_CUDA_GRAPH=1`。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
+放在独立的 `ltx25-state` Volume，任务状态保存在 `ltx25-jobs` Modal Dict。
+CPU 网关通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器，
+空闲 120 秒后自动释放。打开页面、查看历史和上传文件不会启动 GPU。可通过
+`LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_HF_SECRET`
+覆盖默认资源名。
+
+### 独立前端
+
+前端已经与 Modal/FastAPI 后端分离，位于 `frontend/`，使用 Vite + Vanilla JS。
+后端只提供 `/api/*` 与 `/outputs/*`，不再托管静态页面。
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+打开 `http://127.0.0.1:5187`。Vite 开发代理默认连接当前 Modal 网关；如需切换后端，
+设置 `VITE_API_TARGET` 后重新启动前端。前端可以连续提交任务，后端仍保持单 GPU
+串行执行（`max_containers=1`、`max_inputs=1`），后续任务在 Modal 队列中等待。
+
+部署前设置 `$env:LTX25_MODAL_GPU_IDLE_SECONDS="120"` 可调整 GPU 空闲保留时间；
+较长的时间适合连续生成，较短的时间减少空闲 GPU 费用。该变量在执行 Modal CLI
+时读取，修改后需要重新部署；不会自动读取本地 `.env` 文件。
+
+网关在同一容器内串行化 Volume 操作（包括完整文件响应），避免打开文件期间
+执行 `reload()`；健康检查和任务轮询仍可并发。大文件传输期间，同容器的其他
+文件操作会等待。任务列表仍扫描 Modal Dict，适合当前个人工作室规模；大量
+长期历史应迁移到支持索引和分页的数据库。
+
+> NATTEN 是硬件/torch/CUDA 组合相关的预编译 kernel，由 `kernels` 在 GPU 环境中选择；
+> 它不是 LTX 模型权重。其首次 kernel 获取目前仍发生在 GPU 容器中。
+
 ## Dockerで起動
 
 ```bash
