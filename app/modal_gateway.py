@@ -233,7 +233,9 @@ def build_gateway(*, worker_cls, job_store, state_volume, state_root: str = "/da
             raise HTTPException(status_code=409, detail="Job submission is still in progress; retry shortly")
         if call_id:
             try:
-                modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
+                # Cancel only this input. Keep the warm GPU container alive so the
+                # next queued job can reuse the already-loaded LTX pipeline.
+                modal.FunctionCall.from_id(call_id).cancel(terminate_containers=False)
             except Exception as exc:
                 raise HTTPException(status_code=502, detail="Could not cancel the Modal job; retry shortly") from exc
         target = get_record(target["id"]) or target

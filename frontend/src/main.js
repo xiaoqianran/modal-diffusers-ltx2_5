@@ -5,7 +5,7 @@ const SESSION_KEY = 'ltx25.session'
 let sessionNumber = Number(localStorage.getItem(SESSION_KEY)) || null
 let pollTimer = null
 let loras = []
-const assets = { first: null, last: null, audio: null }
+const assets = { first: null, last: null, source: null, audio: null }
 
 app.innerHTML = `
   <main class="shell">
@@ -32,6 +32,13 @@ app.innerHTML = `
           <button type="button" data-mode="i2v" class="mode">I2V</button>
           <button type="button" data-mode="flf2v" class="mode">FLF2V</button>
           <button type="button" data-mode="a2v" class="mode">A2V</button>
+          <button type="button" data-mode="t2i" class="mode">T2I</button>
+          <button type="button" data-mode="refine_image" class="mode">REFINE</button>
+          <button type="button" data-mode="ref2i" class="mode">REF2I</button>
+          <button type="button" data-mode="condition" class="mode">CONDITION</button>
+          <button type="button" data-mode="iclora" class="mode">IC-LORA</button>
+          <button type="button" data-mode="retake" class="mode">RETAKE</button>
+          <button type="button" data-mode="extend" class="mode">EXTEND</button>
         </div>
         <input id="mode" name="mode" type="hidden" value="t2av" />
 
@@ -50,6 +57,21 @@ app.innerHTML = `
             <input type="file" accept="audio/*" hidden />
             <span>AUDIO</span><strong>选择音频</strong><small>WAV / MP3 / M4A / FLAC</small>
           </label>
+        </div>
+        <div id="sourceInputs" class="asset-grid" hidden>
+          <label id="sourceAsset" class="asset-drop">
+            <input type="file" accept="image/*,video/*" hidden />
+            <span>SOURCE</span><strong>选择参考素材</strong><small>图片 / 视频</small>
+          </label>
+        </div>
+        <div id="modeOptions" class="fields mode-options" hidden>
+          <label id="retakeStartField" class="field" hidden><span>Retake start (s)</span><input name="retake_start" type="number" min="0" step="0.1" value="0" /></label>
+          <label id="retakeEndField" class="field" hidden><span>Retake end (s)</span><input name="retake_end" type="number" min="0.1" step="0.1" value="3" /></label>
+          <label id="extendDirectionField" class="field" hidden><span>Extend direction</span><select name="extend_direction"><option value="end">End</option><option value="start">Start</option></select></label>
+          <label id="extendSecondsField" class="field" hidden><span>Extend seconds</span><input name="extend_seconds" type="number" min="1" max="20" step="0.5" value="5" /></label>
+          <label id="extendContextField" class="field" hidden><span>Context seconds</span><input name="extend_context_seconds" type="number" min="0.5" max="20" step="0.5" value="3" /></label>
+          <label id="strengthField" class="field" hidden><span>Reference strength</span><input name="strength" type="number" min="0.1" max="1" step="0.05" value="1" /></label>
+          <label id="framePositionField" class="field" hidden><span>Frame position</span><select name="frame_position"><option value="last">Last</option><option value="center">Center</option></select></label>
         </div>
 
         <label class="field field-wide">
@@ -149,10 +171,41 @@ async function checkHealth() {
 function setMode(mode) {
   el('#mode').value = mode
   all('.mode').forEach(button => button.classList.toggle('active', button.dataset.mode === mode))
-  el('#visualInputs').hidden = !['i2v', 'flf2v'].includes(mode)
-  el('#firstAsset').hidden = !['i2v', 'flf2v'].includes(mode)
+
+  const usesFirst = ['i2v', 'flf2v', 'refine_image', 'ref2i'].includes(mode)
+  el('#visualInputs').hidden = !usesFirst
+  el('#firstAsset').hidden = !usesFirst
   el('#lastAsset').hidden = mode !== 'flf2v'
   el('#audioInputs').hidden = mode !== 'a2v'
+  el('#sourceInputs').hidden = !['condition', 'iclora', 'retake', 'extend'].includes(mode)
+
+  const optionMap = {
+    retakeStartField: mode === 'retake',
+    retakeEndField: mode === 'retake',
+    extendDirectionField: mode === 'extend',
+    extendSecondsField: mode === 'extend',
+    extendContextField: mode === 'extend',
+    strengthField: mode === 'refine_image',
+    framePositionField: mode === 'ref2i',
+  }
+  Object.entries(optionMap).forEach(([id, visible]) => { el(`#${id}`).hidden = !visible })
+  el('#modeOptions').hidden = !Object.values(optionMap).some(Boolean)
+
+  const still = ['t2i', 'refine_image', 'ref2i'].includes(mode)
+  const upscale = document.querySelector('input[name="upscale"]')
+  const decoder = document.querySelector('select[name="decoder"]')
+  const sourceInput = el('#sourceAsset input')
+  sourceInput.accept = ['retake', 'extend'].includes(mode) ? 'video/*' : 'image/*,video/*'
+  if (mode === 'ref2i' || ['iclora', 'retake', 'extend'].includes(mode)) {
+    upscale.checked = false
+    upscale.disabled = true
+    decoder.value = 'vae'
+    decoder.disabled = true
+  } else {
+    upscale.disabled = false
+    decoder.disabled = false
+    if (still) upscale.checked = true
+  }
 }
 
 all('.mode').forEach(button => button.addEventListener('click', () => setMode(button.dataset.mode)))
@@ -180,7 +233,7 @@ async function uploadAsset(slot, file, label) {
   }
 }
 
-[['#firstAsset','first'], ['#lastAsset','last'], ['#audioAsset','audio']].forEach(([selector, slot]) => {
+[['#firstAsset','first'], ['#lastAsset','last'], ['#sourceAsset','source'], ['#audioAsset','audio']].forEach(([selector, slot]) => {
   const label = el(selector)
   label.querySelector('input').addEventListener('change', event => uploadAsset(slot, event.target.files?.[0], label))
 })
@@ -215,31 +268,57 @@ function renderJobs(jobs) {
     root.innerHTML = '<div class="empty">还没有任务。</div>'
     return
   }
-  root.innerHTML = jobs.map(job => {
-    const media = job.video_url
-      ? `<video controls preload="none" src="${job.video_url}"></video>`
-      : job.image_url ? `<img src="${job.image_url}" alt="result" loading="lazy" />` : ''
-    const metric = job.generation_seconds == null ? '' : `<span>${job.generation_seconds.toFixed(1)}s GPU</span>`
-    const vram = job.peak_vram_gb == null ? '' : `<span>${job.peak_vram_gb.toFixed(1)} GiB</span>`
-    const waiting = job.status === 'queued' ? `<span>队列 #${queuePosition.get(job.id)}</span>` : ''
-    const activeActions = ['queued','running'].includes(job.status)
+
+  // Keep the queue visually stable: at most one full card. Prefer the running
+  // job, then the oldest queued job, then the newest historical result.
+  const featured = jobs.find(job => job.status === 'running')
+    || queuedOldestFirst[0]
+    || jobs[0]
+  const rest = jobs.filter(job => job.id !== featured.id)
+
+  const actions = job => {
+    const activeAction = ['queued','running'].includes(job.status)
       ? `<button class="job-action danger" data-action="interrupt" data-id="${job.id}">取消</button>` : ''
     const deleteAction = ['completed','failed','interrupted'].includes(job.status)
       ? `<button class="job-action" data-action="delete" data-id="${job.id}">删除</button>` : ''
     const download = job.video_url || job.image_url
       ? `<a class="job-action" href="${job.video_url || job.image_url}" download>下载</a>` : ''
+    return `${activeAction}${download}${deleteAction}`
+  }
+
+  const media = featured.video_url
+    ? `<video controls preload="none" src="${featured.video_url}"></video>`
+    : featured.image_url ? `<img src="${featured.image_url}" alt="result" loading="lazy" />` : ''
+  const metric = featured.generation_seconds == null ? '' : `<span>${featured.generation_seconds.toFixed(1)}s GPU</span>`
+  const vram = featured.peak_vram_gb == null ? '' : `<span>${featured.peak_vram_gb.toFixed(1)} GiB</span>`
+  const waiting = featured.status === 'queued' ? `<span>队列 #${queuePosition.get(featured.id)}</span>` : ''
+  const featuredHtml = `
+    <article class="job job-featured job-${featured.status}">
+      <div class="job-head">
+        <div><strong>${statusLabel(featured)}</strong><span class="mode-chip">${modeLabel(featured.request?.mode)}</span><small>${featured.id.slice(0, 8)}</small></div>
+        <div class="job-meta">${waiting}${metric}${vram}</div>
+      </div>
+      <p>${escapeHtml(featured.request?.prompt || '')}</p>
+      ${featured.error ? `<pre>${escapeHtml(featured.error)}</pre>` : ''}
+      ${media}
+      <div class="job-actions">${actions(featured)}</div>
+    </article>`
+
+  const rowsHtml = rest.map(job => {
+    const queue = job.status === 'queued' ? `#${queuePosition.get(job.id)}` : statusLabel(job)
+    const metric = job.generation_seconds == null ? '' : `${job.generation_seconds.toFixed(1)}s`
     return `
-      <article class="job job-${job.status}">
-        <div class="job-head">
-          <div><strong>${statusLabel(job)}</strong><span class="mode-chip">${modeLabel(job.request?.mode)}</span><small>${job.id.slice(0, 8)}</small></div>
-          <div class="job-meta">${waiting}${metric}${vram}</div>
+      <div class="queue-row queue-row-${job.status}">
+        <div class="queue-row-main">
+          <strong>${queue}</strong>
+          <span class="mode-chip">${modeLabel(job.request?.mode)}</span>
+          <span class="queue-prompt">${escapeHtml(job.request?.prompt || '')}</span>
         </div>
-        <p>${escapeHtml(job.request?.prompt || '')}</p>
-        ${job.error ? `<pre>${escapeHtml(job.error)}</pre>` : ''}
-        ${media}
-        <div class="job-actions">${activeActions}${download}${deleteAction}</div>
-      </article>`
+        <div class="queue-row-side"><small>${metric || job.id.slice(0, 8)}</small>${actions(job)}</div>
+      </div>`
   }).join('')
+
+  root.innerHTML = featuredHtml + (rowsHtml ? `<div class="queue-list">${rowsHtml}</div>` : '')
 }
 
 async function loadJobs() {
@@ -292,20 +371,32 @@ el('#generate').addEventListener('submit', async event => {
     const mode = form.get('mode')
     if (mode === 'i2v' && !assets.first) throw new Error('I2V 需要先上传首帧图片')
     if (mode === 'flf2v' && (!assets.first || !assets.last)) throw new Error('FLF2V 需要首帧和末帧图片')
+    if (['refine_image', 'ref2i'].includes(mode) && (!assets.first || assets.first.kind !== 'image')) throw new Error(`${modeLabel(mode)} 需要参考图片`)
+    if (['condition', 'iclora', 'retake', 'extend'].includes(mode) && !assets.source) throw new Error(`${modeLabel(mode)} 需要参考素材`)
+    if (['retake', 'extend'].includes(mode) && assets.source?.kind !== 'video') throw new Error(`${modeLabel(mode)} 需要源视频`)
     if (mode === 'a2v' && !assets.audio) throw new Error('A2V 需要先上传音频')
+    const loraId = el('#loraSelect').value
+    if (mode === 'iclora' && !loraId) throw new Error('IC-LORA 需要选择一个 IC-LoRA')
+    if (mode === 'iclora' && !loras.find(item => item.id === loraId)?.generic_iclora_compatible) {
+      throw new Error('所选 LoRA 不是兼容的通用 IC-LoRA')
+    }
+
     const [width, height] = form.get('size').split('x').map(Number)
     const session = await ensureSession()
     const conditions = []
-    if (['i2v','flf2v'].includes(mode)) conditions.push({ asset_id: assets.first.id, kind: 'image', index: 0, strength: 1 })
+    if (['i2v','flf2v','refine_image'].includes(mode)) conditions.push({ asset_id: assets.first.id, kind: 'image', index: 0, strength: 1 })
+    if (mode === 'ref2i') conditions.push({ asset_id: assets.first.id, kind: 'image', index: 0, strength: 1 })
     if (mode === 'flf2v') conditions.push({ asset_id: assets.last.id, kind: 'image', index: -1, strength: 1 })
-    const loraId = el('#loraSelect').value
+    if (mode === 'condition') conditions.push({ asset_id: assets.source.id, kind: assets.source.kind, index: 0, strength: 1 })
+    if (mode === 'iclora') conditions.push({ asset_id: assets.source.id, kind: assets.source.kind, index: 1, strength: 1 })
+    if (['retake','extend'].includes(mode)) conditions.push({ asset_id: assets.source.id, kind: 'video', index: 0, strength: 1 })
     const body = {
       session_number: session,
       mode,
       prompt: form.get('prompt').trim(),
       negative_prompt: form.get('negative_prompt').trim(),
       width, height,
-      num_frames: Number(form.get('num_frames')),
+      num_frames: mode === 'ref2i' ? 49 : Number(form.get('num_frames')),
       fps: Number(form.get('fps')),
       steps: Number(form.get('steps')),
       guidance_scale: Number(form.get('guidance_scale')),
@@ -318,6 +409,15 @@ el('#generate').addEventListener('submit', async event => {
       audio_asset_id: mode === 'a2v' ? assets.audio.id : null,
       modality_scale: optionalNumber(form, 'modality_scale'),
       audio_guidance_scale: optionalNumber(form, 'audio_guidance_scale'),
+      retake_start: mode === 'retake' ? Number(form.get('retake_start')) : null,
+      retake_end: mode === 'retake' ? Number(form.get('retake_end')) : null,
+      regenerate_video: true,
+      regenerate_audio: true,
+      extend_direction: mode === 'extend' ? form.get('extend_direction') : 'end',
+      extend_seconds: mode === 'extend' ? Number(form.get('extend_seconds')) : 5,
+      extend_context_seconds: mode === 'extend' ? Number(form.get('extend_context_seconds')) : 3,
+      strength: mode === 'refine_image' ? Number(form.get('strength')) : 1,
+      frame_position: mode === 'ref2i' ? form.get('frame_position') : 'last',
       loras: loraId ? [{ id: loraId, strength: Number(el('#loraStrength').value || 1) }] : [],
     }
     const batch = Math.max(1, Math.min(20, Number(form.get('batch') || 1)))

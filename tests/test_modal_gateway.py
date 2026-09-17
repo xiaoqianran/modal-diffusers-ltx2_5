@@ -65,6 +65,22 @@ def test_completed_job_cannot_be_interrupted(gateway):
     assert store.get(f"job:{job['id']}")["status"] == "completed"
 
 
+def test_interrupt_keeps_warm_worker_container(gateway, monkeypatch):
+    client, store, _, _, _ = gateway
+    job = client.post("/api/jobs", json={"prompt": "A bird"}).json()
+    calls = []
+
+    def cancel(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("modal.FunctionCall.from_id", lambda _: SimpleNamespace(cancel=cancel))
+    response = client.post("/api/interrupt", json={"job_id": job["id"]})
+    assert response.status_code == 200
+    assert response.json()["interrupted"] is True
+    assert calls == [{"terminate_containers": False}]
+    assert store.get(f"job:{job['id']}")["status"] == "interrupted"
+
+
 def test_cancel_failure_does_not_claim_success(gateway, monkeypatch):
     client, store, _, _, _ = gateway
     job = client.post("/api/jobs", json={"prompt": "A bird"}).json()

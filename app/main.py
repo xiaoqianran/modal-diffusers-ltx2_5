@@ -5,6 +5,7 @@ from typing import Optional
 
 import httpx
 from fastapi import Body, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -24,7 +25,6 @@ from .schemas import (
     SessionResponse,
 )
 
-BASE_DIR = Path(__file__).resolve().parent
 settings.output_dir.mkdir(parents=True, exist_ok=True)
 settings.input_dir.mkdir(parents=True, exist_ok=True)
 settings.lora_dir.mkdir(parents=True, exist_ok=True)
@@ -33,15 +33,16 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".gif"}
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac"}
 
-app = FastAPI(title="LTX-2.5 Studio", version="1.0.0")
+app = FastAPI(title="LTX-2.5 Studio API", version="1.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 manager = JobManager(settings)
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.mount("/outputs", StaticFiles(directory=settings.output_dir), name="outputs")
-
-
-@app.get("/", include_in_schema=False)
-def index():
-    return FileResponse(BASE_DIR / "static" / "index.html")
 
 
 @app.get("/api/health")
