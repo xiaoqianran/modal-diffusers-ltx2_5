@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Download LTX-2.5 one component at a time and persist NF4 weights.
+"""Prepare LTX-2.5 artifacts one component at a time.
 
 Each large component gets an isolated Hugging Face cache.  That cache is
 removed only after the saved quantized component has successfully reloaded.
 The script is safe to rerun: verified components are skipped.
+
+The ``modal_nvfp4`` profile is intentionally CPU-only: it downloads the release
+text encoder, pipeline components, diffusion decoder, transformer config, and
+official NVFP4 checkpoint without constructing or quantizing a CUDA model.
 """
 
 from __future__ import annotations
@@ -22,6 +26,9 @@ REVISION = "69009ff070135c693ad1ad1ef2cc149c227963da"
 TEMPORAL_REVISION = "871165de037793df7d75c23a02dd7f45fd364c97"
 PIXEL_UPSCALER_REPO_ID = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
 PIXEL_UPSCALER_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
+NVFP4_REPO_ID = "Lightricks/LTX-2.5"
+NVFP4_FILENAME = "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors"
+NVFP4_LOCAL_FILENAME = "ltx-2.5-22b-distilled-transformer-nvfp4.safetensors"
 DEFAULT_OUTPUT = Path("LTX-2.5-Diffusers-bnb-4bit")
 DEFAULT_MIN_FREE_GIB = 80
 GIB = 1024**3
@@ -51,6 +58,10 @@ TEMPORAL_ALLOW_PATTERNS = [
     "temporal_latent_upsampler/config.json",
     "temporal_latent_upsampler/diffusion_pytorch_model.safetensors",
 ]
+
+MODAL_TEXT_ENCODER_ALLOW_PATTERNS = ["text_encoder/**"]
+MODAL_TRANSFORMER_CONFIG_ALLOW_PATTERNS = ["transformer/config.json"]
+MODAL_DIFFUSION_DECODER_ALLOW_PATTERNS = ["diffusion_decoder/**"]
 
 
 def log(message: str) -> None:
@@ -255,7 +266,7 @@ def download_pixel_upscaler(output_dir: Path, cache_root: Path, token: str, mini
     cache_dir = cache_root / "pixel-upscaler-hub-cache"
 
     def verify(path: Path) -> None:
-        with safe_open(path, framework="pt", device="cpu") as weights:
+        with safe_open(path, framework="numpy") as weights:
             metadata = weights.metadata() or {}
             keys = list(weights.keys())
         factor = int(metadata.get("reference_downscale_factor", 2))
@@ -287,6 +298,110 @@ def download_pixel_upscaler(output_dir: Path, cache_root: Path, token: str, mini
     temporary.replace(destination)
     remove_dedicated_cache(cache_dir, cache_root)
     log(f"[pixel_upscaler] complete ({destination.stat().st_size / GIB:.2f} GiB)")
+
+
+def download_modal_text_encoder(output_dir: Path, token: str, minimum_gib: int) -> None:
+    """Stage the release text encoder on CPU for the 96GB all-resident Modal preset."""
+    from huggingface_hub import snapshot_download
+
+    component = output_dir / "text_encoder"
+    if (component / "config.json").is_file() and any(component.glob("*.safetensors")):
+        log("[modal_text_encoder] already complete; skipping")
+        return
+    require_free_space(output_dir.parent, minimum_gib, "Modal text encoder download")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=REPO_ID,
+        revision=REVISION,
+        token=token,
+        local_dir=output_dir,
+        allow_patterns=MODAL_TEXT_ENCODER_ALLOW_PATTERNS,
+    )
+    if not (component / "config.json").is_file() or not any(component.glob("*.safetensors")):
+        raise RuntimeError("Modal text encoder download is incomplete")
+    log("[modal_text_encoder] complete")
+
+
+def download_modal_transformer_config(output_dir: Path, token: str) -> None:
+    """Stage only the transformer config; NVFP4 supplies the transformer weights."""
+    from huggingface_hub import snapshot_download
+
+    config = output_dir / "transformer" / "config.json"
+    if config.is_file():
+        log("[modal_transformer_config] already complete; skipping")
+        return
+    snapshot_download(
+        repo_id=REPO_ID,
+        revision=REVISION,
+        token=token,
+        local_dir=output_dir,
+        allow_patterns=MODAL_TRANSFORMER_CONFIG_ALLOW_PATTERNS,
+    )
+    if not config.is_file():
+        raise RuntimeError("Modal transformer config download is incomplete")
+    log("[modal_transformer_config] complete")
+
+
+def download_modal_diffusion_decoder(output_dir: Path, token: str, minimum_gib: int) -> None:
+    """Stage the diffusion decoder so the GPU worker never downloads it lazily."""
+    from huggingface_hub import snapshot_download
+
+    component = output_dir / "diffusion_decoder"
+    if (component / "config.json").is_file() and any(component.glob("*.safetensors")):
+        log("[modal_diffusion_decoder] already complete; skipping")
+        return
+    require_free_space(output_dir.parent, minimum_gib, "Modal diffusion decoder download")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=REPO_ID,
+        revision=REVISION,
+        token=token,
+        local_dir=output_dir,
+        allow_patterns=MODAL_DIFFUSION_DECODER_ALLOW_PATTERNS,
+    )
+    if not (component / "config.json").is_file() or not any(component.glob("*.safetensors")):
+        raise RuntimeError("Modal diffusion decoder download is incomplete")
+    log("[modal_diffusion_decoder] complete")
+
+
+def download_modal_nvfp4(output_dir: Path, cache_root: Path, token: str, minimum_gib: int) -> None:
+    """Stage the official Blackwell NVFP4 transformer in a stable local path."""
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    destination_dir = output_dir.parent / "checkpoints"
+    destination = destination_dir / NVFP4_LOCAL_FILENAME
+    cache_dir = cache_root / "nvfp4-hub-cache"
+
+    def verify(path: Path) -> None:
+        with safe_open(path, framework="numpy") as weights:
+            if not list(weights.keys()):
+                raise RuntimeError("NVFP4 checkpoint contains no tensors")
+
+    if destination.is_file():
+        verify(destination)
+        log("[modal_nvfp4] already verified; skipping")
+        remove_dedicated_cache(cache_dir, cache_root)
+        return
+
+    require_free_space(output_dir.parent, minimum_gib, "Modal NVFP4 download")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = Path(
+        hf_hub_download(
+            repo_id=NVFP4_REPO_ID,
+            filename=NVFP4_FILENAME,
+            token=token,
+            cache_dir=cache_dir,
+        )
+    )
+    verify(downloaded)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    shutil.copy2(downloaded, temporary)
+    verify(temporary)
+    temporary.replace(destination)
+    remove_dedicated_cache(cache_dir, cache_root)
+    log(f"[modal_nvfp4] complete ({destination.stat().st_size / GIB:.2f} GiB)")
 
 
 def quantize_text_encoder(output_dir: Path, cache_root: Path, token: str, minimum_gib: int) -> None:
@@ -383,9 +498,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-free-gib", type=int, default=DEFAULT_MIN_FREE_GIB)
     parser.add_argument(
         "--component",
-        choices=("all", "base", "quality", "temporal", "pixel_upscaler", "text_encoder", "transformer"),
+        choices=(
+            "all",
+            "modal_nvfp4",
+            "base",
+            "quality",
+            "temporal",
+            "pixel_upscaler",
+            "modal_text_encoder",
+            "modal_transformer_config",
+            "modal_diffusion_decoder",
+            "modal_nvfp4_checkpoint",
+            "text_encoder",
+            "transformer",
+        ),
         default="all",
-        help="Run one stage or all stages in order.",
+        help=(
+            "Run one stage or all stages in order. modal_nvfp4 is the CPU-only "
+            "preparation profile for a 96GB Blackwell worker."
+        ),
     )
     return parser.parse_args()
 
@@ -399,9 +530,21 @@ def main() -> int:
 
     log(f"Output: {output_dir}")
     log(f"Pinned source: {REPO_ID}@{REVISION}")
-    stages = (
-        "base", "quality", "temporal", "pixel_upscaler", "text_encoder", "transformer"
-    ) if args.component == "all" else (args.component,)
+    if args.component == "all":
+        stages = ("base", "quality", "temporal", "pixel_upscaler", "text_encoder", "transformer")
+    elif args.component == "modal_nvfp4":
+        stages = (
+            "base",
+            "quality",
+            "temporal",
+            "pixel_upscaler",
+            "modal_text_encoder",
+            "modal_transformer_config",
+            "modal_diffusion_decoder",
+            "modal_nvfp4_checkpoint",
+        )
+    else:
+        stages = (args.component,)
     try:
         if "base" in stages:
             download_base(output_dir, token, args.min_free_gib)
@@ -411,6 +554,14 @@ def main() -> int:
             download_temporal_component(output_dir, token, args.min_free_gib)
         if "pixel_upscaler" in stages:
             download_pixel_upscaler(output_dir, cache_root, token, args.min_free_gib)
+        if "modal_text_encoder" in stages:
+            download_modal_text_encoder(output_dir, token, args.min_free_gib)
+        if "modal_transformer_config" in stages:
+            download_modal_transformer_config(output_dir, token)
+        if "modal_diffusion_decoder" in stages:
+            download_modal_diffusion_decoder(output_dir, token, args.min_free_gib)
+        if "modal_nvfp4_checkpoint" in stages:
+            download_modal_nvfp4(output_dir, cache_root, token, args.min_free_gib)
         if "text_encoder" in stages:
             quantize_text_encoder(output_dir, cache_root, token, args.min_free_gib)
         if "transformer" in stages:

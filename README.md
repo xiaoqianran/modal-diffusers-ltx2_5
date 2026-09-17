@@ -32,6 +32,32 @@ docker run --rm --gpus 'device=0' \
 
 既定では処理開始時の空きが80GiBを下回ると停止します。高品質生成用の潜在アップサンプラーと公式Pixel Spatial Upscaler IC-LoRAを取得しますが、`transformer_full`、任意のユーザーLoRA、diffusion decoderは取得しません。既存環境へPixel IC-LoRAだけ追加する場合は`python scripts/download_quantize_ltx25.py --component pixel_upscaler`を実行します。
 
+## Modal / RTX PRO 6000 NVFP4
+
+`modal_app.py` 将准备阶段和 GPU 推理解耦：模型下载在 CPU Function 中完成并写入
+`ltx25-models` Volume；RTX PRO 6000 只读挂载该 Volume，在容器启动时完成 NVFP4
+模型装配并开始服务。GPU 侧不会下载 LTX 权重或 diffusion decoder。
+
+```bash
+pip install -r requirements-modal.txt
+modal secret create huggingface HF_TOKEN=hf_...
+
+# CPU only: 下载 base/text encoder/upsamplers/diffusion decoder/NVFP4 checkpoint
+modal run modal_app.py::prepare
+
+# 部署；只有 GPU 服务容器实际启动时才申请 RTX PRO 6000
+modal deploy modal_app.py
+```
+
+生产预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`、
+`LTX25_CUDA_GRAPH=1`。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
+和 SQLite 历史记录放在独立的 `ltx25-state` Volume。可通过
+`LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_HF_SECRET`
+覆盖默认资源名。
+
+> NATTEN 是硬件/torch/CUDA 组合相关的预编译 kernel，由 `kernels` 在 GPU 环境中选择；
+> 它不是 LTX 模型权重。其首次 kernel 获取目前仍发生在 GPU 容器中。
+
 ## Dockerで起動
 
 ```bash

@@ -220,8 +220,16 @@ class LTXGenerator:
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA GPU is required for LTX-2.5 inference")
             model_dir = self.config.quantized_model_dir.resolve()
-            text_encoder_dir = model_dir / "text_encoder_bnb_4bit"
-            transformer_dir = model_dir / "transformer_bnb_4bit"
+            text_encoder_dir = (
+                self.config.ltx25_text_encoder_dir.resolve()
+                if self.config.ltx25_text_encoder_dir is not None
+                else model_dir / "text_encoder_bnb_4bit"
+            )
+            transformer_dir = (
+                self.config.ltx25_transformer_config_dir.resolve()
+                if self.config.ltx25_transformer_config_dir is not None
+                else model_dir / "transformer_bnb_4bit"
+            )
             if not text_encoder_dir.is_dir() or not transformer_dir.is_dir():
                 raise RuntimeError(
                     f"Quantized LTX-2.5 components are missing under {model_dir}. "
@@ -291,6 +299,11 @@ class LTXGenerator:
                 from .nvfp4 import load_nvfp4_transformer
 
                 nvfp4_ckpt = self.config.ltx25_nvfp4_ckpt
+                if not nvfp4_ckpt and self.config.ltx25_require_local_assets:
+                    raise RuntimeError(
+                        "LTX25_NVFP4_CKPT is required when LTX25_REQUIRE_LOCAL_ASSETS=1. "
+                        "Stage the NVFP4 checkpoint before starting the GPU worker."
+                    )
                 if not nvfp4_ckpt:
                     from huggingface_hub import hf_hub_download
 
@@ -298,11 +311,14 @@ class LTXGenerator:
                         "Lightricks/LTX-2.5",
                         "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors",
                     )
+                nvfp4_path = Path(nvfp4_ckpt).resolve()
+                if not nvfp4_path.is_file():
+                    raise RuntimeError(f"NVFP4 checkpoint not found: {nvfp4_path}")
                 with open(transformer_dir / "config.json") as fh:
                     nvfp4_cfg = _json.load(fh)
                 nvfp4_t0 = time.time()
                 transformer = load_nvfp4_transformer(
-                    str(nvfp4_ckpt), nvfp4_cfg, torch.device("cuda")
+                    str(nvfp4_path), nvfp4_cfg, torch.device("cuda")
                 )
                 print(
                     f"[ltx25] transformer precision=nvfp4 loaded in "
@@ -515,12 +531,25 @@ class LTXGenerator:
             from diffusers.models.autoencoders import LTX2VideoDiffusionDecoderModel
             from diffusers.pipelines.ltx2 import LTX2VideoDiffusionDecodePipeline
 
-            decoder = LTX2VideoDiffusionDecoderModel.from_pretrained(
-                self.config.model_id,
-                subfolder="diffusion_decoder",
-                revision=self.config.model_revision,
-                torch_dtype=torch.bfloat16,
-            )
+            local_decoder_dir = self.config.quantized_model_dir.resolve() / "diffusion_decoder"
+            if self.config.ltx25_require_local_assets and not local_decoder_dir.is_dir():
+                raise RuntimeError(
+                    f"Pre-staged diffusion decoder is missing: {local_decoder_dir}. "
+                    "Run the CPU model preparation step before starting the GPU worker."
+                )
+            if local_decoder_dir.is_dir():
+                decoder = LTX2VideoDiffusionDecoderModel.from_pretrained(
+                    local_decoder_dir,
+                    torch_dtype=torch.bfloat16,
+                    local_files_only=True,
+                )
+            else:
+                decoder = LTX2VideoDiffusionDecoderModel.from_pretrained(
+                    self.config.model_id,
+                    subfolder="diffusion_decoder",
+                    revision=self.config.model_revision,
+                    torch_dtype=torch.bfloat16,
+                )
             decoder.to("cuda")
             # Bound per-tile attention grids (121f x 1024^2 untiled OOMs even at 96GB).
             decoder.enable_tiling()
