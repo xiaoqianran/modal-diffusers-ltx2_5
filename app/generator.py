@@ -242,11 +242,31 @@ class LTXGenerator:
                     "Run scripts/download_quantize_ltx25.py --component quality first."
                 )
             temporal_upsampler_dir = model_dir / "temporal_latent_upsampler"
-            # Keep non-quantized norms/embeddings and activations in bf16 too.
-            # The NF4 config only controls Linear4bit compute dtype on reload.
-            text_encoder = Gemma4UnifiedForConditionalGeneration.from_pretrained(
-                text_encoder_dir, dtype=torch.bfloat16
+            # Gemma and the NVFP4 transformer are independent large reads. Modal's
+            # cold-start guidance recommends loading independent model files
+            # concurrently; overlap the CPU-side Gemma load with the GPU-side
+            # NVFP4 load on the resident-worker path.
+            text_encoder_future = None
+            text_encoder_pool = None
+
+            def load_text_encoder():
+                t0 = time.time()
+                model = Gemma4UnifiedForConditionalGeneration.from_pretrained(
+                    text_encoder_dir, dtype=torch.bfloat16
+                )
+                return model, time.time() - t0
+
+            parallel_cold_load = (
+                self.config.ltx25_parallel_cold_load
+                and self.config.ltx25_transformer_precision == "nvfp4"
             )
+            if parallel_cold_load:
+                from concurrent.futures import ThreadPoolExecutor
+
+                text_encoder_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ltx25-load")
+                text_encoder_future = text_encoder_pool.submit(load_text_encoder)
+            else:
+                text_encoder, _ = load_text_encoder()
             if self.config.ltx25_transformer_precision == "bf16":
                 # Release bf16 weights (~38GB, 96GB-class GPUs). text_encoder stays NF4.
                 transformer = LTX2VideoTransformer3DModel.from_pretrained(
@@ -328,6 +348,14 @@ class LTXGenerator:
             else:
                 transformer = LTX2VideoTransformer3DModel.from_pretrained(
                     transformer_dir, dtype=torch.bfloat16
+                )
+            if text_encoder_future is not None:
+                text_encoder, text_encoder_seconds = text_encoder_future.result()
+                text_encoder_pool.shutdown(wait=True)
+                print(
+                    f"[ltx25] parallel cold load: Gemma {text_encoder_seconds:.1f}s "
+                    "overlapped with NVFP4 transformer",
+                    flush=True,
                 )
             pipe = LTX2ConditionPipeline.from_pretrained(
                 model_dir,

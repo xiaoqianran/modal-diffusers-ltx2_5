@@ -1,8 +1,9 @@
-"""Modal deployment for the RTX PRO 6000 LTX-2.5 NVFP4 serving path.
+"""Modal deployment for the RTX PRO 6000 LTX-2.5 NVFP4 worker.
 
 Model artifacts are staged by a CPU-only function into a persistent Volume.
-The GPU worker mounts that Volume read-only and loads already-local weights.
-A separate CPU gateway serves HTTP without allocating a GPU.
+Interactive HTTP/job routing normally runs on the user's machine and invokes
+this deployed GPU Cls directly through the Modal SDK. The old remote CPU
+gateway remains an opt-in compatibility surface only.
 """
 
 from __future__ import annotations
@@ -17,6 +18,18 @@ MODEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_MODEL_VOLUME", "ltx25-models")
 STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+GPU_SNAPSHOT = _env_flag("LTX25_MODAL_GPU_SNAPSHOT", False)
+REMOTE_GATEWAY = _env_flag("LTX25_MODAL_REMOTE_GATEWAY", False)
+GPU_IDLE_SECONDS = int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "600"))
 
 # IMPORTANT: keep container paths as POSIX strings. This module is evaluated by
 # the local Modal CLI on Windows, where pathlib.Path would turn these into
@@ -47,23 +60,54 @@ prep_image = (
     )
 )
 
-# Reuse the repository's tested CUDA/runtime dependency definition. Modal image
-# construction itself is CPU-only; a GPU is attached only to the web function.
-runtime_image = modal.Image.from_dockerfile("Dockerfile", context_dir=".")
-
-# Lightweight CPU image for the browser/API surface. It intentionally contains
-# no torch/CUDA/model dependencies, so opening the UI never allocates a GPU.
-gateway_image = (
+# Modal runtime is deliberately split into two layers:
+#
+#   runtime_base_image  = stable OS/CUDA-adjacent Python dependencies
+#   runtime_image       = lightweight project source mount (copy=False)
+#
+# The base image is invalidated only when this dependency declaration or
+# requirements.txt changes. Editing app/*.py no longer rebuilds Torch/CUDA.
+# Keep the repository Dockerfile untouched for the local Docker/Compose path.
+runtime_base_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("ffmpeg")
-    .pip_install(
-        "fastapi>=0.115,<1",
-        "pydantic>=2.9,<3",
-        "python-multipart>=0.0.20,<1",
-        "Pillow>=10,<12",
+    .run_commands(
+        "apt-get update && "
+        "apt-get install -y --no-install-recommends build-essential ffmpeg && "
+        "rm -rf /var/lib/apt/lists/*"
     )
-    .add_local_dir("app", "/app/app")
+    .pip_install(
+        "torch==2.13.0+cu130",
+        index_url="https://download.pytorch.org/whl/cu130",
+    )
+    .pip_install_from_requirements("requirements.txt")
 )
+
+runtime_image = runtime_base_image.add_local_dir(
+    "app",
+    "/app/app",
+    copy=False,
+    ignore=["**/__pycache__/**", "**/*.pyc"],
+)
+
+if REMOTE_GATEWAY:
+    # Compatibility only. The default interactive path uses app/local_modal_router.py
+    # on the user's machine and therefore does not need a remote CPU container.
+    gateway_image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .apt_install("ffmpeg")
+        .pip_install(
+            "fastapi>=0.115,<1",
+            "pydantic>=2.9,<3",
+            "python-multipart>=0.0.20,<1",
+            "Pillow>=10,<12",
+        )
+        .add_local_dir(
+            "app",
+            "/app/app",
+            copy=False,
+            ignore=["**/__pycache__/**", "**/*.pyc"],
+        )
+    )
 
 
 @app.function(
@@ -106,6 +150,7 @@ GPU_ENV = {
     "LTX25_NVFP4_CKPT": NVFP4_CKPT,
     "LTX25_REQUIRE_LOCAL_ASSETS": "1",
     "LTX25_TRANSFORMER_PRECISION": "nvfp4",
+    "LTX25_PARALLEL_COLD_LOAD": "1",
     "OFFLOAD_MODE": "none",
     "LTX25_CUDA_GRAPH": "1",
     "LTX25_COMPILE_BLOCKS": "off",
@@ -132,7 +177,9 @@ GPU_ENV = {
     timeout=30 * 60,
     startup_timeout=30 * 60,
     max_containers=1,
-    scaledown_window=int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "120")),
+    scaledown_window=GPU_IDLE_SECONDS,
+    enable_memory_snapshot=GPU_SNAPSHOT,
+    experimental_options={"enable_gpu_snapshot": True} if GPU_SNAPSHOT else {},
     retries=modal.Retries(
         max_retries=2,
         backoff_coefficient=1.5,
@@ -147,14 +194,31 @@ GPU_ENV = {
 )
 @modal.concurrent(max_inputs=1)
 class LTX25Worker:
-    @modal.enter()
+    @modal.enter(snap=GPU_SNAPSHOT)
     def load(self):
-        """Assemble all pre-staged components once per RTX PRO 6000 container."""
+        """Build the resident model once per GPU container."""
+        import time
+
         from app.config import settings
         from app.generator import LTXGenerator
 
+        started = time.monotonic()
         self.generator = LTXGenerator(settings)
         self.generator.load()
+        self.load_seconds = time.monotonic() - started
+
+    @modal.method()
+    def ready(self) -> dict:
+        """Cheap warm-up probe used by the local router to start the GPU asynchronously."""
+        import torch
+
+        return {
+            "status": "ready",
+            "load_seconds": self.load_seconds,
+            "gpu": torch.cuda.get_device_name(0),
+            "allocated_gb": torch.cuda.memory_allocated() / 1024**3,
+            "snapshot_enabled": GPU_SNAPSHOT,
+        }
 
     @modal.method()
     def generate(self, job_id: str, request_payload: dict) -> dict:
@@ -238,29 +302,30 @@ class LTX25Worker:
         return current
 
 
-@app.cls(
-    image=gateway_image,
-    cpu=1.0,
-    memory=2048,
-    timeout=10 * 60,
-    max_containers=2,
-    scaledown_window=300,
-    env={"PYTHONPATH": "/app"},
-    volumes={"/data": state_volume},
-)
-@modal.concurrent(max_inputs=64)
-class LTX25Server:
-    @modal.asgi_app()
-    def web(self):
-        from app.modal_gateway import build_gateway
+if REMOTE_GATEWAY:
+    @app.cls(
+        image=gateway_image,
+        cpu=1.0,
+        memory=2048,
+        timeout=10 * 60,
+        max_containers=2,
+        scaledown_window=300,
+        env={"PYTHONPATH": "/app"},
+        volumes={"/data": state_volume},
+    )
+    @modal.concurrent(max_inputs=64)
+    class LTX25Server:
+        @modal.asgi_app()
+        def web(self):
+            from app.modal_gateway import build_gateway
 
-        return build_gateway(
-            worker_cls=LTX25Worker,
-            job_store=job_store,
-            state_volume=state_volume,
-            state_root="/data",
-            model_id="Lightricks/LTX-2.5-Diffusers",
-        )
+            return build_gateway(
+                worker_cls=LTX25Worker,
+                job_store=job_store,
+                state_volume=state_volume,
+                state_root="/data",
+                model_id="Lightricks/LTX-2.5-Diffusers",
+            )
 
 
 @app.local_entrypoint()

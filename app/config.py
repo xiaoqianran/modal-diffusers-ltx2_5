@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # OFFLOAD_MODE=none が前提(それ以外は警告して無効)。
     # Env: LTX25_COMPILE_BLOCKS
     ltx25_compile_blocks: str = "off"
+    # Load the independent Gemma text encoder concurrently while the
+    # NVFP4 transformer is loaded on the main thread. This is primarily for the
+    # Modal resident-worker path where both components live on fast shared storage.
+    # Env: LTX25_PARALLEL_COLD_LOAD
+    ltx25_parallel_cold_load: bool = False
 
 
 settings = Settings()

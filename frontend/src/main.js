@@ -4,6 +4,7 @@ const app = document.querySelector('#app')
 const SESSION_KEY = 'ltx25.session'
 let sessionNumber = Number(localStorage.getItem(SESSION_KEY)) || null
 let pollTimer = null
+let healthTimer = null
 let loras = []
 const assets = { first: null, last: null, source: null, audio: null }
 
@@ -158,10 +159,16 @@ async function ensureSession() {
 
 async function checkHealth() {
   const badge = el('#health')
+  clearTimeout(healthTimer)
   try {
     const health = await json('/api/health')
-    badge.textContent = `${health.transformer_precision?.toUpperCase() || 'GPU'} · ${health.worker}`
+    const warmState = health.warmup?.state
+    const stateLabel = warmState === 'warming' ? 'WARMING'
+      : warmState === 'ready' ? 'READY'
+      : health.worker
+    badge.textContent = `${health.transformer_precision?.toUpperCase() || 'GPU'} · ${stateLabel}`
     badge.dataset.state = 'online'
+    if (warmState === 'warming') healthTimer = setTimeout(checkHealth, 1500)
   } catch (error) {
     badge.textContent = `离线 · ${error.message}`
     badge.dataset.state = 'offline'
