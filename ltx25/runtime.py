@@ -17,6 +17,10 @@ from .schemas import STILL_IMAGE_MODES, GenerateRequest
 
 
 PIXEL_UPSCALER_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
+# Official DFR uses the detailing IC-LoRA at 0.5. The standalone V2V/IC-LoRA
+# workflow recommends 1.0, but this runtime uses the DFR-style two-stage path:
+# half-resolution stage 1 -> latent x2 -> full-resolution detailing stage 2.
+PIXEL_DETAILING_LORA_STRENGTH = 0.5
 
 # fp8 layerwise-casting skip list, verified by module enumeration against
 # Lightricks/LTX-2.5-Diffusers subfolder=transformer at the pinned revision
@@ -270,6 +274,7 @@ class LTXGenerator(ModelLifecycle):
         pipe = self.load()
         adapter_names = []
         lora_root = self.config.lora_dir.resolve()
+        nvfp4_lora = self.config.ltx25_transformer_precision == "nvfp4"
         # LoRA を載せるジョブ(job loras / pixel upscale の IC-LoRA)は CUDA graph 不可:
         # capture は重みテンソルのアドレスを焼き込むため、adapter の付け外しをまたぐ
         # replay は stale な重みを黙って使う。eager に落とし、ジョブ後に capture を捨てる。
@@ -285,11 +290,22 @@ class LTXGenerator(ModelLifecycle):
                     raise ValueError(f"LoRA file not found: {item.id}")
                 adapter_name = f"job_lora_{index}"
                 try:
-                    pipe.load_lora_weights(path, adapter_name=adapter_name)
+                    if nvfp4_lora:
+                        from .acceleration.nvfp4 import install_nvfp4_lora
+
+                        count = install_nvfp4_lora(
+                            pipe.transformer, path, adapter_name, item.strength
+                        )
+                        print(
+                            f"[ltx25] NVFP4 LoRA {adapter_name}: attached to {count} layers",
+                            flush=True,
+                        )
+                    else:
+                        pipe.load_lora_weights(path, adapter_name=adapter_name)
                 except Exception as exc:
                     raise RuntimeError(f"LoRA could not be loaded ({item.id}): {exc}") from exc
                 adapter_names.append(adapter_name)
-            if adapter_names:
+            if adapter_names and not nvfp4_lora:
                 pipe.set_adapters(adapter_names, adapter_weights=[item.strength for item in request.loras])
                 self._cast_lora_layers_to_bf16(pipe)
             if request.mode in STILL_IMAGE_MODES:
@@ -298,7 +314,12 @@ class LTXGenerator(ModelLifecycle):
         finally:
             if request.loras or request.upscale_method == "pixel":
                 try:
-                    pipe.unload_lora_weights()
+                    if nvfp4_lora:
+                        from .acceleration.nvfp4 import remove_nvfp4_loras
+
+                        remove_nvfp4_loras(pipe.transformer)
+                    else:
+                        pipe.unload_lora_weights()
                 except Exception as exc:
                     print(f"[ltx25] LoRA cleanup failed: {exc}", flush=True)
             if _graph_lora_guard:
@@ -968,13 +989,31 @@ class LTXGenerator(ModelLifecycle):
                         "scripts/download_quantize_ltx25.py --component pixel_upscaler first."
                     )
                 try:
-                    pipe.load_lora_weights(pixel_lora, adapter_name="pixel_spatial_upscaler")
-                    names = [f"job_lora_{index}" for index in range(len(request.loras))]
-                    pipe.set_adapters(
-                        [*names, "pixel_spatial_upscaler"],
-                        adapter_weights=[*[item.strength for item in request.loras], 1.0],
-                    )
-                    self._cast_lora_layers_to_bf16(pipe)
+                    if self.config.ltx25_transformer_precision == "nvfp4":
+                        from .acceleration.nvfp4 import install_nvfp4_lora
+
+                        count = install_nvfp4_lora(
+                            pipe.transformer,
+                            pixel_lora,
+                            "pixel_spatial_upscaler",
+                            PIXEL_DETAILING_LORA_STRENGTH,
+                        )
+                        print(
+                            f"[ltx25] NVFP4 Pixel IC-LoRA: attached to {count} layers "
+                            f"at strength {PIXEL_DETAILING_LORA_STRENGTH}",
+                            flush=True,
+                        )
+                    else:
+                        pipe.load_lora_weights(pixel_lora, adapter_name="pixel_spatial_upscaler")
+                        names = [f"job_lora_{index}" for index in range(len(request.loras))]
+                        pipe.set_adapters(
+                            [*names, "pixel_spatial_upscaler"],
+                            adapter_weights=[
+                                *[item.strength for item in request.loras],
+                                PIXEL_DETAILING_LORA_STRENGTH,
+                            ],
+                        )
+                        self._cast_lora_layers_to_bf16(pipe)
                 except Exception as exc:
                     raise RuntimeError(f"Pixel Spatial Upscaler IC-LoRA could not be loaded: {exc}") from exc
 

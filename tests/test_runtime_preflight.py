@@ -7,7 +7,11 @@ from types import ModuleType
 import torch
 
 from ltx25.models import ModelLifecycle, _create_natten_processor
-from ltx25.runtime import LTXGenerator
+from ltx25.runtime import LTXGenerator, PIXEL_DETAILING_LORA_STRENGTH
+
+
+def test_pixel_detailing_lora_matches_official_dfr_strength():
+    assert PIXEL_DETAILING_LORA_STRENGTH == 0.5
 
 
 def test_a2v_mel_transform_is_pure_torch_and_finite():

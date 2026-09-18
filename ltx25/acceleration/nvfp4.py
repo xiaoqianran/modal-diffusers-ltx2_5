@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -244,6 +246,128 @@ class NVFP4Linear(nn.Module):
         if self.bias is not None:
             out = out + self.bias
         return out.reshape(*orig_shape[:-1], self.out_features)
+
+
+class NVFP4LoRALinear(nn.Module):
+    """Keep the FP4 base GEMM and add small BF16 LoRA residual branches."""
+
+    def __init__(self, base_layer: nn.Module):
+        super().__init__()
+        self.base_layer = base_layer
+        self.lora_a = nn.ParameterDict()
+        self.lora_b = nn.ParameterDict()
+        self.scales: dict[str, float] = {}
+
+    @property
+    def in_features(self) -> int:
+        return self.base_layer.in_features
+
+    @property
+    def out_features(self) -> int:
+        return self.base_layer.out_features
+
+    def add_adapter(
+        self,
+        name: str,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        strength: float,
+    ) -> None:
+        if name in self.lora_a:
+            raise ValueError(f"LoRA adapter already loaded: {name}")
+        rank = lora_a.shape[0]
+        if lora_a.shape != (rank, self.in_features):
+            raise ValueError(
+                f"LoRA A shape {tuple(lora_a.shape)} does not match input {self.in_features}"
+            )
+        if lora_b.shape != (self.out_features, rank):
+            raise ValueError(
+                f"LoRA B shape {tuple(lora_b.shape)} does not match output {self.out_features}, rank {rank}"
+            )
+        device = self.base_layer.weight.device
+        self.lora_a[name] = nn.Parameter(
+            lora_a.to(device=device, dtype=torch.bfloat16), requires_grad=False
+        )
+        self.lora_b[name] = nn.Parameter(
+            lora_b.to(device=device, dtype=torch.bfloat16), requires_grad=False
+        )
+        self.scales[name] = float(strength)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.base_layer(x)
+        x_lora = x.to(torch.bfloat16)
+        for name, lora_a in self.lora_a.items():
+            delta = F.linear(F.linear(x_lora, lora_a), self.lora_b[name])
+            out = out + delta * self.scales[name]
+        return out
+
+
+def _lora_module_name(key: str) -> str:
+    for prefix in ("diffusion_model.", "transformer."):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+            break
+    return key.removesuffix(".lora_A.weight")
+
+
+def install_nvfp4_lora(
+    transformer: nn.Module,
+    path: Path,
+    adapter_name: str,
+    strength: float,
+) -> int:
+    """Stream a Diffusers/LTX LoRA onto NVFP4Linear modules."""
+    from safetensors import safe_open
+
+    installed = 0
+    with safe_open(path, framework="pt", device="cpu") as weights:
+        keys = set(weights.keys())
+        a_keys = sorted(key for key in keys if key.endswith(".lora_A.weight"))
+        if not a_keys:
+            raise ValueError("LoRA checkpoint contains no lora_A weights")
+
+        for a_key in a_keys:
+            b_key = a_key.replace(".lora_A.weight", ".lora_B.weight")
+            if b_key not in keys:
+                raise ValueError(f"LoRA checkpoint is missing pair: {b_key}")
+            module_name = _lora_module_name(a_key)
+            target = transformer.get_submodule(module_name)
+
+            if isinstance(target, NVFP4LoRALinear):
+                wrapper = target
+            elif isinstance(target, (NVFP4Linear, nn.Linear)):
+                parent_name, _, child_name = module_name.rpartition(".")
+                parent = transformer.get_submodule(parent_name) if parent_name else transformer
+                wrapper = NVFP4LoRALinear(target)
+                setattr(parent, child_name, wrapper)
+            else:
+                raise TypeError(
+                    f"LoRA target {module_name} is {type(target).__name__}, "
+                    "expected NVFP4Linear or Linear"
+                )
+
+            wrapper.add_adapter(
+                adapter_name,
+                weights.get_tensor(a_key),
+                weights.get_tensor(b_key),
+                strength,
+            )
+            installed += 1
+    return installed
+
+
+def remove_nvfp4_loras(transformer: nn.Module) -> int:
+    """Restore wrapped NVFP4Linear modules after an inference job."""
+    wrapped = [
+        (name, module)
+        for name, module in transformer.named_modules()
+        if name and isinstance(module, NVFP4LoRALinear)
+    ]
+    for module_name, wrapper in wrapped:
+        parent_name, _, child_name = module_name.rpartition(".")
+        parent = transformer.get_submodule(parent_name) if parent_name else transformer
+        setattr(parent, child_name, wrapper.base_layer)
+    return len(wrapped)
 
 
 def _fix_prompt_adaln_keys(sd: Dict[str, torch.Tensor]) -> None:
