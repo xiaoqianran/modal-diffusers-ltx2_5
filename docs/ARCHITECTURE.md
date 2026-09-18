@@ -57,6 +57,15 @@ scripts/             # 模型准备与工具
 tests/               # 行为 + 架构边界
 ```
 
+Modal 持久化也按生命周期拆开：
+
+```text
+ltx25-models   # 模型权重，只读挂载到 GPU worker
+ltx25-state    # inputs / outputs / LoRA；每个 job 开始前可 reload
+ltx25-kernels  # NATTEN 等已加载 shared-library kernel cache，不参与 state reload
+ltx25-jobs     # Modal Dict：任务状态
+```
+
 ## 依赖规则
 
 ```text

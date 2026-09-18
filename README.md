@@ -53,10 +53,12 @@ modal deploy modal_app.py
 
 生产预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`、
 `LTX25_CUDA_GRAPH=1`。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
-放在独立的 `ltx25-state` Volume，任务状态保存在 `ltx25-jobs` Modal Dict。
+放在 `ltx25-state` Volume；NATTEN 等硬件相关 kernel 缓存单独放在 `ltx25-kernels`
+Volume，避免已加载的 `.so` 阻塞逐任务 `state_volume.reload()`。任务状态保存在
+`ltx25-jobs` Modal Dict。
 本地 `ltx25/modal_client.py` 通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器，
-空闲 120 秒后自动释放。打开页面、查看历史和上传文件不会启动 GPU。可通过
-`LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_HF_SECRET`
+空闲 600 秒后自动释放。打开页面、查看历史和上传文件不会启动 GPU。可通过
+`LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、`LTX25_MODAL_HF_SECRET`
 覆盖默认资源名。
 
 ### 独立前端
@@ -84,7 +86,8 @@ npm run dev
 长期历史应迁移到支持索引和分页的数据库。
 
 > NATTEN 是硬件/torch/CUDA 组合相关的预编译 kernel，由 `kernels` 在 GPU 环境中选择；
-> 它不是 LTX 模型权重。其首次 kernel 获取目前仍发生在 GPU 容器中。
+> 它不是 LTX 模型权重。其首次 kernel 获取发生在 GPU 容器中，缓存持久化到
+> `ltx25-kernels`；只对 `shi-labs/natten` 开启 repo-scoped remote-code allowlist。
 
 ## Python環境で起動
 
@@ -212,7 +215,7 @@ curl -X POST http://127.0.0.1:48125/api/jobs \
 
 **diffusion decoderは既定のVAEデコード比で細部品質を大きく改善します**。平滑領域の微細テクスチャ保持（min 128pxパッチ分散）が1.67→2.41へ向上し、VAEデコード特有の偽グレイン様の高周波ノイズが消えます（グローバルLaplacian分散36.3→25.2の低下はノイズ減少によるもの）。
 
-**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`ltx25/runtime.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため、**既定デコーダは `diffusion` に変更済み**（`LTX25_DECODER=vae` で従来経路に戻せる）。
+**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`ltx25/models.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため、**既定デコーダは `diffusion` に変更済み**（`LTX25_DECODER=vae` で従来経路に戻せる）。
 
 ## リアルタイム生成と高速化（2026-09 実測）
 

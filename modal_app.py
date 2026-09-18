@@ -15,6 +15,7 @@ import modal
 APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
 MODEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_MODEL_VOLUME", "ltx25-models")
 STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
+KERNEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_KERNEL_VOLUME", "ltx25-kernels")
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
 
@@ -39,6 +40,7 @@ NVFP4_CKPT = f"{MODEL_ROOT}/checkpoints/ltx-2.5-22b-distilled-transformer-nvfp4.
 app = modal.App(APP_NAME)
 model_volume = modal.Volume.from_name(MODEL_VOLUME_NAME, create_if_missing=True)
 state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
+kernel_volume = modal.Volume.from_name(KERNEL_VOLUME_NAME, create_if_missing=True)
 job_store = modal.Dict.from_name(JOB_DICT_NAME, create_if_missing=True)
 hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
 
@@ -137,10 +139,11 @@ GPU_ENV = {
     "HISTORY_DB": "/data/outputs/history.sqlite3",
     # Model files must be local. Kernel Hub remains online because the NATTEN
     # binary is selected for the actual torch/CUDA/SM combination at runtime.
-    # Keep that small hardware-specific cache on the state Volume so it is paid
-    # only once rather than once per GPU container cold start.
-    "HF_HOME": "/data/hf-cache",
-    "HF_HUB_DISABLE_TELEMETRY": "1",
+    # Keep hardware-specific kernel binaries on a dedicated Volume. The state
+    # Volume is reloaded before each job so newly-uploaded inputs/LoRAs become
+    # visible; loaded NATTEN shared libraries keep files open and would make a
+    # reload of that same Volume fail with "open files preventing the operation".
+    "HF_HOME": "/kernel-cache/hf",
 }
 
 
@@ -160,10 +163,12 @@ GPU_ENV = {
         initial_delay=2.0,
         max_delay=10.0,
     ),
+    secrets=[hf_secret],
     env=GPU_ENV,
     volumes={
         "/models": model_volume.with_mount_options(read_only=True),
         "/data": state_volume,
+        "/kernel-cache": kernel_volume,
     },
 )
 @modal.concurrent(max_inputs=1)

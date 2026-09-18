@@ -55,16 +55,18 @@ modal deploy modal_app.py
 ```
 
 The production preset uses `LTX25_TRANSFORMER_PRECISION=nvfp4`,
-`OFFLOAD_MODE=none`, and `LTX25_CUDA_GRAPH=1`. Inputs, outputs, LoRAs, the
-SQLite history, and the small hardware-specific kernel cache live on the
-separate `ltx25-state` Volume. Resource names can be overridden with
-`LTX25_MODAL_MODEL_VOLUME`, `LTX25_MODAL_STATE_VOLUME`, and
-`LTX25_MODAL_HF_SECRET`.
+`OFFLOAD_MODE=none`, and `LTX25_CUDA_GRAPH=1`. Inputs, outputs, LoRAs, and the
+SQLite history live on `ltx25-state`. Hardware-specific NATTEN kernel binaries
+use a separate `ltx25-kernels` Volume so loaded shared libraries cannot block
+the per-job `state_volume.reload()`. Resource names can be overridden with
+`LTX25_MODAL_MODEL_VOLUME`, `LTX25_MODAL_STATE_VOLUME`,
+`LTX25_MODAL_KERNEL_VOLUME`, and `LTX25_MODAL_HF_SECRET`.
 
 > NATTEN is a torch/CUDA/GPU-specific prebuilt kernel selected by `kernels` in
 > the GPU environment. It is not an LTX model weight. Its first download may
-> still happen during GPU container assembly, but `HF_HOME=/data/hf-cache`
-> persists it across later cold starts.
+> still happen during GPU container assembly, but `HF_HOME=/kernel-cache/hf`
+> persists it on `ltx25-kernels` across later cold starts. Remote kernel code is
+> allowlisted only for the exact `shi-labs/natten` repository.
 
 ## Run in a Python environment
 
@@ -195,7 +197,7 @@ RTX PRO 6000 Blackwell 96 GB, 512×512 base to 1024² output, 121 frames, seed 4
 
 **The diffusion decoder preserves substantially more fine detail than the default VAE decoder.** Fine-texture retention in smooth regions (minimum variance over 128 px patches) improved from 1.67 to 2.41. VAE-specific false grain-like high-frequency noise also disappeared; the decrease in global Laplacian variance from 36.3 to 25.2 reflects that noise reduction.
 
-**NATTEN kernel (introduced 2026-08-19):** the project was updated to torch 2.11.0+cu130 and applies `LTX2VideoVaeNeighborhoodNattenProcessor` using the prebuilt `shi-labs/natten` na3d kernel obtained through the `kernels` package (torch211-cxx11-cu130, verified on sm_120). The implementation is in `ltx25/runtime.py`. If the kernel is unavailable, it falls back to compiled flex-attention and reports the selected path at startup. In a decode-only measurement using `scratch_ab/latents.pt` at 1024²×121 frames, runtime improved from **293 s (warm flex) to 18.3 s (about 16× faster)** and peak VRAM decreased from 35.8 GB to 17.3 GB. Quality measurements matched the flex path: Laplacian variance 25.13 vs. 25.17, minimum smooth-region 128 px patch variance 2.399 vs. 2.414, and mean absolute raw-frame difference 0.066/255. With decoding reduced to about 18 seconds, **`diffusion` is now the default decoder** (`LTX25_DECODER=vae` restores the legacy path).
+**NATTEN kernel (introduced 2026-08-19):** the project was updated to torch 2.11.0+cu130 and applies `LTX2VideoVaeNeighborhoodNattenProcessor` using the prebuilt `shi-labs/natten` na3d kernel obtained through the `kernels` package (torch211-cxx11-cu130, verified on sm_120). The implementation is in `ltx25/models.py`. If the kernel is unavailable, it falls back to compiled flex-attention and reports the selected path at startup. In a decode-only measurement using `scratch_ab/latents.pt` at 1024²×121 frames, runtime improved from **293 s (warm flex) to 18.3 s (about 16× faster)** and peak VRAM decreased from 35.8 GB to 17.3 GB. Quality measurements matched the flex path: Laplacian variance 25.13 vs. 25.17, minimum smooth-region 128 px patch variance 2.399 vs. 2.414, and mean absolute raw-frame difference 0.066/255. With decoding reduced to about 18 seconds, **`diffusion` is now the default decoder** (`LTX25_DECODER=vae` restores the legacy path).
 
 ## Realtime generation and acceleration (measured 2026-09)
 

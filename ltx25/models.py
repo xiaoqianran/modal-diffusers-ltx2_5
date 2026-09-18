@@ -61,6 +61,30 @@ def _patch_flex_for_real_kernels() -> None:
     fa_mod._ltx25_flex_patched = True
 
 
+def _create_natten_processor():
+    """Create the LTX2 NATTEN processor with a repo-scoped kernels allowlist.
+
+    `kernels>=0.17` no longer implicitly trusts the publisher metadata that the
+    current Diffusers processor assumes. Trust only the exact NATTEN repository
+    instead of enabling arbitrary remote kernel code globally.
+    """
+    from diffusers.models.autoencoders.ltx2_diffusion_decoder import (
+        LTX2VideoVaeNeighborhoodNattenProcessor,
+    )
+    from kernels import get_kernel
+
+    processor = LTX2VideoVaeNeighborhoodNattenProcessor.__new__(
+        LTX2VideoVaeNeighborhoodNattenProcessor
+    )
+    processor._na3d = get_kernel(
+        "shi-labs/natten",
+        version=1,
+        trust_remote_code=["shi-labs/natten"],
+    ).na3d
+    processor.backend = None
+    return processor
+
+
 class ModelLifecycle:
     """Owns model loading, unloading, decoder setup, and acceleration installation."""
 
@@ -455,11 +479,7 @@ class ModelLifecycle:
             # needs torch>=2.11 prebuilt variants); fall back to the compiled
             # flex-attention patch when unavailable.
             try:
-                from diffusers.models.autoencoders.ltx2_diffusion_decoder import (
-                    LTX2VideoVaeNeighborhoodNattenProcessor,
-                )
-
-                decoder.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
+                decoder.set_attn_processor(_create_natten_processor())
                 print("[ltx25] diffusion decoder attention: NATTEN na3d (shi-labs/natten)", flush=True)
             except Exception as exc:
                 # Compile flex-attention so the block-sparse kernel actually runs (the eager

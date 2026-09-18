@@ -83,3 +83,13 @@ def test_single_primary_package_and_modal_entrypoint():
     assert not (ROOT / "backend").exists()
     assert not (ROOT / "deploy").exists()
     assert not (PKG / "compat").exists()
+
+
+def test_reloadable_state_and_loaded_kernel_cache_are_separate():
+    source = (ROOT / "modal_app.py").read_text(encoding="utf-8")
+    assert 'STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")' in source
+    assert 'KERNEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_KERNEL_VOLUME", "ltx25-kernels")' in source
+    assert '"HF_HOME": "/kernel-cache/hf"' in source
+    assert '"/data": state_volume' in source
+    assert '"/kernel-cache": kernel_volume' in source
+    assert '"HF_HUB_DISABLE_TELEMETRY"' not in source
