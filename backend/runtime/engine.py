@@ -11,9 +11,9 @@ import types
 from pathlib import Path
 from typing import Callable
 
-from .config import Settings
+from ..config import Settings
 from .encoding import encode_video_crf
-from .schemas import STILL_IMAGE_MODES, GenerateRequest
+from ..contracts import STILL_IMAGE_MODES, GenerateRequest
 
 
 PIXEL_UPSCALER_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
@@ -309,14 +309,14 @@ class LTXGenerator:
                 )
             elif self.config.ltx25_transformer_precision == "nvfp4":
                 # Official Blackwell-native FP4 distilled transformer (single-file
-                # ComfyUI format). Loaded straight onto the GPU by app/nvfp4.py:
+                # ComfyUI format). Loaded straight onto the GPU by backend/runtime/acceleration/nvfp4.py:
                 # quantized Linears become NVFP4Linear (torch._scaled_mm FP4 GEMM,
                 # ~3.4x raw / ~1.8x per-layer vs bf16 incl. activation-quant cost).
                 # The bnb transformer_dir is only used for its config.json (same
                 # architecture); its weights are not read.
                 import json as _json
 
-                from .nvfp4 import load_nvfp4_transformer
+                from .acceleration.nvfp4 import load_nvfp4_transformer
 
                 nvfp4_ckpt = self.config.ltx25_nvfp4_ckpt
                 if not nvfp4_ckpt and self.config.ltx25_require_local_assets:
@@ -399,7 +399,7 @@ class LTXGenerator:
                 if temporal_upsample_pipe is not None:
                     temporal_upsample_pipe.enable_model_cpu_offload()
             if self.config.ltx25_compile_blocks != "off":
-                # per-block torch.compile(app/compileblocks.py)。CUDA Graph の
+                # per-block torch.compile(backend/runtime/acceleration/compile_blocks.py)。CUDA Graph の
                 # install より前に適用する(graph は compile 済みブロックの呼び出しを
                 # capture する必要がある)。compiled eager 単体は素の eager より遅い
                 # ため、graph 無効時・nvfp4 以外・offload 有効時は適用しない。
@@ -409,7 +409,7 @@ class LTXGenerator:
                     and self.config.ltx25_cuda_graph
                     and self.config.offload_mode == "none"
                 ):
-                    from .compileblocks import apply_block_compile
+                    from .acceleration.compile_blocks import apply_block_compile
 
                     apply_block_compile(pipe.transformer, _cb)
                 else:
@@ -422,12 +422,12 @@ class LTXGenerator:
                         flush=True,
                     )
             if self.config.ltx25_cuda_graph:
-                # transformer.forward 全体の CUDA Graph 化(app/cudagraph.py 参照)。
+                # transformer.forward 全体の CUDA Graph 化(backend/runtime/acceleration/cuda_graph.py 参照)。
                 # OFFLOAD_MODE=none 限定: model/sequential offload は重みのデバイスが
                 # リクエスト間で動き、capture 済み graph が焼き込んだアドレスと
                 # 食い違って黙って壊れるため適用しない。
                 if self.config.offload_mode == "none":
-                    from .cudagraph import ForwardGraphRunner
+                    from .acceleration.cuda_graph import ForwardGraphRunner
 
                     self._graph_runner = ForwardGraphRunner(
                         pipe.transformer,
@@ -455,7 +455,7 @@ class LTXGenerator:
         the process stays alive (Phase 5a resident switching). The next generate()
         simply goes through load() again -- load() only checks `self._pipe is None`,
         so dropping the references restores the exact lazy-load entry state.
-        Callers must ensure no job is running (app.main checks before calling)."""
+        Callers must ensure no job is running (backend.compat.standalone checks before calling)."""
         freed = []
         with self._load_lock:
             if self._graph_runner is not None:
@@ -490,7 +490,7 @@ class LTXGenerator:
         12 タイル・重複 約1.4x)。ここでは **空き VRAM の範囲で最大のタイル**
         (最小の分割数)を選ぶ: 分割は幅→高さ→フレームの順に増やし、
         タイル体積 <= 予算(空きVRAM / 0.34GB/Mpx / 1.25 マージン、
-        probes/probe_decode_tiling.py の実測係数)を満たす最初の構成を採る。
+        experiments/probes/probe_decode_tiling.py の実測係数)を満たす最初の構成を採る。
         1024x576x121f では単一タイルになり decode 9.6s -> 7.9s(継ぎ目も消える)。
         LTX25_DECODE_SINGLE_TILE: auto(既定)/ on(常に単一タイル、VRAM検査なし)/
         off(常に既定タイル)。"""

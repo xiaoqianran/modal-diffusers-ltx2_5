@@ -7,7 +7,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.modal_gateway import build_gateway
+from backend.compat.modal_gateway import build_gateway
 
 
 class Store:

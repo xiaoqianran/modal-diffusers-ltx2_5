@@ -18,7 +18,7 @@ import torch
 
 MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
 
-from app.nvfp4 import load_nvfp4_transformer
+from backend.runtime.acceleration.nvfp4 import load_nvfp4_transformer
 from huggingface_hub import hf_hub_download
 
 ckpt = hf_hub_download(

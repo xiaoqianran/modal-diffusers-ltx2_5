@@ -19,7 +19,7 @@ from torch.library import custom_op, register_fake
 
 MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
 
-from app.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
+from backend.runtime.acceleration.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
 from huggingface_hub import hf_hub_download
 
 

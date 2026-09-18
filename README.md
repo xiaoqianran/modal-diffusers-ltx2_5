@@ -1,5 +1,7 @@
 # LTX-2.5 Diffusers Server + Web UI
 
+> 当前仓库结构与主链路请先看 `docs/ARCHITECTURE.md`。主路径是 `frontend -> backend/api -> backend/control -> deploy -> backend/runtime`。
+
 [English](README_EN.md) | 日本語
 
 `Lightricks/LTX-2.5-Diffusers`で、音声付き動画を生成するローカルWebアプリです。FastAPIの非同期ジョブAPIとWeb UIを同じプロセスで提供します。T2AV、I2V、先頭／末尾フレーム指定（FLF2V）、任意の画像／動画条件に対応します。既定の高品質モードは、初段の潜在出力を2倍アップサンプルし、追加の3-stepで精細化します。
@@ -34,7 +36,7 @@ docker run --rm --gpus 'device=0' \
 
 ## Modal / RTX PRO 6000 NVFP4
 
-`modal_app.py` 将准备阶段和 GPU 推理解耦：模型下载在 CPU Function 中完成并写入
+`deploy/modal.py` 将准备阶段和 GPU 推理解耦：模型下载在 CPU Function 中完成并写入
 `ltx25-models` Volume；RTX PRO 6000 只读挂载该 Volume，在容器启动时完成 NVFP4
 模型装配并开始服务。GPU 侧不会下载 LTX 权重或 diffusion decoder。
 
@@ -43,10 +45,10 @@ pip install -r requirements-modal.txt
 modal secret create huggingface HF_TOKEN=hf_...
 
 # CPU only: 下载 base/text encoder/upsamplers/diffusion decoder/NVFP4 checkpoint
-modal run modal_app.py::prepare
+modal run deploy/modal.py::prepare_models
 
 # 部署；只有 GPU 服务容器实际启动时才申请 RTX PRO 6000
-modal deploy modal_app.py
+modal deploy deploy/modal.py
 ```
 
 生产预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`、
@@ -102,7 +104,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # .env の HF_TOKEN を設定
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn backend.api.standalone:app --host 0.0.0.0 --port 8000
 ```
 
 API仕様は <http://localhost:8000/docs> で確認できます。
@@ -199,10 +201,10 @@ curl -X POST http://localhost:8000/api/jobs \
 - `MAX_UPLOAD_SIZE_MB`: 1ファイルの上限（既定500MB）
 - `LTX25_DECODER`: 2倍高解像度化後のデコード方式。`diffusion`（既定・diffusion decoderによる高品質デコード。NATTEN導入後の追加コストは約18秒）または`vae`（従来の畳み込みVAE・最速）。リクエストの`decoder`フィールドでジョブ単位に上書きできます。2倍高解像度化がOFFのジョブは常にVAEデコードです
 - `LTX25_VIDEO_CRF`: 出力MP4のlibx264 CRF（既定18）。全経路（draft/high、全デコーダ）に適用されます。従来の既定CRF~23より高ビットレートで、圧縮によるディテール損失を抑えます
-- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です。**`nvfp4`（2026-09追加・sm_120 Blackwell専用）**: Lightricks公式配布のBlackwellネイティブFP4蒸留transformer（常駐約19GB）を`torch._scaled_mm`のFP4 GEMMで直接実行します（`app/nvfp4.py`。GEMM素でbf16比3.2〜3.8倍、リアルタイム用途の最速構成。`LTX25_NVFP4_CKPT`でローカルファイルを指定可、未指定ならHF Hubから自動取得）
-- `LTX25_CUDA_GRAPH`: `1`でtransformer forward全体をCUDA Graph capture/replayし、denoiseのCPUカーネル起動コストを消します（`app/cudagraph.py`）。出力はeagerと**bit完全一致**。`OFFLOAD_MODE=none`前提（それ以外では警告して無効）。LoRAを使うジョブは自動でeagerに落ちます。効果は小解像度×少ステップほど大きい（下記「リアルタイム生成と高速化」参照）
+- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です。**`nvfp4`（2026-09追加・sm_120 Blackwell専用）**: Lightricks公式配布のBlackwellネイティブFP4蒸留transformer（常駐約19GB）を`torch._scaled_mm`のFP4 GEMMで直接実行します（`backend/runtime/acceleration/nvfp4.py`。GEMM素でbf16比3.2〜3.8倍、リアルタイム用途の最速構成。`LTX25_NVFP4_CKPT`でローカルファイルを指定可、未指定ならHF Hubから自動取得）
+- `LTX25_CUDA_GRAPH`: `1`でtransformer forward全体をCUDA Graph capture/replayし、denoiseのCPUカーネル起動コストを消します（`backend/runtime/acceleration/cuda_graph.py`）。出力はeagerと**bit完全一致**。`OFFLOAD_MODE=none`前提（それ以外では警告して無効）。LoRAを使うジョブは自動でeagerに落ちます。効果は小解像度×少ステップほど大きい（下記「リアルタイム生成と高速化」参照）
 - `LTX25_CUDA_GRAPH_MAX_CAPTURES`: graphを保持するshape数の上限（既定8）。解像度・フレーム数・fps・モード（t2av/a2v）の組ごとに1本captureされ、**上限超過のshapeは警告ログの上、黙ってeagerにフォールバック**します。多shape運用では引き上げてください
-- `LTX25_COMPILE_BLOCKS`: 【実験的・非推奨】per-block torch.compile（`app/compileblocks.py`のdocstring参照）。probeではgraph単体に勝つがサーバE2Eでは利得なし・小解像度では退行、と実測済みのため既定`off`
+- `LTX25_COMPILE_BLOCKS`: 【実験的・非推奨】per-block torch.compile（`backend/runtime/acceleration/compile_blocks.py`のdocstring参照）。probeではgraph単体に勝つがサーバE2Eでは利得なし・小解像度では退行、と実測済みのため既定`off`
 - `LTX25_VIDEO_ENCODER`: `nvenc`（既定・h264_nvenc）または`x264`。NVENC不在環境はx264へ自動フォールバック
 - `LTX25_NVENC_PRESET`: NVENCプリセット（`p1`最速〜`p7`最高品質、既定`p7`）。リアルタイム用途は`p4`でエンコード0.1〜0.15s短縮
 - `LTX25_DECODE_SINGLE_TILE`: diffusion decoderのタイル方針（`auto`既定/`on`/`off`）。空きVRAMが許せば単一タイル（約1.23倍速・継ぎ目なし）
@@ -220,7 +222,7 @@ curl -X POST http://localhost:8000/api/jobs \
 
 **diffusion decoderは既定のVAEデコード比で細部品質を大きく改善します**。平滑領域の微細テクスチャ保持（min 128pxパッチ分散）が1.67→2.41へ向上し、VAEデコード特有の偽グレイン様の高周波ノイズが消えます（グローバルLaplacian分散36.3→25.2の低下はノイズ減少によるもの）。
 
-**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`app/generator.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため、**既定デコーダは `diffusion` に変更済み**（`LTX25_DECODER=vae` で従来経路に戻せる）。
+**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`backend/runtime/engine.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため、**既定デコーダは `diffusion` に変更済み**（`LTX25_DECODER=vae` で従来経路に戻せる）。
 
 ## リアルタイム生成と高速化（2026-09 実測）
 
@@ -262,9 +264,9 @@ fps=16指定は**4.0秒（64フレーム）周期のモーション揺らぎ**�
 
 ### 長尺単発生成
 
-704×416・8step・16fpsで30秒（APIの`num_frames≤481`上限）まで速度・VRAMとも成立（30秒クリップを29.4s・ピーク40.9GBで生成）。ただし**25秒級の長尺ではseed依存の「モーション停止→ジャンプ」が散発**します。`probes/detect_motion_stall.py`（約0.5s/本、検出時exit 1）を生成後QCに使い、検出時は別seedでリトライする運用を推奨します。
+704×416・8step・16fpsで30秒（APIの`num_frames≤481`上限）まで速度・VRAMとも成立（30秒クリップを29.4s・ピーク40.9GBで生成）。ただし**25秒級の長尺ではseed依存の「モーション停止→ジャンプ」が散発**します。`experiments/probes/detect_motion_stall.py`（約0.5s/本、検出時exit 1）を生成後QCに使い、検出時は別seedでリトライする運用を推奨します。
 
-### probes/
+### experiments/probes/
 
 開発時の検証スクリプト群を同梱しています: CUDA Graph の等価性・速度（`probe_cudagraph*.py`）、torch.compile 併用の検証記録（`probe_compile_*.py`、結論は「本番では利得なし」）、nvfp4 の量子化検証（`probe_nvfp4_*.py`）、モーション停止検出器（`detect_motion_stall.py`）。
 

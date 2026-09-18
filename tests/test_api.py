@@ -6,8 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.main import app, manager, settings
-from app.schemas import ConcatRequest, GenerateRequest
+from backend.compat.standalone import app, manager, settings
+from backend.contracts import ConcatRequest, GenerateRequest
 
 
 class FakeGenerator:

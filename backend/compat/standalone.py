@@ -11,10 +11,10 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from safetensors import safe_open
 
-from .config import settings
-from .generator import interrupt_controller
+from ..config import settings
+from ..runtime.engine import interrupt_controller
 from .jobs import JobManager
-from .schemas import (
+from ..contracts import (
     AssetResponse,
     ConcatRequest,
     GenerateRequest,

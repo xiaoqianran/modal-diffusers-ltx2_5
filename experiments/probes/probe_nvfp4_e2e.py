@@ -26,7 +26,7 @@ text_encoder = Gemma4UnifiedForConditionalGeneration.from_pretrained(
     f"{MODEL_DIR}/text_encoder_bnb_4bit", dtype=torch.bfloat16
 )
 if args.precision.startswith("nvfp4"):
-    from app.nvfp4 import load_nvfp4_transformer
+    from backend.runtime.acceleration.nvfp4 import load_nvfp4_transformer
     from huggingface_hub import hf_hub_download
     ckpt = hf_hub_download("Lightricks/LTX-2.5",
                            "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors")

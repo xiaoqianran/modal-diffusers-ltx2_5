@@ -31,7 +31,7 @@ from diffusers import LTX2ConditionPipeline
 from diffusers.utils import export_to_video
 from transformers import Gemma4UnifiedForConditionalGeneration
 
-from app.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
+from backend.runtime.acceleration.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
 from huggingface_hub import hf_hub_download
 
 
@@ -103,9 +103,9 @@ if MODE != "eager":
     for i, blk in enumerate(pipe.transformer.transformer_blocks):
         pipe.transformer.transformer_blocks[i] = torch.compile(blk, fullgraph=fullgraph)
 
-    # CUDA Graph(app/cudagraph.py と同じ方式の簡易版)
+    # CUDA Graph(backend/runtime/acceleration/cuda_graph.py と同じ方式の簡易版)
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-    from app.cudagraph import ForwardGraphRunner
+    from backend.runtime.acceleration.cuda_graph import ForwardGraphRunner
     runner = ForwardGraphRunner(pipe.transformer, max_captures=4)
     runner.install()
 

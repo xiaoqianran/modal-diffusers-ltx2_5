@@ -19,7 +19,7 @@ import torch
 
 MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
 
-from app.nvfp4 import load_nvfp4_transformer
+from backend.runtime.acceleration.nvfp4 import load_nvfp4_transformer
 from huggingface_hub import hf_hub_download
 
 ckpt = hf_hub_download(
@@ -84,7 +84,7 @@ with torch.no_grad():
     # dynamo.disable で NVFP4Linear.forward を eager 島にし、その周囲の
     # norm/modulation/elementwise 連鎖だけを融合させる。
     import torch._dynamo as dynamo
-    from app.nvfp4 import NVFP4Linear
+    from backend.runtime.acceleration.nvfp4 import NVFP4Linear
 
     NVFP4Linear.forward = dynamo.disable(NVFP4Linear.forward)
     dynamo.config.cache_size_limit = max(dynamo.config.cache_size_limit, 256)

@@ -13,7 +13,7 @@
   - ヘッダ `_quantization_metadata` に量子化層一覧(format: "nvfp4")。
 
 行列積は torch 2.11 の `torch._scaled_mm`(cuBLAS block-scaled FP4、sm_120
-ネイティブ)を使う。実測(probes/probe_nvfp4_gemm.py): bf16 比 3.2〜3.8 倍。
+ネイティブ)を使う。実測(experiments/probes/probe_nvfp4_gemm.py): bf16 比 3.2〜3.8 倍。
 
 【最重要の罠】`torch._scaled_mm` に渡すブロックスケールは素の行順ではなく
 cuBLAS の swizzled layout(128行×4列タイル、`to_blocked()`)でなければならない。

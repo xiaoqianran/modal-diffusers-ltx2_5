@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # Diffusion-decoder tiling: "auto" (single tile when free VRAM allows --
     # ~1.23x faster and seam-free; falls back to default tiles otherwise),
     # "on" (always single tile), "off" (always default 768^2x80f tiles).
-    # Probe (probes/probe_decode_tiling.py, 1024x576x121f): default 9.67s /
+    # Probe (experiments/probes/probe_decode_tiling.py, 1024x576x121f): default 9.67s /
     # single 7.85s, decode activations ~0.34GB per Mpixel of output volume.
     # Env: LTX25_DECODE_SINGLE_TILE
     ltx25_decode_single_tile: str = "auto"
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     # transformer shards in the HF cache) or "bf16" (release weights, ~38GB,
     # for 96GB-class GPUs) or "nvfp4" (official Blackwell-native FP4 distilled
     # transformer, resident ~19GB, FP4 tensor-core matmul via torch._scaled_mm;
-    # requires sm_120+. See app/nvfp4.py). Env: LTX25_TRANSFORMER_PRECISION
+    # requires sm_120+. See backend/runtime/acceleration/nvfp4.py). Env: LTX25_TRANSFORMER_PRECISION
     ltx25_transformer_precision: str = "nf4"
     # Optional local path to the ComfyUI-format nvfp4 checkpoint. When unset,
     # hf_hub_download("Lightricks/LTX-2.5", "diffusion_models/ltx-2.5-22b-
@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     # Env: LTX25_NVFP4_CKPT
     ltx25_nvfp4_ckpt: str | None = None
     # transformer.forward 全体を CUDA Graph capture/replay して denoise の
-    # カーネル起動律速を潰す(app/cudagraph.py。実測 512x288x121f t2v 8steps:
+    # カーネル起動律速を潰す(backend/runtime/acceleration/cuda_graph.py。実測 512x288x121f t2v 8steps:
     # denoise 1.82s→0.48s(3.8x)、映像・音声とも eager と bit 一致)。
     # OFFLOAD_MODE=none 前提(それ以外では警告して無効)。LoRA ジョブは自動で
     # eager に落ちる。Env: LTX25_CUDA_GRAPH
@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # Env: LTX25_CUDA_GRAPH_MAX_CAPTURES
     ltx25_cuda_graph_max_captures: int = 8
     # 【実験的・非推奨】transformer_blocks の per-block torch.compile
-    # (app/compileblocks.py のモジュール docstring の結論を必ず読むこと)。
+    # (backend/runtime/acceleration/compile_blocks.py のモジュール docstring の結論を必ず読むこと)。
     # "off"(既定)/ "islands" / "fusion"。probe では graph 単体に勝つが、
     # サーバ E2E では同 shape で誤差範囲・リアルタイム小 shape では退行
     # (2.39s vs 1.83s)のため本番では使わない。品質面も eager と bit 一致しない

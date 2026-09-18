@@ -6,7 +6,7 @@ Lightricks 公式 LTX-2 パッケージの cudagraph_capture.py(v1.2.0/v1.3.0、
 `LTX2VideoTransformer3DModel.forward` **全体**を capture する。パイプライン
 (LTX2ConditionPipeline)が video_coords / audio_coords を事前計算して渡し、
 蒸留経路(stg_scale=0 / cfg=1)では forward 内に CPU 依存の分岐が残らないため、
-公式より広い境界が成立する(実測は probes/probe_cudagraph.py: 512x288x121f t2v
+公式より広い境界が成立する(実測は experiments/probes/probe_cudagraph.py: 512x288x121f t2v
 8steps で映像・音声とも eager と bit 完全一致、denoise 1.82s→0.48s(3.8x)、
 peak VRAM 増加なし、capture 固定費 ~1s/shape)。
 

@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from .schemas import (
+from ..contracts import (
     AssetResponse,
     ConcatRequest,
     GenerateRequest,

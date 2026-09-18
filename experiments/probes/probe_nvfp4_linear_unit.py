@@ -10,7 +10,7 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]
 
 import torch
 from safetensors import safe_open
-from app.nvfp4 import NVFP4Linear, nvfp4_quantize, to_blocked, dequantize_nvfp4_weight, FP4_MAX_F as FP4_MAX
+from backend.runtime.acceleration.nvfp4 import NVFP4Linear, nvfp4_quantize, to_blocked, dequantize_nvfp4_weight, FP4_MAX_F as FP4_MAX
 
 P = __import__("huggingface_hub").hf_hub_download(
     "Lightricks/LTX-2.5",

@@ -10,9 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .config import Settings
-from .generator import GenerationInterrupted, LTXGenerator, interrupt_controller
-from .schemas import GenerateRequest
+from ..config import Settings
+from ..runtime.engine import GenerationInterrupted, LTXGenerator, interrupt_controller
+from ..contracts import GenerateRequest
 
 # Output filename prefixes for still-image modes (PNG instead of MP4).
 STILL_IMAGE_PREFIXES = {"t2i": "t2i", "refine_image": "refine", "ref2i": "ref2i"}

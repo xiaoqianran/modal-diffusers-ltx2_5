@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu13
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend.compat.standalone:app", "--host", "0.0.0.0", "--port", "8000"]

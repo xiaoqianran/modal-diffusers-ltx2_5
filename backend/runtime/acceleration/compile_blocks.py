@@ -1,7 +1,7 @@
 """transformer_blocks の per-block torch.compile(LTX25_COMPILE_BLOCKS)。
 
 【結論(2026-09-09): 本番では利得なし → 既定 off の実験的フラグとして残置。
- nvfp4-fast プリセットには焼き込まない。graph 単体(app/cudagraph.py)が本番構成】
+ nvfp4-fast プリセットには焼き込まない。graph 単体(backend/runtime/acceleration/cuda_graph.py)が本番構成】
   - probe(transformer 単体・512x288x121f 相当 2304 tokens)では compiled+graph が
     graph 単体比 225→185-190ms/fwd と勝つが、**サーバ E2E では同 shape で誤差範囲**
     (islands 3.34-3.36s vs graph単体 3.38-3.40s)。
@@ -16,7 +16,7 @@
 機構: nvfp4 の量子化+FP4 GEMM を torch custom_op("ltx25::nvfp4_linear")で opaque 化
 することで fullgraph compile を解禁し(fp4 dtype を Inductor から隠蔽 + graph break
 解消)、ブロック内の norm/変調/FF の小カーネル群を Inductor に融合させる。**必ず
-CUDA Graph(app/cudagraph.py)と併用すること** -- compiled eager 単体は graph break /
+CUDA Graph(backend/runtime/acceleration/cuda_graph.py)と併用すること** -- compiled eager 単体は graph break /
 dispatch コストで素の eager より遅い(実測 250→338-360ms/fwd)。probe レベルの
 steady E2E(512x288x121f t2av 8step、probe_compile_e2e.py):
   eager 2.76s / graph のみ 2.60s / islands 2.36s / fusion 2.18s

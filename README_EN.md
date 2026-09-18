@@ -1,5 +1,7 @@
 # LTX-2.5 Diffusers Server + Web UI
 
+> 当前仓库结构与主链路请先看 `docs/ARCHITECTURE.md`。主路径是 `frontend -> backend/api -> backend/control -> deploy -> backend/runtime`。
+
 English | [日本語](README.md)
 
 A local web application for generating video with synchronized audio using `Lightricks/LTX-2.5-Diffusers`. It serves an asynchronous FastAPI job API and a web UI from the same process. It supports T2AV, I2V, first/last-frame conditioning (FLF2V), and arbitrary image/video conditions. The default high-quality path upsamples the initial latent output by 2× and applies an additional 3-step refinement pass.
@@ -34,7 +36,7 @@ By default, the script stops if less than 80 GiB is available when processing be
 
 ## Modal / RTX PRO 6000 NVFP4
 
-`modal_app.py` separates model preparation from GPU serving. A CPU-only Modal
+`deploy/modal.py` separates model preparation from GPU serving. A CPU-only Modal
 Function downloads the runtime artifacts into the persistent `ltx25-models`
 Volume. The RTX PRO 6000 container mounts that Volume read-only, assembles the
 NVFP4 pipeline once at container startup, and then serves the existing FastAPI
@@ -46,10 +48,10 @@ pip install -r requirements-modal.txt
 modal secret create huggingface HF_TOKEN=hf_...
 
 # CPU only: stage base components, text encoder, upsamplers, decoder and NVFP4
-modal run modal_app.py::prepare
+modal run deploy/modal.py::prepare_models
 
 # The RTX PRO 6000 is allocated only when the serving container starts
-modal deploy modal_app.py
+modal deploy deploy/modal.py
 ```
 
 The production preset uses `LTX25_TRANSFORMER_PRECISION=nvfp4`,
@@ -82,7 +84,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # Set HF_TOKEN in .env
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn backend.api.standalone:app --host 0.0.0.0 --port 8000
 ```
 
 The API specification is available at <http://localhost:8000/docs>.
@@ -179,11 +181,11 @@ Use the returned `id` with `GET /api/jobs/{id}`. Once the job reaches `completed
 - `MAX_UPLOAD_SIZE_MB`: maximum size per uploaded file; default 500 MB
 - `LTX25_DECODER`: decoder after 2× latent upscale. `diffusion` uses the high-quality diffusion decoder and adds about 18 seconds with NATTEN; `vae` uses the faster convolutional VAE. The request-level `decoder` field overrides this setting. Jobs without 2× upscaling always use VAE decoding.
 - `LTX25_VIDEO_CRF`: libx264 CRF for output MP4 files; default 18. Applied to every path and decoder. This uses a higher bitrate than the former effective default of approximately CRF 23, reducing compression-related detail loss.
-- `LTX25_TRANSFORMER_PRECISION`: `nf4` for the default bitsandbytes 4-bit transformer, `fp8` for the bf16 release weights compressed in place with layerwise casting (fp8_e4m3fn storage / bf16 compute), or `bf16` for the approximately 38 GB release weights. `fp8` matches bf16 quality while keeping measured peak VRAM at 26.5 GB for stills and 28.9 GB for 121-frame video, making it the recommended mode for 48 GB-class GPUs (the cast is applied on the CPU, so there is no transient ~38 GB GPU-side peak; requires the ~38 GB bf16 transformer shards in the HF cache). `bf16` is intended for 96 GB-class GPUs; keep `nf4` on 24 GB-class GPUs. The text encoder remains NF4 in every mode. **`nvfp4` (added 2026-09, sm_120 Blackwell only):** runs the official Lightricks Blackwell-native FP4 distilled transformer (~19 GB resident) directly through `torch._scaled_mm` FP4 GEMM (`app/nvfp4.py`; raw GEMM 3.2-3.8× faster than bf16 — the fastest configuration for realtime use. Set `LTX25_NVFP4_CKPT` to a local file, otherwise it is fetched from the HF Hub automatically).
+- `LTX25_TRANSFORMER_PRECISION`: `nf4` for the default bitsandbytes 4-bit transformer, `fp8` for the bf16 release weights compressed in place with layerwise casting (fp8_e4m3fn storage / bf16 compute), or `bf16` for the approximately 38 GB release weights. `fp8` matches bf16 quality while keeping measured peak VRAM at 26.5 GB for stills and 28.9 GB for 121-frame video, making it the recommended mode for 48 GB-class GPUs (the cast is applied on the CPU, so there is no transient ~38 GB GPU-side peak; requires the ~38 GB bf16 transformer shards in the HF cache). `bf16` is intended for 96 GB-class GPUs; keep `nf4` on 24 GB-class GPUs. The text encoder remains NF4 in every mode. **`nvfp4` (added 2026-09, sm_120 Blackwell only):** runs the official Lightricks Blackwell-native FP4 distilled transformer (~19 GB resident) directly through `torch._scaled_mm` FP4 GEMM (`backend/runtime/acceleration/nvfp4.py`; raw GEMM 3.2-3.8× faster than bf16 — the fastest configuration for realtime use. Set `LTX25_NVFP4_CKPT` to a local file, otherwise it is fetched from the HF Hub automatically).
 
-- `LTX25_CUDA_GRAPH`: set to `1` to capture/replay the entire transformer forward as a CUDA Graph, eliminating CPU kernel-launch overhead during denoising (`app/cudagraph.py`). Output is **bit-identical** to eager. Requires `OFFLOAD_MODE=none` (ignored with a warning otherwise). Jobs using LoRA automatically fall back to eager. The gain grows at small resolutions × few steps (see "Realtime generation" below).
+- `LTX25_CUDA_GRAPH`: set to `1` to capture/replay the entire transformer forward as a CUDA Graph, eliminating CPU kernel-launch overhead during denoising (`backend/runtime/acceleration/cuda_graph.py`). Output is **bit-identical** to eager. Requires `OFFLOAD_MODE=none` (ignored with a warning otherwise). Jobs using LoRA automatically fall back to eager. The gain grows at small resolutions × few steps (see "Realtime generation" below).
 - `LTX25_CUDA_GRAPH_MAX_CAPTURES`: maximum number of captured shapes (default 8). One graph is captured per (resolution, frame count, fps, mode) combination; **shapes beyond the limit silently fall back to eager** after a warning log. Raise this for multi-shape workloads.
-- `LTX25_COMPILE_BLOCKS`: [experimental, not recommended] per-block torch.compile (see the docstring in `app/compileblocks.py`). Wins in isolated probes but showed no end-to-end gain on the server and regresses at small resolutions, hence default `off`.
+- `LTX25_COMPILE_BLOCKS`: [experimental, not recommended] per-block torch.compile (see the docstring in `backend/runtime/acceleration/compile_blocks.py`). Wins in isolated probes but showed no end-to-end gain on the server and regresses at small resolutions, hence default `off`.
 - `LTX25_VIDEO_ENCODER`: `nvenc` (default, h264_nvenc) or `x264`. Falls back to x264 automatically when NVENC is unavailable.
 - `LTX25_NVENC_PRESET`: NVENC preset (`p1` fastest to `p7` highest quality, default `p7`). Use `p4` for realtime workloads to shave 0.1-0.15 s off encoding.
 - `LTX25_DECODE_SINGLE_TILE`: diffusion-decoder tiling policy (`auto` default / `on` / `off`). Uses a single tile when free VRAM allows (~1.23× faster, seam-free).
@@ -203,7 +205,7 @@ RTX PRO 6000 Blackwell 96 GB, 512×512 base to 1024² output, 121 frames, seed 4
 
 **The diffusion decoder preserves substantially more fine detail than the default VAE decoder.** Fine-texture retention in smooth regions (minimum variance over 128 px patches) improved from 1.67 to 2.41. VAE-specific false grain-like high-frequency noise also disappeared; the decrease in global Laplacian variance from 36.3 to 25.2 reflects that noise reduction.
 
-**NATTEN kernel (introduced 2026-08-19):** the project was updated to torch 2.11.0+cu130 and applies `LTX2VideoVaeNeighborhoodNattenProcessor` using the prebuilt `shi-labs/natten` na3d kernel obtained through the `kernels` package (torch211-cxx11-cu130, verified on sm_120). The implementation is in `app/generator.py`. If the kernel is unavailable, it falls back to compiled flex-attention and reports the selected path at startup. In a decode-only measurement using `scratch_ab/latents.pt` at 1024²×121 frames, runtime improved from **293 s (warm flex) to 18.3 s (about 16× faster)** and peak VRAM decreased from 35.8 GB to 17.3 GB. Quality measurements matched the flex path: Laplacian variance 25.13 vs. 25.17, minimum smooth-region 128 px patch variance 2.399 vs. 2.414, and mean absolute raw-frame difference 0.066/255. With decoding reduced to about 18 seconds, **`diffusion` is now the default decoder** (`LTX25_DECODER=vae` restores the legacy path).
+**NATTEN kernel (introduced 2026-08-19):** the project was updated to torch 2.11.0+cu130 and applies `LTX2VideoVaeNeighborhoodNattenProcessor` using the prebuilt `shi-labs/natten` na3d kernel obtained through the `kernels` package (torch211-cxx11-cu130, verified on sm_120). The implementation is in `backend/runtime/engine.py`. If the kernel is unavailable, it falls back to compiled flex-attention and reports the selected path at startup. In a decode-only measurement using `scratch_ab/latents.pt` at 1024²×121 frames, runtime improved from **293 s (warm flex) to 18.3 s (about 16× faster)** and peak VRAM decreased from 35.8 GB to 17.3 GB. Quality measurements matched the flex path: Laplacian variance 25.13 vs. 25.17, minimum smooth-region 128 px patch variance 2.399 vs. 2.414, and mean absolute raw-frame difference 0.066/255. With decoding reduced to about 18 seconds, **`diffusion` is now the default decoder** (`LTX25_DECODER=vae` restores the legacy path).
 
 ## Realtime generation and acceleration (measured 2026-09)
 
@@ -245,9 +247,9 @@ Requesting fps=16 produces a **structural motion wobble with a 4.0-second (64-fr
 
 ### Long single-shot generation
 
-At 704×416, 8 steps, 16 fps, generation succeeds up to the API limit (`num_frames <= 481`, 30.06 s) — a 30-second clip generates in 29.4 s at 40.9 GB peak VRAM. However, **seed-dependent "motion stall then jump" events appear sporadically in clips of ~25 s and longer**. Use `probes/detect_motion_stall.py` (~0.5 s per video, exit code 1 on detection) as a post-generation QC gate and retry with a different seed when it fires.
+At 704×416, 8 steps, 16 fps, generation succeeds up to the API limit (`num_frames <= 481`, 30.06 s) — a 30-second clip generates in 29.4 s at 40.9 GB peak VRAM. However, **seed-dependent "motion stall then jump" events appear sporadically in clips of ~25 s and longer**. Use `experiments/probes/detect_motion_stall.py` (~0.5 s per video, exit code 1 on detection) as a post-generation QC gate and retry with a different seed when it fires.
 
-### probes/
+### experiments/probes/
 
 Verification scripts used during development are included: CUDA Graph equivalence/speed (`probe_cudagraph*.py`), the torch.compile investigation record (`probe_compile_*.py`; conclusion: no production gain), nvfp4 quantization checks (`probe_nvfp4_*.py`), and the motion-stall detector (`detect_motion_stall.py`).
 
