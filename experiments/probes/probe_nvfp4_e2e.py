@@ -1,10 +1,10 @@
 """NVFP4 E2E スモーク+速度計測(稼働サーバ非依存のスタンドアロン)。
 
-generator.py の nvfp4 分岐と同一手順でパイプラインを組み、テスト解像度
+runtime/models.py の nvfp4 分岐と同一手順でパイプラインを組み、テスト解像度
 (512×288)の短尺 t2v を生成する。--precision nf4 で同一seedの比較対象を生成。
 """
 import argparse, sys, time, json
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 
 import torch
 
@@ -15,7 +15,7 @@ ap.add_argument("--frames", type=int, default=121)  # 5s @ 24fps
 ap.add_argument("--out", default="")
 args = ap.parse_args()
 
-MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
+MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "LTX-2.5-Diffusers-bnb-4bit")
 DISTILLED_SIGMA_VALUES = [1.0, 0.99609375, 0.9765625, 0.9375, 0.8515625, 0.578125, 0.28125, 0.109375]
 
 from diffusers import LTX2ConditionPipeline, LTX2VideoTransformer3DModel
@@ -26,7 +26,7 @@ text_encoder = Gemma4UnifiedForConditionalGeneration.from_pretrained(
     f"{MODEL_DIR}/text_encoder_bnb_4bit", dtype=torch.bfloat16
 )
 if args.precision.startswith("nvfp4"):
-    from backend.runtime.acceleration.nvfp4 import load_nvfp4_transformer
+    from ltx25.acceleration.nvfp4 import load_nvfp4_transformer
     from huggingface_hub import hf_hub_download
     ckpt = hf_hub_download("Lightricks/LTX-2.5",
                            "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors")

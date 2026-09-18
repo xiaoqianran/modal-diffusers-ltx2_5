@@ -5,8 +5,8 @@ import threading
 
 import pytest
 
-from backend.contracts import GenerateRequest
-from backend.control.modal import ActiveJobError, ModalControl
+from ltx25.schemas import GenerateRequest
+from ltx25.modal_client import ActiveJobError, ModalClient
 
 
 class Store:
@@ -43,8 +43,8 @@ class Volume:
         del self.files[path]
 
 
-def make_control(tmp_path: Path):
-    control = ModalControl.__new__(ModalControl)
+def make_client(tmp_path: Path):
+    control = ModalClient.__new__(ModalClient)
     control.app_name = "test"
     control.model_id = "test"
     control.gpu_idle_seconds = 600
@@ -63,7 +63,7 @@ def make_control(tmp_path: Path):
 
 
 def test_create_job_does_not_overwrite_fast_worker_state(tmp_path):
-    control = make_control(tmp_path)
+    control = make_client(tmp_path)
 
     def spawn(job_id, payload):
         record = control.job_store.get(f"job:{job_id}")
@@ -80,7 +80,7 @@ def test_create_job_does_not_overwrite_fast_worker_state(tmp_path):
 
 
 def test_active_job_cannot_be_deleted(tmp_path):
-    control = make_control(tmp_path)
+    control = make_client(tmp_path)
     job = control.create_job(GenerateRequest(prompt="A bird"))
 
     with pytest.raises(ActiveJobError):
@@ -88,7 +88,7 @@ def test_active_job_cannot_be_deleted(tmp_path):
 
 
 def test_download_output_is_cached_locally(tmp_path):
-    control = make_control(tmp_path)
+    control = make_client(tmp_path)
     control.state_volume.files["outputs/test.mp4"] = b"video"
 
     first = control.download_output("test.mp4")

@@ -1,135 +1,111 @@
-# 架构说明
+# Architecture
 
-这个仓库只有一条主链路：
+这个仓库只维护一件事：**把 Diffusers/LTX-2.5 作为高性能 Modal runtime 提供给导演台。**
 
-~~~text
-Browser / Vite
-      |
-      v
-backend/api/local.py
-      |  HTTP only
-      v
-backend/control/modal.py
-      |  Modal SDK / Job / Volume / warmup
-      v
-deploy/modal.py
-      |  Modal Worker
-      v
-backend/runtime/engine.py
-      |  LTX-2.5 inference
-      v
-backend/runtime/acceleration/
-      +-- nvfp4.py
-      +-- cuda_graph.py
-      +-- compile_blocks.py
-~~~
+## 主链路
+
+```text
+Frontend
+   |
+   v
+ltx25/api.py
+   |
+   v
+ltx25/modal_client.py
+   |
+   | Modal RPC
+   v
+modal_app.py
+   |
+   v
+ltx25/runtime.py
+   | \
+   |  \--> ltx25/encoding.py
+   v
+ltx25/models.py
+   |
+   v
+ltx25/acceleration/
+   |-- nvfp4.py
+   |-- cuda_graph.py
+   `-- compile.py
+   |
+   v
+Diffusers / LTX-2.5
+```
 
 ## 目录职责
 
-~~~text
-backend/
-├─ api/
-│  └─ local.py              # 主 API。只处理 HTTP、上传验证、响应映射
-│
-├─ control/
-│  └─ modal.py              # Modal 控制面：任务、Volume、Worker、warmup、cancel
-│
-├─ runtime/
-│  ├─ engine.py             # GPU 推理主流程
-│  ├─ encoding.py           # MP4 编码
-│  └─ acceleration/
-│     ├─ nvfp4.py           # NVFP4
-│     ├─ cuda_graph.py      # CUDA Graph
-│     └─ compile_blocks.py  # 实验性 torch.compile
-│
-├─ contracts.py             # API / Job 共用数据结构
-├─ config.py                # Runtime 配置
-│
-└─ compat/                  # 非主链路，仅兼容旧运行方式
-   ├─ standalone.py         # 单机 FastAPI + 本地 GPU
-   ├─ jobs.py               # standalone 的进程内 JobManager
-   └─ modal_gateway.py      # 旧 Modal CPU Gateway
+```text
+ltx25/
+├─ api.py            # HTTP、上传下载、HTTP 错误映射
+├─ modal_client.py   # 本地 -> Modal：Job / Dict / Volume / warmup / cancel
+├─ runtime.py        # generation workflow 与采样编排
+├─ models.py         # 模型 load/unload、decoder、precision、加速安装
+├─ encoding.py       # NVENC / ffmpeg 输出编码
+├─ schemas.py        # 请求、任务、资产等数据契约
+├─ config.py         # runtime 配置
+└─ acceleration/
+   ├─ nvfp4.py       # Blackwell FP4 GEMM
+   ├─ cuda_graph.py  # transformer.forward capture/replay
+   └─ compile.py     # 实验性 torch.compile
 
-deploy/
-└─ modal.py                 # Modal 部署装配、GPU Worker
+modal_app.py         # 唯一 Modal 部署入口
+frontend/            # 导演台
+experiments/         # benchmark / probe，不进入生产依赖
+scripts/             # 模型准备与工具
+tests/               # 行为 + 架构边界
+```
 
-frontend/                   # Vite UI
-scripts/                    # 模型准备 / 运维脚本
-experiments/probes/         # 性能与正确性实验，不属于生产主链路
-tests/                      # 行为测试 + 架构边界测试
-docs/                       # 设计与实验文档
-~~~
+## 依赖规则
 
-## 依赖方向
+```text
+api ----------> modal_client ----------> Modal SDK
 
-只允许向下依赖：
+modal_app ----> runtime ----> models ----> acceleration
+                   |
+                   `--------> encoding
 
-~~~text
-api  ───────> control ───────> Modal
- |               |
- └──> contracts  └──> contracts
-
-deploy ─────> runtime ─────> acceleration
-   |             |
-   └──> contracts└──> config / contracts
-
-compat ─────> runtime / config / contracts
-~~~
+api / modal_client / modal_app / runtime ----> schemas
+models / runtime ----------------------------> config
+```
 
 禁止：
 
-~~~text
-runtime  ─X─> FastAPI
-runtime  ─X─> Modal
-control  ─X─> FastAPI
-control  ─X─> api
-api      ─X─> compat
-~~~
+```text
+runtime       -X-> FastAPI
+runtime       -X-> Modal
+models        -X-> FastAPI / Modal / runtime
+acceleration  -X-> serving 层
+modal_client  -X-> runtime / models
+api           -X-> Modal SDK / runtime / models
+```
 
-这些约束由 `tests/test_architecture.py` 自动检查。
+## 为什么只拆到这里
 
-## 主入口
+按“独立变化原因”拆，而不是按功能名拆。
 
-本地导演台：
+- Modal transport 会独立变化，所以有 `modal_client.py`。
+- 模型生命周期和 generation workflow 的变化原因不同，所以拆成 `models.py` / `runtime.py`。
+- NVFP4、CUDA Graph、torch.compile 是独立性能实验，所以单独放 `acceleration/`。
+- MP4/NVENC 与模型无关，所以保留 `encoding.py`。
+- `t2v / i2v / a2v / retake / extend` 目前大量共享同一 Diffusers pipeline，不为每个 mode 建文件。
 
-~~~powershell
-start-ltx25.bat
-~~~
+只有当某个 workflow 出现独立模型、独立生命周期或明显独立测试压力时，再从 `runtime.py` 抽出。
 
-等价后端入口：
+## 唯一运行方式
 
-~~~powershell
-python -m uvicorn backend.api.local:app --host 127.0.0.1 --port 48125
-~~~
+本地：
 
-Modal 部署：
+```text
+python -m uvicorn ltx25.api:app --host 127.0.0.1 --port 48125
+```
 
-~~~powershell
-modal run deploy/modal.py::prepare_models
-modal deploy deploy/modal.py
-~~~
+云端：
 
-`modal_app.py` 仅保留为旧命令兼容入口，新代码不要再放进去。
+```text
+modal run modal_app.py::prepare_models
+modal deploy modal_app.py
+```
 
-## 阅读顺序
-
-第一次看项目只需要按这个顺序：
-
-~~~text
-1. backend/contracts.py
-2. backend/api/local.py
-3. backend/control/modal.py
-4. deploy/modal.py
-5. backend/runtime/engine.py
-6. backend/runtime/acceleration/*
-~~~
-
-`backend/compat/` 和 `experiments/` 默认不用读。
-
-## 设计原则
-
-1. **主链路唯一**：新增功能优先落在 `api -> control -> runtime`，不要再创建平行 API。
-2. **部署不承载业务逻辑**：`deploy/modal.py` 只做资源、镜像、Worker 装配。
-3. **Runtime 不知道 HTTP/Modal**：推理引擎只接收 `GenerateRequest` 和文件路径。
-4. **实验与生产隔离**：探针、benchmark、负结果都放 `experiments/`。
-5. **按压力拆分**：只有模块出现真实变化压力时再继续拆，避免为了“分层”产生几十个空壳文件。
+旧的本地 GPU standalone server 和远程 Modal CPU gateway 已移除。Git 历史保留其实现，不再在主分支维护第二、第三套 serving 主链。

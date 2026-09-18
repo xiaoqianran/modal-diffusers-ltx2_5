@@ -17,21 +17,21 @@ import sys
 import time
 from typing import Optional
 
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 
 import torch
 from torch.library import custom_op, register_fake
 
 MODE = os.environ.get("PROBE_MODE", "eager")
 OUT = os.environ.get("PROBE_OUT", f"/tmp/claude-1000/ltx_compile_ab_{MODE}.mp4")
-MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
+MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "LTX-2.5-Diffusers-bnb-4bit")
 SIGMAS = [1.0, 0.99609375, 0.9765625, 0.9375, 0.8515625, 0.578125, 0.28125, 0.109375]
 
 from diffusers import LTX2ConditionPipeline
 from diffusers.utils import export_to_video
 from transformers import Gemma4UnifiedForConditionalGeneration
 
-from backend.runtime.acceleration.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
+from ltx25.acceleration.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
 from huggingface_hub import hf_hub_download
 
 
@@ -103,9 +103,9 @@ if MODE != "eager":
     for i, blk in enumerate(pipe.transformer.transformer_blocks):
         pipe.transformer.transformer_blocks[i] = torch.compile(blk, fullgraph=fullgraph)
 
-    # CUDA Graph(backend/runtime/acceleration/cuda_graph.py と同じ方式の簡易版)
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-    from backend.runtime.acceleration.cuda_graph import ForwardGraphRunner
+    # CUDA Graph(ltx25/acceleration/cuda_graph.py と同じ方式の簡易版)
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
+    from ltx25.acceleration.cuda_graph import ForwardGraphRunner
     runner = ForwardGraphRunner(pipe.transformer, max_captures=4)
     runner.install()
 

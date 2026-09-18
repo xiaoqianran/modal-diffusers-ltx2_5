@@ -6,11 +6,11 @@
 4. forward マイクロベンチ(bf16 Linear 比)
 """
 import sys, time
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 
 import torch
 from safetensors import safe_open
-from backend.runtime.acceleration.nvfp4 import NVFP4Linear, nvfp4_quantize, to_blocked, dequantize_nvfp4_weight, FP4_MAX_F as FP4_MAX
+from ltx25.acceleration.nvfp4 import NVFP4Linear, nvfp4_quantize, to_blocked, dequantize_nvfp4_weight, FP4_MAX_F as FP4_MAX
 
 P = __import__("huggingface_hub").hf_hub_download(
     "Lightricks/LTX-2.5",

@@ -1,7 +1,7 @@
-"""Modal-backed control plane for the primary local API.
+"""Modal SDK client for the primary local API.
 
 This module owns all Modal SDK details: worker lookup, job state, warmup,
-Volume I/O, and cancellation. HTTP/FastAPI code lives in backend.api.local.
+Volume I/O, and cancellation. HTTP/FastAPI code lives in api.py.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Any
 
 import modal
 
-from ..contracts import GenerateRequest, LoraResponse
+from .schemas import GenerateRequest, LoraResponse
 
 
 APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
@@ -41,8 +41,8 @@ class ModalOperationError(RuntimeError):
     pass
 
 
-class ModalControl:
-    """Single control-plane boundary between the local API and Modal."""
+class ModalClient:
+    """Single client boundary between the local API and Modal."""
 
     def __init__(self) -> None:
         self.app_name = APP_NAME

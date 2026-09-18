@@ -12,14 +12,14 @@ import sys
 import time
 from typing import Optional
 
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 
 import torch
 from torch.library import custom_op, register_fake
 
-MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
+MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "LTX-2.5-Diffusers-bnb-4bit")
 
-from backend.runtime.acceleration.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
+from ltx25.acceleration.nvfp4 import NVFP4Linear, load_nvfp4_transformer, nvfp4_quantize, to_blocked
 from huggingface_hub import hf_hub_download
 
 

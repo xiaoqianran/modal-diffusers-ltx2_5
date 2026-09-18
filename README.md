@@ -1,10 +1,10 @@
 # LTX-2.5 Diffusers Server + Web UI
 
-> 当前仓库结构与主链路请先看 `docs/ARCHITECTURE.md`。主路径是 `frontend -> backend/api -> backend/control -> deploy -> backend/runtime`。
+> 当前仓库结构与主链路请先看 `docs/ARCHITECTURE.md`。主路径是 `frontend -> ltx25/api.py -> ltx25/modal_client.py -> modal_app.py -> ltx25/runtime.py`。
 
 [English](README_EN.md) | 日本語
 
-`Lightricks/LTX-2.5-Diffusers`で、音声付き動画を生成するローカルWebアプリです。FastAPIの非同期ジョブAPIとWeb UIを同じプロセスで提供します。T2AV、I2V、先頭／末尾フレーム指定（FLF2V）、任意の画像／動画条件に対応します。既定の高品質モードは、初段の潜在出力を2倍アップサンプルし、追加の3-stepで精細化します。
+`Lightricks/LTX-2.5-Diffusers`をModal GPUで実行し、ローカルFastAPIルーターと独立したVite UIから操作する生成アプリです。T2AV、I2V、先頭／末尾フレーム指定（FLF2V）、任意の画像／動画条件に対応します。既定の高品質モードは、初段の潜在出力を2倍アップサンプルし、追加の3-stepで精細化します。
 
 ## UIサンプル
 
@@ -36,7 +36,7 @@ docker run --rm --gpus 'device=0' \
 
 ## Modal / RTX PRO 6000 NVFP4
 
-`deploy/modal.py` 将准备阶段和 GPU 推理解耦：模型下载在 CPU Function 中完成并写入
+`modal_app.py` 将准备阶段和 GPU 推理解耦：模型下载在 CPU Function 中完成并写入
 `ltx25-models` Volume；RTX PRO 6000 只读挂载该 Volume，在容器启动时完成 NVFP4
 模型装配并开始服务。GPU 侧不会下载 LTX 权重或 diffusion decoder。
 
@@ -45,16 +45,16 @@ pip install -r requirements-modal.txt
 modal secret create huggingface HF_TOKEN=hf_...
 
 # CPU only: 下载 base/text encoder/upsamplers/diffusion decoder/NVFP4 checkpoint
-modal run deploy/modal.py::prepare_models
+modal run modal_app.py::prepare_models
 
 # 部署；只有 GPU 服务容器实际启动时才申请 RTX PRO 6000
-modal deploy deploy/modal.py
+modal deploy modal_app.py
 ```
 
 生产预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`、
 `LTX25_CUDA_GRAPH=1`。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
 放在独立的 `ltx25-state` Volume，任务状态保存在 `ltx25-jobs` Modal Dict。
-CPU 网关通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器，
+本地 `ltx25/modal_client.py` 通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器，
 空闲 120 秒后自动释放。打开页面、查看历史和上传文件不会启动 GPU。可通过
 `LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_HF_SECRET`
 覆盖默认资源名。
@@ -70,7 +70,7 @@ npm install
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5187`。Vite 开发代理默认连接当前 Modal 网关；如需切换后端，
+打开 `http://127.0.0.1:5187`。Vite 开发代理默认连接本地 `ltx25.api` 路由器；如需切换后端，
 设置 `VITE_API_TARGET` 后重新启动前端。前端可以连续提交任务，后端仍保持单 GPU
 串行执行（`max_containers=1`、`max_inputs=1`），后续任务在 Modal 队列中等待。
 
@@ -86,28 +86,18 @@ npm run dev
 > NATTEN 是硬件/torch/CUDA 组合相关的预编译 kernel，由 `kernels` 在 GPU 环境中选择；
 > 它不是 LTX 模型权重。其首次 kernel 获取目前仍发生在 GPU 容器中。
 
-## Dockerで起動
-
-```bash
-cp .env.example .env
-# .env の HF_TOKEN を設定
-docker compose up --build
-```
-
-ブラウザーで <http://localhost:8000> を開きます。
-
 ## Python環境で起動
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-local.txt
 cp .env.example .env
 # .env の HF_TOKEN を設定
-uvicorn backend.api.standalone:app --host 0.0.0.0 --port 8000
+python -m uvicorn ltx25.api:app --host 127.0.0.1 --port 48125
 ```
 
-API仕様は <http://localhost:8000/docs> で確認できます。
+API仕様は <http://127.0.0.1:48125/docs> で確認できます。
 
 ## 生成モード
 
@@ -137,15 +127,15 @@ Web UIでは生成方式とレンダリングを個別に指定します。横�
 
 ```bash
 # t2i（既定: 512²基準 → 1024² PNG）
-curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:48125/api/jobs -H 'content-type: application/json' \
   -d '{"mode":"t2i","prompt":"A photorealistic portrait, golden hour light","width":512,"height":512,"seed":42}'
 
 # refine_image（入力画像の2x再解釈）
-curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:48125/api/jobs -H 'content-type: application/json' \
   -d "{\"mode\":\"refine_image\",\"prompt\":\"...\",\"width\":512,\"height\":512,\"strength\":1.0,\"conditions\":[{\"asset_id\":\"$ASSET_ID\",\"kind\":\"image\",\"index\":0}]}"
 
 # ref2i（参照→新場面の静止画、末尾フレーム抽出）
-curl -X POST http://localhost:8000/api/jobs -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:48125/api/jobs -H 'content-type: application/json' \
   -d "{\"mode\":\"ref2i\",\"prompt\":\"The same woman, new scene...\",\"width\":512,\"height\":512,\"num_frames\":49,\"frame_position\":\"last\",\"conditions\":[{\"asset_id\":\"$ASSET_ID\",\"kind\":\"image\",\"index\":0,\"strength\":1.0}]}"
 ```
 
@@ -167,10 +157,10 @@ Web UIでモードを選び、条件ファイルをアップロードして生�
 
 ```bash
 # I2V
-ASSET_ID=$(curl -s -F 'file=@first.png' http://localhost:8000/api/assets \
+ASSET_ID=$(curl -s -F 'file=@first.png' http://127.0.0.1:48125/api/assets \
   | python -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-curl -X POST http://localhost:8000/api/jobs \
+curl -X POST http://127.0.0.1:48125/api/jobs \
   -H 'content-type: application/json' \
   -d "{\"mode\":\"i2v\",\"prompt\":\"The camera slowly moves forward.\",\"conditions\":[{\"asset_id\":\"$ASSET_ID\",\"kind\":\"image\",\"index\":0,\"strength\":1.0}]}"
 ```
@@ -178,7 +168,7 @@ curl -X POST http://localhost:8000/api/jobs \
 FLF2Vでは同じ要領で2枚を登録し、`conditions`に先頭を`index: 0`、末尾を`index: -1`として指定します。一般条件モードでは、動画の`kind`を`video`にします。
 
 ```bash
-curl -X POST http://localhost:8000/api/jobs \
+curl -X POST http://127.0.0.1:48125/api/jobs \
   -H 'content-type: application/json' \
   -d '{"prompt":"雨の東京を飛ぶ白い鶴。映画的なカメラ。遠くで雷鳴。","seed":42}'
 ```
@@ -201,10 +191,10 @@ curl -X POST http://localhost:8000/api/jobs \
 - `MAX_UPLOAD_SIZE_MB`: 1ファイルの上限（既定500MB）
 - `LTX25_DECODER`: 2倍高解像度化後のデコード方式。`diffusion`（既定・diffusion decoderによる高品質デコード。NATTEN導入後の追加コストは約18秒）または`vae`（従来の畳み込みVAE・最速）。リクエストの`decoder`フィールドでジョブ単位に上書きできます。2倍高解像度化がOFFのジョブは常にVAEデコードです
 - `LTX25_VIDEO_CRF`: 出力MP4のlibx264 CRF（既定18）。全経路（draft/high、全デコーダ）に適用されます。従来の既定CRF~23より高ビットレートで、圧縮によるディテール損失を抑えます
-- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です。**`nvfp4`（2026-09追加・sm_120 Blackwell専用）**: Lightricks公式配布のBlackwellネイティブFP4蒸留transformer（常駐約19GB）を`torch._scaled_mm`のFP4 GEMMで直接実行します（`backend/runtime/acceleration/nvfp4.py`。GEMM素でbf16比3.2〜3.8倍、リアルタイム用途の最速構成。`LTX25_NVFP4_CKPT`でローカルファイルを指定可、未指定ならHF Hubから自動取得）
-- `LTX25_CUDA_GRAPH`: `1`でtransformer forward全体をCUDA Graph capture/replayし、denoiseのCPUカーネル起動コストを消します（`backend/runtime/acceleration/cuda_graph.py`）。出力はeagerと**bit完全一致**。`OFFLOAD_MODE=none`前提（それ以外では警告して無効）。LoRAを使うジョブは自動でeagerに落ちます。効果は小解像度×少ステップほど大きい（下記「リアルタイム生成と高速化」参照）
+- `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です。**`nvfp4`（2026-09追加・sm_120 Blackwell専用）**: Lightricks公式配布のBlackwellネイティブFP4蒸留transformer（常駐約19GB）を`torch._scaled_mm`のFP4 GEMMで直接実行します（`ltx25/acceleration/nvfp4.py`。GEMM素でbf16比3.2〜3.8倍、リアルタイム用途の最速構成。`LTX25_NVFP4_CKPT`でローカルファイルを指定可、未指定ならHF Hubから自動取得）
+- `LTX25_CUDA_GRAPH`: `1`でtransformer forward全体をCUDA Graph capture/replayし、denoiseのCPUカーネル起動コストを消します（`ltx25/acceleration/cuda_graph.py`）。出力はeagerと**bit完全一致**。`OFFLOAD_MODE=none`前提（それ以外では警告して無効）。LoRAを使うジョブは自動でeagerに落ちます。効果は小解像度×少ステップほど大きい（下記「リアルタイム生成と高速化」参照）
 - `LTX25_CUDA_GRAPH_MAX_CAPTURES`: graphを保持するshape数の上限（既定8）。解像度・フレーム数・fps・モード（t2av/a2v）の組ごとに1本captureされ、**上限超過のshapeは警告ログの上、黙ってeagerにフォールバック**します。多shape運用では引き上げてください
-- `LTX25_COMPILE_BLOCKS`: 【実験的・非推奨】per-block torch.compile（`backend/runtime/acceleration/compile_blocks.py`のdocstring参照）。probeではgraph単体に勝つがサーバE2Eでは利得なし・小解像度では退行、と実測済みのため既定`off`
+- `LTX25_COMPILE_BLOCKS`: 【実験的・非推奨】per-block torch.compile（`ltx25/acceleration/compile.py`のdocstring参照）。probeではgraph単体に勝つがサーバE2Eでは利得なし・小解像度では退行、と実測済みのため既定`off`
 - `LTX25_VIDEO_ENCODER`: `nvenc`（既定・h264_nvenc）または`x264`。NVENC不在環境はx264へ自動フォールバック
 - `LTX25_NVENC_PRESET`: NVENCプリセット（`p1`最速〜`p7`最高品質、既定`p7`）。リアルタイム用途は`p4`でエンコード0.1〜0.15s短縮
 - `LTX25_DECODE_SINGLE_TILE`: diffusion decoderのタイル方針（`auto`既定/`on`/`off`）。空きVRAMが許せば単一タイル（約1.23倍速・継ぎ目なし）
@@ -222,7 +212,7 @@ curl -X POST http://localhost:8000/api/jobs \
 
 **diffusion decoderは既定のVAEデコード比で細部品質を大きく改善します**。平滑領域の微細テクスチャ保持（min 128pxパッチ分散）が1.67→2.41へ向上し、VAEデコード特有の偽グレイン様の高周波ノイズが消えます（グローバルLaplacian分散36.3→25.2の低下はノイズ減少によるもの）。
 
-**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`backend/runtime/engine.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため、**既定デコーダは `diffusion` に変更済み**（`LTX25_DECODER=vae` で従来経路に戻せる）。
+**NATTEN カーネル（2026-08-19 導入）**: torch 2.11.0+cu130 へ更新し、`kernels` パッケージ経由で `shi-labs/natten` のプリビルト na3d カーネル（torch211-cxx11-cu130、sm_120 動作確認済み）を使う `LTX2VideoVaeNeighborhoodNattenProcessor` を diffusion decoder に適用した（`ltx25/runtime.py`。取得不可の環境では従来の compiled flex-attention へ自動フォールバックし、どちらが使われたかを起動ログに出力する）。decode 専用実測（scratch_ab/latents.pt、1024²×121f）: **293s（flex・ウォーム）→ 18.3s（約16倍）**、ピークVRAM 35.8GB → 17.3GB。品質指標も flex 経路と一致（Laplacian分散 25.13 vs 25.17、平滑部min 128pxパッチ分散 2.399 vs 2.414、raw frame 平均絶対差 0.066/255）。デコードが約18秒まで短縮されたため、**既定デコーダは `diffusion` に変更済み**（`LTX25_DECODER=vae` で従来経路に戻せる）。
 
 ## リアルタイム生成と高速化（2026-09 実測）
 

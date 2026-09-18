@@ -8,5 +8,4 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 torch==2.13.0+cu130
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-EXPOSE 8000
-CMD ["uvicorn", "backend.compat.standalone:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["bash"]

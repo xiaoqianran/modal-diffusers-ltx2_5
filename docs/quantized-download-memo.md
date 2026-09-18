@@ -79,6 +79,6 @@ bnb_4bit_compute_dtype=torch.bfloat16
 - 検証成功時だけ対応する一時キャッシュを削除
 - 完了済みコンポーネントを検出して再実行時にスキップ
 
-既存の`backend/runtime/engine.py`も、完成した
+既存の`ltx25/runtime.py`も、完成した
 `LTX-2.5-Diffusers-bnb-4bit/text_encoder_bnb_4bit`と
 `transformer_bnb_4bit`を読むように変更する必要がある。

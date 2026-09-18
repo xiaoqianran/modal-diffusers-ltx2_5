@@ -1,7 +1,7 @@
 """Primary browser-facing API.
 
 The API layer owns HTTP concerns and local media validation only. Modal SDK,
-job state, worker lifecycle, and Volume access live in backend.control.modal.
+job state, worker lifecycle, and Volume access live in modal_client.py.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
-from ..contracts import (
+from .schemas import (
     AssetResponse,
     ConcatRequest,
     GenerateRequest,
@@ -28,10 +28,10 @@ from ..contracts import (
     PromptEnhanceResponse,
     SessionResponse,
 )
-from ..control.modal import (
+from .modal_client import (
     ActiveJobError,
     JobStateError,
-    ModalControl,
+    ModalClient,
     ModalOperationError,
     SubmissionError,
 )
@@ -41,17 +41,17 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".gif"}
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac"}
 
-control = ModalControl()
-CACHE_ROOT = control.cache_root
-OUTPUT_CACHE = control.output_cache
-UPLOAD_CACHE = control.upload_cache
+modal_client = ModalClient()
+CACHE_ROOT = modal_client.cache_root
+OUTPUT_CACHE = modal_client.output_cache
+UPLOAD_CACHE = modal_client.upload_cache
 
 
 async def _keep_warm_loop() -> None:
-    interval = max(60, min(control.gpu_idle_seconds // 2, 300))
+    interval = max(60, min(modal_client.gpu_idle_seconds // 2, 300))
     while True:
         await asyncio.sleep(interval)
-        await asyncio.to_thread(control.start_warmup)
+        await asyncio.to_thread(modal_client.start_warmup)
 
 
 @asynccontextmanager
@@ -61,9 +61,9 @@ async def lifespan(_: FastAPI):
     UPLOAD_CACHE.mkdir(parents=True, exist_ok=True)
 
     keep_warm_task = None
-    if control.keep_gpu_warm:
-        await asyncio.to_thread(control.set_idle_window, control.gpu_idle_seconds)
-        await asyncio.to_thread(control.start_warmup)
+    if modal_client.keep_gpu_warm:
+        await asyncio.to_thread(modal_client.set_idle_window, modal_client.gpu_idle_seconds)
+        await asyncio.to_thread(modal_client.start_warmup)
         keep_warm_task = asyncio.create_task(_keep_warm_loop())
 
     try:
@@ -71,9 +71,9 @@ async def lifespan(_: FastAPI):
     finally:
         if keep_warm_task is not None:
             keep_warm_task.cancel()
-        if control.keep_gpu_warm:
+        if modal_client.keep_gpu_warm:
             try:
-                await asyncio.to_thread(control.set_idle_window, 120)
+                await asyncio.to_thread(modal_client.set_idle_window, 120)
             except Exception:
                 pass
 
@@ -92,46 +92,46 @@ app.add_middleware(
 def health():
     return {
         "status": "ok",
-        "model": control.model_id,
+        "model": modal_client.model_id,
         "worker": "modal-direct",
         "transport": "local-modal-sdk",
         "gpu_attached_to_web": False,
         "transformer_precision": "nvfp4",
-        "keep_gpu_warm": control.keep_gpu_warm,
-        "gpu_idle_seconds": control.gpu_idle_seconds,
-        "warmup": control.warm_status(),
+        "keep_gpu_warm": modal_client.keep_gpu_warm,
+        "gpu_idle_seconds": modal_client.gpu_idle_seconds,
+        "warmup": modal_client.warm_status(),
     }
 
 
 @app.post("/api/admin/warm")
 def admin_warm():
-    control.set_idle_window(control.gpu_idle_seconds)
-    control.start_warmup()
+    modal_client.set_idle_window(modal_client.gpu_idle_seconds)
+    modal_client.start_warmup()
     return {"status": "warming"}
 
 
 @app.post("/api/admin/unload")
 def admin_unload():
-    control.set_idle_window(2)
+    modal_client.set_idle_window(2)
     return {"result": "GPU worker will scale to zero after its current input becomes idle"}
 
 
 @app.post("/api/sessions", response_model=SessionResponse, status_code=201)
 def create_session():
-    return SessionResponse(session_number=control.create_session())
+    return SessionResponse(session_number=modal_client.create_session())
 
 
 @app.post("/api/jobs", response_model=JobResponse, status_code=202)
 def create_job(request: GenerateRequest):
     try:
-        return control.create_job(request)
+        return modal_client.create_job(request)
     except SubmissionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str):
-    record = control.get_job(job_id)
+    record = modal_client.get_job(job_id)
     if not record:
         raise HTTPException(status_code=404, detail="Job not found")
     return record
@@ -139,13 +139,13 @@ def get_job(job_id: str):
 
 @app.get("/api/jobs", response_model=list[JobResponse])
 def list_jobs(session_number: int | None = None, limit: int = 50):
-    return control.list_jobs(session_number, limit)
+    return modal_client.list_jobs(session_number, limit)
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)
 def delete_job(job_id: str):
     try:
-        if not control.delete_job(job_id):
+        if not modal_client.delete_job(job_id):
             raise HTTPException(status_code=404, detail="Job not found")
     except ActiveJobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -155,7 +155,7 @@ def delete_job(job_id: str):
 @app.post("/api/interrupt")
 def interrupt(job_id: str | None = Body(None, embed=True)):
     try:
-        return control.interrupt(job_id)
+        return modal_client.interrupt(job_id)
     except JobStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ModalOperationError as exc:
@@ -217,7 +217,7 @@ def upload_asset(file: UploadFile = File(...)):
                 if probe.returncode != 0 or not probe.stdout.strip():
                     raise HTTPException(status_code=400, detail=f"Uploaded {kind} could not be decoded")
 
-        control.upload_file(local_path, f"inputs/{asset_id}{suffix}")
+        modal_client.upload_file(local_path, f"inputs/{asset_id}{suffix}")
     except HTTPException:
         local_path.unlink(missing_ok=True)
         raise
@@ -237,7 +237,7 @@ def upload_asset(file: UploadFile = File(...)):
 
 @app.get("/api/loras", response_model=list[LoraResponse])
 def list_loras():
-    return control.list_loras()
+    return modal_client.list_loras()
 
 
 @app.post("/api/prompts/enhance", response_model=PromptEnhanceResponse)
@@ -253,11 +253,11 @@ def concat_jobs(request: ConcatRequest):
 
     sources: list[Path] = []
     for job_id in request.job_ids:
-        record = control.get_job(job_id)
+        record = modal_client.get_job(job_id)
         if record is None or record.get("status") != "completed":
             raise HTTPException(status_code=404, detail=f"Completed video not found: {job_id}")
         try:
-            sources.append(control.download_output(f"{job_id}.mp4"))
+            sources.append(modal_client.download_output(f"{job_id}.mp4"))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=f"Completed video not found: {job_id}") from exc
 
@@ -294,7 +294,7 @@ def concat_jobs(request: ConcatRequest):
         if result.returncode != 0:
             target.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Video concatenation failed: {result.stderr[-500:]}")
-        control.upload_file(target, f"outputs/{target.name}")
+        modal_client.upload_file(target, f"outputs/{target.name}")
     finally:
         list_path.unlink(missing_ok=True)
 
@@ -304,7 +304,7 @@ def concat_jobs(request: ConcatRequest):
 @app.api_route("/outputs/{filename}", methods=["GET", "HEAD"])
 def output_file(filename: str):
     try:
-        path = control.download_output(filename)
+        path = modal_client.download_output(filename)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:

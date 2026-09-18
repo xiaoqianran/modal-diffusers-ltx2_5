@@ -5,7 +5,7 @@ B: 1タイル化(タイルサイズ >= 出力サイズ)
 決定論の decode(同一latent・同一seed)なので出力差はタイル境界ブレンドの有無のみ。
 """
 import sys, time
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.models.autoencoders import LTX2VideoDiffusionDecoderModel
@@ -14,7 +14,7 @@ from diffusers.models.autoencoders.ltx2_diffusion_decoder import (
     LTX2VideoVaeNeighborhoodNattenProcessor,
 )
 
-MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
+MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "LTX-2.5-Diffusers-bnb-4bit")
 MODEL_ID = "Lightricks/LTX-2.5-Diffusers"
 REV = "69009ff070135c693ad1ad1ef2cc149c227963da"
 

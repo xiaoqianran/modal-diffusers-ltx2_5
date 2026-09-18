@@ -28,7 +28,7 @@ LTX-2.5 は 22B の音声同時生成 DiT。本サーバは ComfyUI ではなく
 
 ## 2. NVFP4 — Blackwell ネイティブ FP4 の直接実行
 
-Lightricks 公式配布の nvfp4 量子化蒸留 transformer(ComfyUI 単一ファイル形式、18.7GB)を、diffusers 側で直接ロードして `torch._scaled_mm`(cuBLAS block-scaled FP4、sm_120 ネイティブ)で回す(`backend/runtime/acceleration/nvfp4.py`)。活性化の動的 FP4 量子化は自前 Triton カーネル(torch に bf16→fp4 cast が存在しないため)。
+Lightricks 公式配布の nvfp4 量子化蒸留 transformer(ComfyUI 単一ファイル形式、18.7GB)を、diffusers 側で直接ロードして `torch._scaled_mm`(cuBLAS block-scaled FP4、sm_120 ネイティブ)で回す(`ltx25/acceleration/nvfp4.py`)。活性化の動的 FP4 量子化は自前 Triton カーネル(torch に bf16→fp4 cast が存在しないため)。
 
 **実装の罠(bf16 リファレンスとの全数値照合で特定)**:
 1. checkpoint の nibble 順は cuBLAS パック規約と逆(ロード時に byte 内スワップが必要)
@@ -39,7 +39,7 @@ Lightricks 公式配布の nvfp4 量子化蒸留 transformer(ComfyUI 単一フ�
 
 ### 方式
 
-Lightricks 公式 LTX-2 パッケージの `cudagraph_capture.py`(v1.2.0+)の方式 — side stream で warmup → cuBLAS workspace クリア → 共有 mempool で capture → 毎回 replay — を、diffusers の `LTX2VideoTransformer3DModel.forward` **全体**に適用した(`backend/runtime/acceleration/cuda_graph.py`)。パイプラインが RoPE 座標を事前計算して渡し、蒸留経路(cfg=1 / stg=0)は forward 内に CPU 依存分岐が無いため、公式(ブロックループのみ)より広い境界が成立する。
+Lightricks 公式 LTX-2 パッケージの `cudagraph_capture.py`(v1.2.0+)の方式 — side stream で warmup → cuBLAS workspace クリア → 共有 mempool で capture → 毎回 replay — を、diffusers の `LTX2VideoTransformer3DModel.forward` **全体**に適用した(`ltx25/acceleration/cuda_graph.py`)。パイプラインが RoPE 座標を事前計算して渡し、蒸留経路(cfg=1 / stg=0)は forward 内に CPU 依存分岐が無いため、公式(ブロックループのみ)より広い境界が成立する。
 
 - capture キー = 全テンソル引数の shape/dtype + 非テンソル引数。shape ごとに1本、初回のみ capture 費 +1.5〜2s
 - **出力は eager と bit 完全一致**(映像 framemd5・音声 md5 で E2E 検証)
@@ -109,7 +109,7 @@ Lightricks 公式 LTX-2 パッケージの `cudagraph_capture.py`(v1.2.0+)の方
 
 ## 7. 実装レシピ(レポート単独で再現するための詳細)
 
-### 7.1 CUDA Graph capture/replay(全文 ~170 行、`backend/runtime/acceleration/cuda_graph.py`)
+### 7.1 CUDA Graph capture/replay(全文 ~170 行、`ltx25/acceleration/cuda_graph.py`)
 
 **前提条件(1つでも欠けると成立しない)**:
 - transformer forward 内に CPU 依存の分岐・`.item()`・CPU テンソル生成が無いこと。LTX2 パイプラインは RoPE 座標(`video_coords`/`audio_coords`)を forward の外で事前計算して渡すためこれが成立する(渡さないと forward 内の座標計算が CPU テンソルを作り、capture 中の H2D copy で落ちる)
@@ -163,7 +163,7 @@ return outputs                   # capture 時の静的出力バッファをそ�
 
 **検証**: 出力等価性は動画の framemd5 / 音声 md5(bit 一致するはず)。速度は cuda Event(ホスト側の時間はレイテンシ隠蔽で無意味 — §3 の罠)。
 
-### 7.2 NVFP4 checkpoint フォーマットと forward(`backend/runtime/acceleration/nvfp4.py`)
+### 7.2 NVFP4 checkpoint フォーマットと forward(`ltx25/acceleration/nvfp4.py`)
 
 **checkpoint(ComfyUI 単一ファイル形式)のテンソル仕様**(量子化層ごと):
 
@@ -204,10 +204,10 @@ steps=n(<8)指定時は**先頭と末尾を必ず含む等間隔**で n 個選�
 
 | 手法 | 実装 | 検証スクリプト |
 |---|---|---|
-| CUDA Graph | `backend/runtime/acceleration/cuda_graph.py` + `backend/runtime/engine.py`(install/ガード) | `experiments/probes/probe_cudagraph.py` / `probe_cudagraph_gputime.py` |
-| NVFP4 | `backend/runtime/acceleration/nvfp4.py` | `experiments/probes/probe_nvfp4_*.py` |
-| compile(負の結果) | `backend/runtime/acceleration/compile_blocks.py` | `experiments/probes/probe_compile_*.py` |
-| steps 間引き | `backend/runtime/engine.py` の `_subsample_distilled_sigmas()` | — |
+| CUDA Graph | `ltx25/acceleration/cuda_graph.py` + `ltx25/runtime.py`(install/ガード) | `experiments/probes/probe_cudagraph.py` / `probe_cudagraph_gputime.py` |
+| NVFP4 | `ltx25/acceleration/nvfp4.py` | `experiments/probes/probe_nvfp4_*.py` |
+| compile(負の結果) | `ltx25/acceleration/compile.py` | `experiments/probes/probe_compile_*.py` |
+| steps 間引き | `ltx25/runtime.py` の `_subsample_distilled_sigmas()` | — |
 | stall 検出器 | — | `experiments/probes/detect_motion_stall.py` |
 
 ## 8. まとめ

@@ -13,7 +13,7 @@ import json
 import sys
 import time
 
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 
 import torch
 
@@ -26,13 +26,13 @@ ap.add_argument("--steps", type=int, default=8)
 ap.add_argument("--warmup-iters", type=int, default=3)
 args = ap.parse_args()
 
-MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[1] / "LTX-2.5-Diffusers-bnb-4bit")
+MODEL_DIR = str(__import__("pathlib").Path(__file__).resolve().parents[2] / "LTX-2.5-Diffusers-bnb-4bit")
 SIGMAS = [1.0, 0.99609375, 0.9765625, 0.9375, 0.8515625, 0.578125, 0.28125, 0.109375]
 
 from diffusers import LTX2ConditionPipeline
 from transformers import Gemma4UnifiedForConditionalGeneration
 
-from backend.runtime.acceleration.nvfp4 import load_nvfp4_transformer
+from ltx25.acceleration.nvfp4 import load_nvfp4_transformer
 from huggingface_hub import hf_hub_download
 
 t0 = time.time()

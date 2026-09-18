@@ -223,7 +223,7 @@ class GenerateRequest(BaseModel):
             if not self.audio_asset_id:
                 raise ValueError("a2v mode requires an audio asset")
             # 2026-08-31 拡張(mv_studio_V3 の FLF長尺連鎖プローブ): 末尾フレーム
-            # (index=-1)の画像条件も受け付ける。generator.py の a2v 実装は
+            # (index=-1)の画像条件も受け付ける。runtime.py の a2v 実装は
             # 「音声凍結フックを通常パイプラインへ被せ、conditions は素通し」の
             # 構造で flf2v と同じ条件経路に乗るため、スキーマ緩和だけで
             # 「a2v(音声同期)+先頭/末尾フレーム条件」が成立する見込み。

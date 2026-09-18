@@ -16,7 +16,7 @@ peak VRAM 増加なし、capture 固定費 ~1s/shape)。
 - LoRA を載せるジョブ(request.loras / pixel upscale の IC-LoRA)は eager に落とす。
   capture は重みテンソルのアドレスを焼き込むため、adapter の付け外しをまたいだ
   replay は stale な重みを黙って使う。ジョブ後は reset() で捨てる。
-- 生成は単一スレッド(jobs.py の ltx-worker)。runner はスレッドセーフではない。
+- 生成は Modal worker ごとに直列化(max_inputs=1)。runner はスレッドセーフではない。
 
 その他の性質:
 - capture キーは (テンソル引数の shape/dtype) + (非テンソル引数の repr)。

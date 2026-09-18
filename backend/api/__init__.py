@@ -1,1 +1,0 @@
-"""HTTP entrypoints and adapters."""

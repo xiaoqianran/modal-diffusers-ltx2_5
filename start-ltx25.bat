@@ -42,7 +42,7 @@ echo [LTX-2.5] Starting cloud APP...
 echo [Frontend] %APP_URL%
 echo [Router  ] %LOCAL_API%  ^(local Modal SDK -^> RTX PRO 6000^)
 
-start "LTX25 Local Router" /D "%~dp0" cmd /k ""%PYTHON%" -m uvicorn backend.api.local:app --host 127.0.0.1 --port 48125"
+start "LTX25 Local Router" /D "%~dp0" cmd /k ""%PYTHON%" -m uvicorn ltx25.api:app --host 127.0.0.1 --port 48125"
 
 powershell -NoProfile -Command "$u='%LOCAL_API%/api/health'; for($i=0;$i -lt 80;$i++){ try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 $u; if($r.StatusCode -lt 500){ exit 0 } } catch {}; Start-Sleep -Milliseconds 250 }; exit 1" >nul 2>nul || (
   echo [LTX-2.5] Local Modal router did not start.
