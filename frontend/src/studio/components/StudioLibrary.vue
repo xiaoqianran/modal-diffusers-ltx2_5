@@ -24,8 +24,8 @@ function meta(job) {
 <template>
   <div class="library-view">
     <div class="library-head">
-      <span>LIBRARY</span>
-      <button class="ghost" type="button" @click="emit('back')">返回生成</button>
+      <span>HISTORY</span>
+      <button class="ghost" type="button" @click="emit('back')">Back to Generate</button>
     </div>
 
     <div class="library-filters">
