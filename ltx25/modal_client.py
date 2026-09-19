@@ -67,6 +67,7 @@ class ModalClient:
         self._warm_call = None
         self._warm_lock = threading.Lock()
         self._output_lock = threading.Lock()
+        self._session_lock = threading.Lock()
 
     @staticmethod
     def _utc_now() -> str:
@@ -75,6 +76,18 @@ class ModalClient:
     @staticmethod
     def _key(job_id: str) -> str:
         return f"job:{job_id}"
+
+    @staticmethod
+    def _cancel_key(job_id: str) -> str:
+        return f"cancel:{job_id}"
+
+    @staticmethod
+    def _session_key(session_number: int) -> str:
+        return f"session:{session_number}:jobs"
+
+    @staticmethod
+    def _asset_key(asset_id: str) -> str:
+        return f"asset:{asset_id}"
 
     @staticmethod
     def _public_job(record: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +100,24 @@ class ModalClient:
 
     def _get_record(self, job_id: str) -> dict[str, Any] | None:
         return self.job_store.get(self._key(job_id))
+
+    def _index_job(self, session_number: int, job_id: str) -> None:
+        """Keep a compact per-session lookup so UI polling does not scan all jobs."""
+        key = self._session_key(session_number)
+        with self._session_lock:
+            job_ids = self.job_store.get(key) or []
+            if job_id not in job_ids:
+                self.job_store.put(key, [job_id, *job_ids])
+
+    def _remove_job_from_index(self, session_number: int, job_id: str) -> None:
+        key = self._session_key(session_number)
+        with self._session_lock:
+            job_ids = self.job_store.get(key) or []
+            next_ids = [item for item in job_ids if item != job_id]
+            if next_ids:
+                self.job_store.put(key, next_ids)
+            else:
+                self.job_store.pop(key, None)
 
     def _fail_record(self, record: dict[str, Any], exc: Exception) -> dict[str, Any]:
         current = self._get_record(record["id"]) or record
@@ -195,6 +226,7 @@ class ModalClient:
             "call_id": None,
         }
         self._save(record)
+        self._index_job(session_number, job_id)
 
         try:
             call = self.generate_fn.spawn(job_id, request.model_dump(mode="json"))
@@ -215,12 +247,31 @@ class ModalClient:
 
     def list_jobs(self, session_number: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for item_key, item in self.job_store.items():
-            if not isinstance(item_key, str) or not item_key.startswith("job:") or not isinstance(item, dict):
-                continue
-            if session_number is not None and item.get("session_number") != session_number:
-                continue
-            records.append(item)
+        if session_number is not None:
+            job_ids = self.job_store.get(self._session_key(session_number))
+            if isinstance(job_ids, list):
+                records = [record for job_id in job_ids if (record := self._get_record(job_id))]
+            else:
+                # Backward-compatible one-time fallback for sessions created before
+                # the per-session index existed; backfill it for subsequent polls.
+                for item_key, item in self.job_store.items():
+                    if (
+                        isinstance(item_key, str)
+                        and item_key.startswith("job:")
+                        and isinstance(item, dict)
+                        and item.get("session_number") == session_number
+                    ):
+                        records.append(item)
+                records.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+                with self._session_lock:
+                    self.job_store.put(
+                        self._session_key(session_number),
+                        [item["id"] for item in records],
+                    )
+        else:
+            for item_key, item in self.job_store.items():
+                if isinstance(item_key, str) and item_key.startswith("job:") and isinstance(item, dict):
+                    records.append(item)
 
         records.sort(key=lambda item: item.get("created_at", ""), reverse=True)
         return [
@@ -238,8 +289,10 @@ class ModalClient:
         self.remove_output(f"{job_id}.mp4")
         for prefix in ("t2i", "refine", "ref2i"):
             self.remove_output(f"{prefix}_{job_id}.png")
+        self._remove_job_from_index(record["session_number"], job_id)
         self.job_store.pop(self._key(job_id), None)
         self.job_store.pop(f"call:{job_id}", None)
+        self.job_store.pop(self._cancel_key(job_id), None)
         return True
 
     def interrupt(self, job_id: str | None) -> dict[str, Any]:
@@ -271,6 +324,14 @@ class ModalClient:
         except Exception as exc:
             raise ModalOperationError("Could not cancel the Modal job; retry shortly") from exc
 
+        # A durable tombstone closes the race where the remote worker is still
+        # inside a progress callback after FunctionCall.cancel() returns. The
+        # worker checks this key before every state transition and completion.
+        self.job_store.put(
+            self._cancel_key(target["id"]),
+            {"requested_at": self._utc_now()},
+        )
+
         target = self._get_record(target["id"]) or target
         if target.get("status") in ACTIVE_STATUSES:
             target["status"] = "interrupted"
@@ -287,6 +348,62 @@ class ModalClient:
     def upload_file(self, local_path: Path, remote_path: str) -> None:
         with self.state_volume.batch_upload(force=True) as batch:
             batch.put_file(str(local_path), remote_path)
+
+    def register_asset(self, asset_id: str, remote_path: str) -> None:
+        self.job_store.put(
+            self._asset_key(asset_id),
+            {
+                "remote_path": remote_path,
+                "uploaded_at": time.time(),
+            },
+        )
+
+    def remove_input(self, remote_path: str) -> None:
+        try:
+            self.state_volume.remove_file(remote_path)
+        except FileNotFoundError:
+            pass
+
+    @staticmethod
+    def _request_asset_ids(request: dict[str, Any]) -> set[str]:
+        asset_ids = {
+            item.get("asset_id")
+            for item in request.get("conditions", [])
+            if isinstance(item, dict) and item.get("asset_id")
+        }
+        if request.get("audio_asset_id"):
+            asset_ids.add(request["audio_asset_id"])
+        return asset_ids
+
+    def cleanup_assets(self, max_age_seconds: int = 24 * 60 * 60) -> int:
+        """Remove stale uploaded inputs that no active job can still consume."""
+        now = time.time()
+        active_assets: set[str] = set()
+        asset_records: list[tuple[str, dict[str, Any]]] = []
+
+        for key, value in self.job_store.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            if key.startswith("job:") and value.get("status") in ACTIVE_STATUSES:
+                active_assets.update(self._request_asset_ids(value.get("request") or {}))
+            elif key.startswith("asset:"):
+                asset_records.append((key, value))
+
+        removed = 0
+        for key, value in asset_records:
+            asset_id = key.removeprefix("asset:")
+            uploaded_at = float(value.get("uploaded_at") or 0)
+            if asset_id in active_assets or now - uploaded_at < max_age_seconds:
+                continue
+            remote_path = value.get("remote_path")
+            if isinstance(remote_path, str) and remote_path:
+                try:
+                    self.state_volume.remove_file(remote_path)
+                except FileNotFoundError:
+                    pass
+            self.job_store.pop(key, None)
+            removed += 1
+        return removed
 
     def download_output(self, filename: str) -> Path:
         if Path(filename).name != filename:

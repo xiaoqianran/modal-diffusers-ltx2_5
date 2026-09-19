@@ -7,11 +7,29 @@ from types import ModuleType
 import torch
 
 from ltx25.models import ModelLifecycle, _create_natten_processor
-from ltx25.runtime import LTXGenerator, PIXEL_DETAILING_LORA_STRENGTH
+from ltx25.runtime import LTXGenerator, PIXEL_DETAILING_LORA_STRENGTH, _PatchRegistry
 
 
 def test_pixel_detailing_lora_matches_official_dfr_strength():
     assert PIXEL_DETAILING_LORA_STRENGTH == 0.5
+
+
+def test_patch_registry_restores_temporary_pipeline_state_after_partial_cleanup():
+    pipe = SimpleNamespace(prepare_latents="base", audio_scheduler="scheduler")
+    patches = _PatchRegistry()
+
+    _, restore_prepare = patches.replace(pipe, "prepare_latents", "job-prepare")
+    patches.replace(pipe, "audio_scheduler", "job-scheduler")
+    assert pipe.prepare_latents == "job-prepare"
+    assert pipe.audio_scheduler == "job-scheduler"
+
+    # Stage 1 may restore one patch early; the outer generate() finally must
+    # still safely restore every remaining transient without double-restoring.
+    restore_prepare()
+    patches.restore_all()
+
+    assert pipe.prepare_latents == "base"
+    assert pipe.audio_scheduler == "scheduler"
 
 
 def test_a2v_mel_transform_is_pure_torch_and_finite():

@@ -56,14 +56,15 @@ modal deploy modal_app.py
 放在 `ltx25-state` Volume；NATTEN 等硬件相关 kernel 缓存单独放在 `ltx25-kernels`
 Volume，避免已加载的 `.so` 阻塞逐任务 `state_volume.reload()`。任务状态保存在
 `ltx25-jobs` Modal Dict。
-本地 `ltx25/modal_client.py` 通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器，
-空闲 600 秒后自动释放。打开页面、查看历史和上传文件不会启动 GPU。可通过
+本地 `ltx25/modal_client.py` 通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器。
+Studio 启动时会显式 warm GPU；页面真正离开时前端通过 keepalive 调用 `/api/admin/unload`，
+将 Modal `scaledown_window` 收到 2 秒。正常运行期间的默认保温窗口为 600 秒，可通过
 `LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、`LTX25_MODAL_HF_SECRET`
 覆盖默认资源名。
 
 ### 独立前端
 
-前端已经与 Modal/FastAPI 后端分离，位于 `frontend/`，使用 Vite + Vanilla JS。
+前端已经与 Modal/FastAPI 后端分离，位于 `frontend/`，使用 Vue 3 + Vite。
 后端只提供 `/api/*` 与 `/outputs/*`，不再托管静态页面。
 
 ```powershell
@@ -72,8 +73,10 @@ npm install
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5187`。Vite 开发代理默认连接本地 `ltx25.api` 路由器；如需切换后端，
-设置 `VITE_API_TARGET` 后重新启动前端。前端可以连续提交任务，后端仍保持单 GPU
+打开 `http://127.0.0.1:5187`。单独执行 `npm run dev` 时，Vite 默认代理到
+`http://127.0.0.1:8000`，可配合 `python tools/mock_backend.py --port 8000` 做纯前端开发；
+`start-ltx25.bat` 会显式把 `VITE_API_TARGET` 指向真实本地 Router `http://127.0.0.1:48125`。
+如需切换后端，设置 `VITE_API_TARGET` 后重新启动前端。前端可以连续提交任务，后端仍保持单 GPU
 串行执行（`max_containers=1`、`max_inputs=1`），后续任务在 Modal 队列中等待。
 
 部署前设置 `$env:LTX25_MODAL_GPU_IDLE_SECONDS="120"` 可调整 GPU 空闲保留时间；
@@ -82,8 +85,8 @@ npm run dev
 
 网关在同一容器内串行化 Volume 操作（包括完整文件响应），避免打开文件期间
 执行 `reload()`；健康检查和任务轮询仍可并发。大文件传输期间，同容器的其他
-文件操作会等待。任务列表仍扫描 Modal Dict，适合当前个人工作室规模；大量
-长期历史应迁移到支持索引和分页的数据库。
+文件操作会等待。任务状态仍存 Modal Dict，但当前会话使用 `session:<id>:jobs`
+轻量索引，常规轮询不再扫描整个 Dict；旧会话首次访问会自动回填索引。
 
 > NATTEN 是硬件/torch/CUDA 组合相关的预编译 kernel，由 `kernels` 在 GPU 环境中选择；
 > 它不是 LTX 模型权重。其首次 kernel 获取发生在 GPU 容器中，缓存持久化到

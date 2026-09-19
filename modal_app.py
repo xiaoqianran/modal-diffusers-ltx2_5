@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 import modal
 
 APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
@@ -43,6 +44,42 @@ state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
 kernel_volume = modal.Volume.from_name(KERNEL_VOLUME_NAME, create_if_missing=True)
 job_store = modal.Dict.from_name(JOB_DICT_NAME, create_if_missing=True)
 hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
+
+
+def _cancel_key(job_id: str) -> str:
+    return f"cancel:{job_id}"
+
+
+def _honor_interrupt(job_id: str, fallback: dict) -> dict | None:
+    """Make an accepted cancel request terminal across worker state races.
+
+    Modal cancellation and the worker execute on different machines. A durable
+    cancel tombstone lets the worker repair any `running`/`completed` write that
+    raced *after* the cancel request, while preserving a completion that truly
+    happened before the request arrived.
+    """
+    marker = job_store.get(_cancel_key(job_id))
+    current = job_store.get(f"job:{job_id}") or fallback
+    if current.get("status") == "interrupted":
+        return current
+    if not isinstance(marker, dict):
+        return None
+
+    requested_at = marker.get("requested_at", "")
+    state_time = current.get("updated_at", "")
+    if current.get("status") in {"completed", "failed"} and state_time and requested_at:
+        if state_time < requested_at:
+            return None
+
+    current.update(
+        {
+            "status": "interrupted",
+            "error": "Interrupted by user",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    job_store.put(f"job:{job_id}", current)
+    return current
 
 # Model preparation deliberately does not install torch/CUDA. The modal_nvfp4
 # download profile is download/copy/validation only and therefore belongs on CPU.
@@ -208,7 +245,6 @@ class LTX25Worker:
         are retried by Modal with the same job id/output path.
         """
         import time
-        from datetime import datetime, timezone
         from pathlib import Path
 
         from ltx25.config import settings
@@ -218,10 +254,19 @@ class LTX25Worker:
         record = job_store.get(record_key) or {}
         if record.get("status") in {"completed", "interrupted"}:
             return record
+        interrupted = _honor_interrupt(job_id, record)
+        if interrupted is not None:
+            return interrupted
         state_volume.reload()
+        interrupted = _honor_interrupt(job_id, record)
+        if interrupted is not None:
+            return interrupted
         record.update({"status": "running", "progress": 0.0, "error": None,
                        "updated_at": datetime.now(timezone.utc).isoformat()})
         job_store.put(record_key, record)
+        interrupted = _honor_interrupt(job_id, record)
+        if interrupted is not None:
+            return interrupted
 
         request = GenerateRequest.model_validate(request_payload)
         if request.mode in STILL_IMAGE_MODES:
@@ -240,15 +285,27 @@ class LTX25Worker:
                 return
             last_bucket = bucket
             current = job_store.get(record_key) or record
+            if _honor_interrupt(job_id, current) is not None:
+                return
             current["status"] = "running"
             current["progress"] = max(0.0, min(1.0, value))
             current["updated_at"] = datetime.now(timezone.utc).isoformat()
             job_store.put(record_key, current)
+            _honor_interrupt(job_id, current)
 
         try:
             metrics = self.generator.generate(request, target, progress) or {}
+            interrupted = _honor_interrupt(job_id, record)
+            if interrupted is not None:
+                return interrupted
             state_volume.commit()
+            interrupted = _honor_interrupt(job_id, record)
+            if interrupted is not None:
+                return interrupted
         except Exception as exc:  # ordinary generation failure: do not waste retries
+            interrupted = _honor_interrupt(job_id, record)
+            if interrupted is not None:
+                return interrupted
             current = job_store.get(record_key) or record
             current.update(
                 {
@@ -259,6 +316,9 @@ class LTX25Worker:
                 }
             )
             job_store.put(record_key, current)
+            interrupted = _honor_interrupt(job_id, current)
+            if interrupted is not None:
+                return interrupted
             return current
 
         current = job_store.get(record_key) or record
@@ -275,6 +335,9 @@ class LTX25Worker:
             }
         )
         job_store.put(record_key, current)
+        interrupted = _honor_interrupt(job_id, current)
+        if interrupted is not None:
+            return interrupted
         return current
 
 

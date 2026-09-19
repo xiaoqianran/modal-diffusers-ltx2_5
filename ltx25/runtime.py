@@ -22,6 +22,38 @@ PIXEL_UPSCALER_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.saf
 # half-resolution stage 1 -> latent x2 -> full-resolution detailing stage 2.
 PIXEL_DETAILING_LORA_STRENGTH = 0.5
 
+
+class _PatchRegistry:
+    """Track temporary attribute replacements and restore them exactly once.
+
+    The resident pipeline is reused across jobs, so any per-request monkey patch
+    must be exception-safe across the *entire* generation workflow, not only the
+    immediate pipeline call where it is installed.
+    """
+
+    def __init__(self) -> None:
+        self._restores: list[Callable[[], None]] = []
+
+    def replace(self, obj, attr: str, value) -> tuple[object, Callable[[], None]]:
+        original = getattr(obj, attr)
+        active = True
+
+        def restore() -> None:
+            nonlocal active
+            if not active:
+                return
+            setattr(obj, attr, original)
+            active = False
+
+        setattr(obj, attr, value)
+        self._restores.append(restore)
+        return original, restore
+
+    def restore_all(self) -> None:
+        for restore in reversed(self._restores):
+            restore()
+        self._restores.clear()
+
 # fp8 layerwise-casting skip list, verified by module enumeration against
 # Lightricks/LTX-2.5-Diffusers subfolder=transformer at the pinned revision
 # (faithful copy of scratch_fp8_probe/fp8_common.py::FP8_SKIP_MODULES_PATTERN;
@@ -272,6 +304,7 @@ class LTXGenerator(ModelLifecycle):
 
     def generate(self, request: GenerateRequest, target: Path, progress: Callable[[float], None]) -> dict[str, float]:
         pipe = self.load()
+        patches = _PatchRegistry()
         adapter_names = []
         lora_root = self.config.lora_dir.resolve()
         nvfp4_lora = self.config.ltx25_transformer_precision == "nvfp4"
@@ -310,8 +343,9 @@ class LTXGenerator(ModelLifecycle):
                 self._cast_lora_layers_to_bf16(pipe)
             if request.mode in STILL_IMAGE_MODES:
                 return self._generate_still_impl(request, target, progress)
-            return self._generate_impl(request, target, progress)
+            return self._generate_impl(request, target, progress, patches)
         finally:
+            patches.restore_all()
             if request.loras or request.upscale_method == "pixel":
                 try:
                     if nvfp4_lora:
@@ -521,7 +555,13 @@ class LTXGenerator(ModelLifecycle):
         torch.cuda.empty_cache()
         return {"peak_vram_gb": peak_vram_gb}
 
-    def _generate_impl(self, request: GenerateRequest, target: Path, progress: Callable[[float], None]) -> dict[str, float]:
+    def _generate_impl(
+        self,
+        request: GenerateRequest,
+        target: Path,
+        progress: Callable[[float], None],
+        patches: _PatchRegistry,
+    ) -> dict[str, float]:
         import torch
         from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
         from diffusers.pipelines.ltx2.utils import DISTILLED_SIGMA_VALUES, STAGE_2_DISTILLED_SIGMA_VALUES
@@ -535,7 +575,7 @@ class LTXGenerator(ModelLifecycle):
         input_audio_wave = None
         input_audio_latents = None
         restore_audio_prepare = None
-        previous_audio_scheduler = None
+        restore_audio_scheduler = None
 
         conditions = []
         image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
@@ -627,8 +667,9 @@ class LTXGenerator(ModelLifecycle):
                 latents = latents * (1 - mask) + clean * mask
                 return latents, mask, clean, coords
 
-            restore_prepare_latents = original_prepare_latents
-            pipe.prepare_latents = types.MethodType(prepare_retake, pipe)
+            _, restore_prepare_latents = patches.replace(
+                pipe, "prepare_latents", types.MethodType(prepare_retake, pipe)
+            )
 
         elif request.mode == "extend":
             if not source_frames:
@@ -724,8 +765,9 @@ class LTXGenerator(ModelLifecycle):
                 merged_clean[:, :base_len] = orig_clean[:, :base_len] * (1 - mask) + clean * mask
                 return latents, merged_mask, merged_clean, coords
 
-            restore_prepare_latents = original_prepare_latents
-            pipe.prepare_latents = types.MethodType(prepare_extend, pipe)
+            _, restore_prepare_latents = patches.replace(
+                pipe, "prepare_latents", types.MethodType(prepare_extend, pipe)
+            )
 
         # LTX25_STAGE_DEBUG=1: リアルタイム経路の未計測区間を分解する一時計測
         # (2026-09-03 調査、既定OFFで挙動不変)。a2v 前処理は ffprobe + ffmpeg×2 の
@@ -815,10 +857,10 @@ class LTXGenerator(ModelLifecycle):
 
             frozen_scheduler.set_timesteps = types.MethodType(set_frozen_timesteps, frozen_scheduler)
             frozen_scheduler.step = types.MethodType(frozen_step, frozen_scheduler)
-            restore_audio_prepare = original_audio_prepare
-            previous_audio_scheduler = pipe.audio_scheduler
-            pipe.prepare_audio_latents = types.MethodType(prepare_frozen_audio, pipe)
-            pipe.audio_scheduler = frozen_scheduler
+            _, restore_audio_prepare = patches.replace(
+                pipe, "prepare_audio_latents", types.MethodType(prepare_frozen_audio, pipe)
+            )
+            _, restore_audio_scheduler = patches.replace(pipe, "audio_scheduler", frozen_scheduler)
             if _stage_debug:
                 print(f"[ltx25] STAGE_DEBUG a2v_prep {time.time() - _a2v_prep_t0:.3f}s", flush=True)
 
@@ -896,14 +938,9 @@ class LTXGenerator(ModelLifecycle):
         stage_t0 = time.time()
         try:
             video, audio = pipe(**args)
-        except Exception:
-            if restore_audio_prepare is not None:
-                pipe.prepare_audio_latents = restore_audio_prepare
-                pipe.audio_scheduler = previous_audio_scheduler
-            raise
         finally:
             if restore_prepare_latents is not None:
-                pipe.prepare_latents = restore_prepare_latents
+                restore_prepare_latents()
             for _obj, _attr, _orig in _dbg_restore:
                 setattr(_obj, _attr, _orig)
         if _stage_debug:
@@ -1057,8 +1094,9 @@ class LTXGenerator(ModelLifecycle):
                         combined_coords,
                     )
 
-                restore_stage2_prepare = original_prepare_latents
-                pipe.prepare_latents = types.MethodType(prepare_pixel_reference, pipe)
+                _, restore_stage2_prepare = patches.replace(
+                    pipe, "prepare_latents", types.MethodType(prepare_pixel_reference, pipe)
+                )
             try:
                 video, audio = pipe(
                     prompt=request.prompt,
@@ -1086,18 +1124,14 @@ class LTXGenerator(ModelLifecycle):
                         0.64, stage2_span, len(STAGE_2_DISTILLED_SIGMA_VALUES)
                     ),
                 )
-            except Exception:
-                if restore_audio_prepare is not None:
-                    pipe.prepare_audio_latents = restore_audio_prepare
-                    pipe.audio_scheduler = previous_audio_scheduler
-                raise
             finally:
                 if restore_stage2_prepare is not None:
-                    pipe.prepare_latents = restore_stage2_prepare
+                    restore_stage2_prepare()
             print(f"[ltx25] stage timing: stage2 refine {time.time() - stage_t0:.1f}s", flush=True)
         if restore_audio_prepare is not None:
-            pipe.prepare_audio_latents = restore_audio_prepare
-            pipe.audio_scheduler = previous_audio_scheduler
+            restore_audio_prepare()
+        if restore_audio_scheduler is not None:
+            restore_audio_scheduler()
         sample_rate = pipe.vocoder.config.output_sampling_rate
         if use_diffusion_decoder:
             # `output_type="latent"` returned de-normalized video latents and audio latents.

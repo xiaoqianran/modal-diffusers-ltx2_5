@@ -55,12 +55,20 @@ modal deploy modal_app.py
 ```
 
 The production preset uses `LTX25_TRANSFORMER_PRECISION=nvfp4`,
-`OFFLOAD_MODE=none`, and `LTX25_CUDA_GRAPH=1`. Inputs, outputs, LoRAs, and the
-SQLite history live on `ltx25-state`. Hardware-specific NATTEN kernel binaries
-use a separate `ltx25-kernels` Volume so loaded shared libraries cannot block
-the per-job `state_volume.reload()`. Resource names can be overridden with
+`OFFLOAD_MODE=none`, and `LTX25_CUDA_GRAPH=1`. Inputs, outputs, and LoRAs live on
+`ltx25-state`; durable job state lives in the `ltx25-jobs` Modal Dict. Current
+sessions use a `session:<id>:jobs` index so normal UI polling does not scan the
+entire Dict. Hardware-specific NATTEN kernel binaries use a separate
+`ltx25-kernels` Volume so loaded shared libraries cannot block the per-job
+`state_volume.reload()`. Resource names can be overridden with
 `LTX25_MODAL_MODEL_VOLUME`, `LTX25_MODAL_STATE_VOLUME`,
 `LTX25_MODAL_KERNEL_VOLUME`, and `LTX25_MODAL_HF_SECRET`.
+
+The frontend is a separate Vue 3 + Vite application. Starting the Studio warms
+the GPU explicitly; leaving the page sends a keepalive unload request that sets
+the Modal worker scaledown window to 2 seconds. Running `npm run dev` by itself
+defaults the Vite proxy to `http://127.0.0.1:8000` for `tools/mock_backend.py`,
+while `start-ltx25.bat` points it at the real local Router on port 48125.
 
 > NATTEN is a torch/CUDA/GPU-specific prebuilt kernel selected by `kernels` in
 > the GPU environment. It is not an LTX model weight. Its first download may

@@ -85,6 +85,15 @@ class FakeControl:
     def upload_file(self, local_path: Path, remote_path: str):
         self.uploads[remote_path] = local_path.read_bytes()
 
+    def register_asset(self, asset_id: str, remote_path: str):
+        pass
+
+    def remove_input(self, remote_path: str):
+        self.uploads.pop(remote_path, None)
+
+    def cleanup_assets(self):
+        return 0
+
     def download_output(self, filename: str):
         raise FileNotFoundError(filename)
 
@@ -247,6 +256,7 @@ def test_upload_and_i2v_request(client):
     asset = response.json()
     assert asset["kind"] == "image"
     assert f"inputs/{asset['id']}.png" in control.uploads
+    assert list(api_module.UPLOAD_CACHE.iterdir()) == []
 
     response = test_client.post(
         "/api/jobs",
@@ -258,6 +268,21 @@ def test_upload_and_i2v_request(client):
     )
     assert response.status_code == 202
     assert response.json()["request"]["mode"] == "i2v"
+
+
+def test_upload_rolls_back_remote_file_when_asset_registration_fails(client):
+    test_client, control = client
+    image_file = BytesIO()
+    Image.new("RGB", (64, 64), "blue").save(image_file, format="PNG")
+    control.register_asset = lambda *_: (_ for _ in ()).throw(RuntimeError("dict unavailable"))
+
+    response = test_client.post(
+        "/api/assets",
+        files={"file": ("first.png", image_file.getvalue(), "image/png")},
+    )
+
+    assert response.status_code == 502
+    assert control.uploads == {}
 
 
 def test_lora_listing(client):

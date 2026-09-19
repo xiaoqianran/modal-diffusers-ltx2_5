@@ -9,6 +9,7 @@ import asyncio
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,6 +48,22 @@ OUTPUT_CACHE = modal_client.output_cache
 UPLOAD_CACHE = modal_client.upload_cache
 
 
+def _prune_local_upload_cache(max_age_seconds: int = 24 * 60 * 60) -> int:
+    """Delete crash leftovers; successful uploads are removed immediately."""
+    if not UPLOAD_CACHE.exists():
+        return 0
+    now = time.time()
+    removed = 0
+    for path in UPLOAD_CACHE.iterdir():
+        try:
+            if path.is_file() and now - path.stat().st_mtime >= max_age_seconds:
+                path.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 async def _keep_warm_loop() -> None:
     interval = max(60, min(modal_client.gpu_idle_seconds // 2, 300))
     while True:
@@ -60,6 +77,11 @@ async def lifespan(_: FastAPI):
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     OUTPUT_CACHE.mkdir(parents=True, exist_ok=True)
     UPLOAD_CACHE.mkdir(parents=True, exist_ok=True)
+    _prune_local_upload_cache()
+    try:
+        await asyncio.to_thread(modal_client.cleanup_assets)
+    except Exception:
+        pass
 
     keep_warm_task = asyncio.create_task(_keep_warm_loop())
     if modal_client.keep_gpu_warm:
@@ -214,7 +236,23 @@ def upload_asset(file: UploadFile = File(...)):
                 if probe.returncode != 0 or not probe.stdout.strip():
                     raise HTTPException(status_code=400, detail=f"Uploaded {kind} could not be decoded")
 
-        modal_client.upload_file(local_path, f"inputs/{asset_id}{suffix}")
+        remote_path = f"inputs/{asset_id}{suffix}"
+        modal_client.upload_file(local_path, remote_path)
+        local_path.unlink(missing_ok=True)
+        try:
+            modal_client.register_asset(asset_id, remote_path)
+        except Exception as exc:
+            try:
+                modal_client.remove_input(remote_path)
+            except Exception:
+                pass
+            raise HTTPException(status_code=502, detail="Uploaded asset could not be registered") from exc
+        try:
+            modal_client.cleanup_assets()
+        except Exception:
+            # Retention cleanup is best-effort and must never turn a valid upload
+            # into a failed user request.
+            pass
     except HTTPException:
         local_path.unlink(missing_ok=True)
         raise

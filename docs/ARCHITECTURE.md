@@ -34,6 +34,27 @@ ltx25/acceleration/
 Diffusers / LTX-2.5
 ```
 
+前端内部同样只有一条生产链：
+
+```text
+frontend/src/main.js
+        |
+        v
+      App.vue
+        |
+        +--> studio/components/*   # 纯视图
+        |
+        v
+useStudioRuntime.js                # state / polling / upload / actions
+        |
+        +--> studio/model/*        # 纯业务规则与 selectors
+        |
+        `--> runtime/api.js        # 唯一 HTTP boundary
+```
+
+Vue 组件不直接 `fetch`、不自己维护轮询；生产入口和测试共享同一个
+`useStudioRuntime()`，避免 UI 与测试各自维护一套运行时逻辑。
+
 ## 目录职责
 
 ```text
@@ -65,6 +86,18 @@ ltx25-state    # inputs / outputs / LoRA；每个 job 开始前可 reload
 ltx25-kernels  # NATTEN 等已加载 shared-library kernel cache，不参与 state reload
 ltx25-jobs     # Modal Dict：任务状态
 ```
+
+`ltx25-jobs` 同时维护轻量索引：
+
+```text
+session:<session>:jobs  # 当前会话 job id 列表，轮询不再扫描整个 Dict
+cancel:<job>            # durable cancel tombstone，防止 worker 状态回写复活任务
+asset:<asset>           # 上传时间/Volume path，用于输入资产 TTL 清理
+```
+
+浏览器进入 Studio 时显式 warm GPU；真正离开页面时发送 keepalive unload，
+本地 Router 将 Modal worker 的 `scaledown_window` 收到 2 秒。Router 自身退出时
+lifespan 也执行同样的 2 秒回收兜底。
 
 ## 依赖规则
 

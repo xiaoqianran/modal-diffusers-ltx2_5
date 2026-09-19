@@ -96,6 +96,25 @@ def test_reloadable_state_and_loaded_kernel_cache_are_separate():
 
 
 def test_frontend_exposes_upscale_method_contract():
-    source = (ROOT / "frontend" / "src" / "main.js").read_text(encoding="utf-8")
-    assert 'select name="upscale_method"' in source
-    assert "upscale_method: form.get('upscale_method') || 'latent'" in source
+    source = (ROOT / "frontend" / "src" / "studio" / "model" / "generationRequest.js").read_text(encoding="utf-8")
+    assert "upscale_method:" in source
+    assert "draft.upscaleMethod" in source
+
+
+def test_frontend_production_entry_uses_vue_runtime_boundary():
+    main = (ROOT / "frontend" / "src" / "main.js").read_text(encoding="utf-8")
+    app = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+    vite = (ROOT / "frontend" / "vite.config.js").read_text(encoding="utf-8")
+
+    assert "createApp(App).mount('#app')" in main
+    assert "useStudioRuntime" in app
+    assert "fetch(" not in app
+    assert "plugins: [vue()]" in vite
+
+
+def test_frontend_views_do_not_own_network_or_polling():
+    components = ROOT / "frontend" / "src" / "studio" / "components"
+    for path in components.glob("*.vue"):
+        source = path.read_text(encoding="utf-8")
+        assert "fetch(" not in source, path
+        assert "setTimeout(" not in source, path

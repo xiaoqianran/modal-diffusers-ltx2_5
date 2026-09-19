@@ -21,6 +21,7 @@ probes/__pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/digest.txt
 .ltx25-api-base
 .ltx25-cache/
 .codegraph/

@@ -19,6 +19,7 @@ from ltx25.modal_client import (
 class Store:
     def __init__(self):
         self.data = {}
+        self.items_calls = 0
 
     def get(self, key):
         return deepcopy(self.data.get(key))
@@ -27,6 +28,7 @@ class Store:
         self.data[key] = deepcopy(value)
 
     def items(self):
+        self.items_calls += 1
         return list(deepcopy(self.data).items())
 
     def pop(self, key, default=None):
@@ -67,6 +69,7 @@ def make_client(tmp_path: Path):
     control._warm_call = None
     control._warm_lock = threading.Lock()
     control._output_lock = threading.Lock()
+    control._session_lock = threading.Lock()
     return control
 
 
@@ -171,7 +174,58 @@ def test_interrupt_without_id_prefers_running_job(tmp_path, monkeypatch):
     assert result["current_job_id"] == running["id"]
     assert cancelled == ["fc-test"]
     assert control.job_store.get(f"job:{running['id']}")["status"] == "interrupted"
+    assert control.job_store.get(f"cancel:{running['id']}")["requested_at"]
     assert control.job_store.get(f"job:{queued['id']}")["status"] == "queued"
+
+
+def test_session_job_index_avoids_global_scan_after_creation(tmp_path):
+    control = make_client(tmp_path)
+    first = control.create_job(GenerateRequest(prompt="first", session_number=101))
+    control.create_job(GenerateRequest(prompt="other", session_number=202))
+    control.job_store.items_calls = 0
+
+    jobs = control.list_jobs(session_number=101)
+
+    assert [job["id"] for job in jobs] == [first["id"]]
+    assert control.job_store.items_calls == 0
+
+
+def test_delete_job_removes_session_and_cancel_indexes(tmp_path):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="done", session_number=101))
+    record = control.job_store.get(f"job:{job['id']}")
+    record["status"] = "completed"
+    control.job_store.put(f"job:{job['id']}", record)
+    control.job_store.put(f"cancel:{job['id']}", {"requested_at": "now"})
+
+    assert control.delete_job(job["id"]) is True
+    assert control.job_store.get("session:101:jobs") is None
+    assert control.job_store.get(f"cancel:{job['id']}") is None
+
+
+def test_asset_cleanup_preserves_active_inputs_then_removes_stale_terminal_inputs(tmp_path):
+    control = make_client(tmp_path)
+    asset_id = "c" * 32
+    remote_path = f"inputs/{asset_id}.png"
+    control.state_volume.files[remote_path] = b"image"
+    control.register_asset(asset_id, remote_path)
+
+    job = control.create_job(GenerateRequest(
+        mode="i2v",
+        prompt="move",
+        session_number=101,
+        conditions=[{"asset_id": asset_id, "kind": "image", "index": 0}],
+    ))
+    assert control.cleanup_assets(max_age_seconds=0) == 0
+    assert remote_path in control.state_volume.files
+
+    record = control.job_store.get(f"job:{job['id']}")
+    record["status"] = "completed"
+    control.job_store.put(f"job:{job['id']}", record)
+
+    assert control.cleanup_assets(max_age_seconds=0) == 1
+    assert remote_path not in control.state_volume.files
+    assert control.job_store.get(f"asset:{asset_id}") is None
 
 
 def test_interrupt_requires_call_id_for_active_job(tmp_path):
