@@ -245,6 +245,7 @@ class ModalClient:
     def interrupt(self, job_id: str | None) -> dict[str, Any]:
         target = self._get_record(job_id) if job_id else None
         if target is None and job_id is None:
+            active: list[dict[str, Any]] = []
             for item_key, item in self.job_store.items():
                 if (
                     isinstance(item_key, str)
@@ -252,8 +253,11 @@ class ModalClient:
                     and isinstance(item, dict)
                     and item.get("status") in ACTIVE_STATUSES
                 ):
-                    target = item
-                    break
+                    active.append(item)
+            running = [item for item in active if item.get("status") == "running"]
+            candidates = running or [item for item in active if item.get("status") == "queued"]
+            if candidates:
+                target = min(candidates, key=lambda item: item.get("created_at", ""))
 
         if not target or target.get("status") not in ACTIVE_STATUSES:
             return {"interrupted": False, "current_job_id": None, "requested_job_id": job_id}

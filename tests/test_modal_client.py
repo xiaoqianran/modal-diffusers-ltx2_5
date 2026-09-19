@@ -5,8 +5,15 @@ import threading
 
 import pytest
 
+import ltx25.modal_client as modal_client_module
 from ltx25.schemas import GenerateRequest
-from ltx25.modal_client import ActiveJobError, ModalClient
+from ltx25.modal_client import (
+    ActiveJobError,
+    JobStateError,
+    ModalClient,
+    ModalOperationError,
+    SubmissionError,
+)
 
 
 class Store:
@@ -133,3 +140,105 @@ def test_keep_warm_dedupes_pending_call_and_unload_cancels_it(tmp_path):
     assert pending.cancelled is True
     assert idle_windows[-1] == 2
     assert control.start_warmup() is False
+
+
+def test_interrupt_without_id_prefers_running_job(tmp_path, monkeypatch):
+    control = make_client(tmp_path)
+    queued = control.create_job(GenerateRequest(prompt="queued"))
+    running = control.create_job(GenerateRequest(prompt="running"))
+    running_record = control.job_store.get(f"job:{running['id']}")
+    running_record["status"] = "running"
+    control.job_store.put(f"job:{running['id']}", running_record)
+
+    cancelled = []
+
+    class Call:
+        def __init__(self, call_id):
+            self.call_id = call_id
+
+        def cancel(self, terminate_containers=False):
+            cancelled.append(self.call_id)
+
+    monkeypatch.setattr(
+        modal_client_module.modal.FunctionCall,
+        "from_id",
+        lambda call_id: Call(call_id),
+    )
+
+    result = control.interrupt(None)
+
+    assert result["interrupted"] is True
+    assert result["current_job_id"] == running["id"]
+    assert cancelled == ["fc-test"]
+    assert control.job_store.get(f"job:{running['id']}")["status"] == "interrupted"
+    assert control.job_store.get(f"job:{queued['id']}")["status"] == "queued"
+
+
+def test_interrupt_requires_call_id_for_active_job(tmp_path):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="queued"))
+    control.job_store.pop(f"call:{job['id']}")
+
+    with pytest.raises(JobStateError):
+        control.interrupt(job["id"])
+
+
+def test_interrupt_wraps_modal_cancel_failure(tmp_path, monkeypatch):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="queued"))
+
+    class Call:
+        def cancel(self, terminate_containers=False):
+            raise RuntimeError("cancel failed")
+
+    monkeypatch.setattr(
+        modal_client_module.modal.FunctionCall,
+        "from_id",
+        lambda _call_id: Call(),
+    )
+
+    with pytest.raises(ModalOperationError):
+        control.interrupt(job["id"])
+
+
+def test_interrupt_without_id_uses_oldest_queued_when_nothing_is_running(tmp_path, monkeypatch):
+    control = make_client(tmp_path)
+    first = control.create_job(GenerateRequest(prompt="first"))
+    second = control.create_job(GenerateRequest(prompt="second"))
+    first_record = control.job_store.get(f"job:{first['id']}")
+    second_record = control.job_store.get(f"job:{second['id']}")
+    first_record["created_at"] = "2026-01-01T00:00:00+00:00"
+    second_record["created_at"] = "2026-01-02T00:00:00+00:00"
+    control.job_store.put(f"job:{first['id']}", first_record)
+    control.job_store.put(f"job:{second['id']}", second_record)
+
+    class Call:
+        def cancel(self, terminate_containers=False):
+            pass
+
+    monkeypatch.setattr(
+        modal_client_module.modal.FunctionCall,
+        "from_id",
+        lambda _call_id: Call(),
+    )
+
+    result = control.interrupt(None)
+
+    assert result["current_job_id"] == first["id"]
+    assert control.job_store.get(f"job:{first['id']}")["status"] == "interrupted"
+    assert control.job_store.get(f"job:{second['id']}")["status"] == "queued"
+
+
+def test_submission_failure_is_persisted(tmp_path):
+    control = make_client(tmp_path)
+    control.generate_fn = SimpleNamespace(
+        spawn=lambda *_: (_ for _ in ()).throw(RuntimeError("submit failed"))
+    )
+
+    with pytest.raises(SubmissionError):
+        control.create_job(GenerateRequest(prompt="fails"))
+
+    jobs = [item for key, item in control.job_store.items() if key.startswith("job:")]
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "failed"
+    assert "submit failed" in jobs[0]["error"]
