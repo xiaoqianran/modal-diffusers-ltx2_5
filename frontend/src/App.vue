@@ -240,6 +240,17 @@ function closeMenus() {
   modePickerOpen.value = false
 }
 
+function handleKeydown(event) {
+  if (event.key !== 'Escape') return
+  if (!controlsOpen.value && !jobsOpen.value && !modePickerOpen.value && !moreOpen.value) return
+
+  event.preventDefault()
+  controlsOpen.value = false
+  jobsOpen.value = false
+  modePickerOpen.value = false
+  moreOpen.value = false
+}
+
 function handleOnline() {
   void warmGpu()
   void refreshJobs()
@@ -252,6 +263,7 @@ function handlePageHide(event) {
 
 onMounted(async () => {
   document.addEventListener('click', closeMenus)
+  window.addEventListener('keydown', handleKeydown)
   window.addEventListener('online', handleOnline)
   window.addEventListener('pagehide', handlePageHide)
   await start()
@@ -259,6 +271,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeMenus)
+  window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('online', handleOnline)
   window.removeEventListener('pagehide', handlePageHide)
   dispose()
