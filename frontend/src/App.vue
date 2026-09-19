@@ -78,16 +78,25 @@ const healthText = computed(() => {
   return health.value ? gpuLabel.value : 'Offline'
 })
 
+const ratioOptions = Object.freeze([
+  { value: '768x512', label: '3:2', aspect: '3 / 2' },
+  { value: '704x480', label: '22:15', aspect: '22 / 15' },
+  { value: '640x384', label: '5:3', aspect: '5 / 3' },
+  { value: '512x320', label: '8:5', aspect: '8 / 5' },
+])
+
+const fpsOptions = Object.freeze([16, 24, 30])
+
 const frameOptions = computed(() => {
   const fixed = activeCapability.value.validFrames
   if (Array.isArray(fixed) && fixed.length) {
-    return fixed.map(value => ({ value, label: value + ' frames' }))
+    return fixed.map(value => ({ value, label: String(value), detail: 'frames' }))
   }
   return [
-    { value: 49, label: '2s' },
-    { value: 121, label: '5s' },
-    { value: 241, label: '10s' },
-    { value: 481, label: '20s' },
+    { value: 49, label: '2s', detail: '49f' },
+    { value: 121, label: '5s', detail: '121f' },
+    { value: 241, label: '10s', detail: '241f' },
+    { value: 481, label: '20s', detail: '481f' },
   ]
 })
 
@@ -587,63 +596,69 @@ onBeforeUnmount(() => {
                   <span>LTX-2.5</span>
                 </button>
 
-                <div class="choice-cluster">
-                  <span class="control-caption">Ratio</span>
-                  <div class="choice-segments" aria-label="Aspect ratio">
+                <div class="parameter-picker ratio-picker">
+                  <span class="parameter-label">Ratio</span>
+                  <div class="parameter-options" aria-label="Aspect ratio">
                     <button
-                      v-for="item in [
-                        ['768x512', '16:9'],
-                        ['704x480', '3:2'],
-                        ['640x384', '5:3'],
-                        ['512x320', '8:5'],
-                      ]"
-                      :key="item[0]"
-                      class="choice-segment"
-                      :class="{ active: draft.size === item[0] }"
+                      v-for="item in ratioOptions"
+                      :key="item.value"
+                      class="parameter-option ratio-option"
+                      :class="{ active: draft.size === item.value }"
+                      :aria-pressed="draft.size === item.value"
                       type="button"
-                      @click="draft.size = item[0]"
-                    >{{ item[1] }}</button>
+                      @click="draft.size = item.value"
+                    >
+                      <span class="ratio-shape" :style="{ aspectRatio: item.aspect }" aria-hidden="true" />
+                      <span class="parameter-value">{{ item.label }}</span>
+                    </button>
                   </div>
                 </div>
 
-                <div class="choice-cluster">
-                  <span class="control-caption">Duration</span>
-                  <div class="choice-segments" aria-label="Duration">
+                <div class="parameter-picker duration-picker">
+                  <span class="parameter-label">Duration</span>
+                  <div class="parameter-options" aria-label="Duration">
                     <button
                       v-for="item in frameOptions"
                       :key="item.value"
-                      class="choice-segment"
+                      class="parameter-option duration-option"
                       :class="{ active: draft.numFrames === item.value }"
+                      :aria-pressed="draft.numFrames === item.value"
                       type="button"
                       @click="draft.numFrames = item.value"
-                    >{{ item.label }}</button>
+                    >
+                      <span class="parameter-value">{{ item.label }}</span>
+                      <small>{{ item.detail }}</small>
+                    </button>
                   </div>
                 </div>
 
-                <div class="choice-cluster">
-                  <span class="control-caption">FPS</span>
-                  <div class="choice-segments" aria-label="FPS">
+                <div class="parameter-picker fps-picker">
+                  <span class="parameter-label">FPS</span>
+                  <div class="parameter-options" aria-label="FPS">
                     <button
-                      v-for="value in [16, 24, 30]"
+                      v-for="value in fpsOptions"
                       :key="value"
-                      class="choice-segment"
+                      class="parameter-option fps-option"
                       :class="{ active: draft.fps === value }"
+                      :aria-pressed="draft.fps === value"
                       type="button"
                       @click="draft.fps = value"
-                    >{{ value }}</button>
+                    >
+                      <span class="parameter-value">{{ value }}</span>
+                      <small>fps</small>
+                    </button>
                   </div>
                 </div>
+                <button
+                  class="controls-button"
+                  :class="{ active: controlsOpen }"
+                  type="button"
+                  @click.stop="controlsOpen = !controlsOpen; jobsOpen = false"
+                >
+                  <span>Controls</span>
+                  <span aria-hidden="true">⌘</span>
+                </button>
               </div>
-
-              <button
-                class="controls-button"
-                :class="{ active: controlsOpen }"
-                type="button"
-                @click.stop="controlsOpen = !controlsOpen; jobsOpen = false"
-              >
-                <span>Controls</span>
-                <span aria-hidden="true">⌘</span>
-              </button>
             </div>
 
             <p v-if="notice.text" class="dock-notice" :data-state="notice.state">{{ notice.text }}</p>
