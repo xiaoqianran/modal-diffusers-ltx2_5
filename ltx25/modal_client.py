@@ -65,6 +65,7 @@ class ModalClient:
         self.ready_fn = self.worker.ready
 
         self._warm_call = None
+        self._warm_lock = threading.Lock()
         self._output_lock = threading.Lock()
 
     @staticmethod
@@ -126,8 +127,37 @@ class ModalClient:
     def set_idle_window(self, seconds: int) -> None:
         self.worker.update_autoscaler(min_containers=0, scaledown_window=seconds)
 
-    def start_warmup(self) -> None:
-        self._warm_call = self.ready_fn.spawn()
+    def start_warmup(self) -> bool:
+        """Start one warmup call unless keep-warm is disabled or one is already pending."""
+        if not self.keep_gpu_warm:
+            return False
+        with self._warm_lock:
+            if self._warm_call is not None:
+                try:
+                    self._warm_call.get(timeout=0)
+                except (TimeoutError, modal.exception.TimeoutError):
+                    return False
+                except Exception:
+                    pass
+            self._warm_call = self.ready_fn.spawn()
+            return True
+
+    def enable_keep_warm(self) -> bool:
+        self.keep_gpu_warm = True
+        self.set_idle_window(self.gpu_idle_seconds)
+        return self.start_warmup()
+
+    def disable_keep_warm(self) -> None:
+        self.keep_gpu_warm = False
+        with self._warm_lock:
+            warm_call = self._warm_call
+            self._warm_call = None
+        if warm_call is not None:
+            try:
+                warm_call.cancel(terminate_containers=False)
+            except Exception:
+                pass
+        self.set_idle_window(2)
 
     def warm_status(self) -> dict[str, Any]:
         if self._warm_call is None:

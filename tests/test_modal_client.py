@@ -58,6 +58,7 @@ def make_client(tmp_path: Path):
     control.generate_fn = SimpleNamespace(spawn=lambda *_: SimpleNamespace(object_id="fc-test"))
     control.ready_fn = SimpleNamespace(spawn=lambda: None)
     control._warm_call = None
+    control._warm_lock = threading.Lock()
     control._output_lock = threading.Lock()
     return control
 
@@ -98,3 +99,37 @@ def test_download_output_is_cached_locally(tmp_path):
     second = control.download_output("test.mp4")
     assert second == first
     assert second.read_bytes() == b"video"
+
+
+def test_keep_warm_dedupes_pending_call_and_unload_cancels_it(tmp_path):
+    control = make_client(tmp_path)
+    idle_windows = []
+    spawned = []
+
+    class PendingCall:
+        cancelled = False
+
+        def get(self, timeout=0):
+            raise TimeoutError
+
+        def cancel(self, terminate_containers=False):
+            self.cancelled = True
+
+    pending = PendingCall()
+    control.worker = SimpleNamespace(
+        update_autoscaler=lambda **kwargs: idle_windows.append(kwargs["scaledown_window"])
+    )
+    control.ready_fn = SimpleNamespace(spawn=lambda: spawned.append(pending) or pending)
+
+    assert control.start_warmup() is False
+    assert control.enable_keep_warm() is True
+    assert idle_windows[-1] == control.gpu_idle_seconds
+    assert len(spawned) == 1
+    assert control.start_warmup() is False
+    assert len(spawned) == 1
+
+    control.disable_keep_warm()
+    assert control.keep_gpu_warm is False
+    assert pending.cancelled is True
+    assert idle_windows[-1] == 2
+    assert control.start_warmup() is False

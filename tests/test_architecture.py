@@ -93,3 +93,9 @@ def test_reloadable_state_and_loaded_kernel_cache_are_separate():
     assert '"/data": state_volume' in source
     assert '"/kernel-cache": kernel_volume' in source
     assert '"HF_HUB_DISABLE_TELEMETRY"' not in source
+
+
+def test_frontend_exposes_upscale_method_contract():
+    source = (ROOT / "frontend" / "src" / "main.js").read_text(encoding="utf-8")
+    assert 'select name="upscale_method"' in source
+    assert "upscale_method: form.get('upscale_method') || 'latent'" in source

@@ -114,7 +114,8 @@ app.innerHTML = `
           </div>
         </details>
 
-        <label class="check"><input name="upscale" type="checkbox" checked /> <span>2× latent upscale</span></label>
+        <label class="check"><input name="upscale" type="checkbox" checked /> <span>2× upscale</span></label>
+        <label class="field compact"><span>Upscale method</span><select name="upscale_method"><option value="latent">Latent</option><option value="pixel">Pixel IC-LoRA</option></select></label>
         <button id="submit" class="primary" type="submit">加入队列</button>
         <p id="submitMessage" class="message"></p>
       </form>
@@ -200,6 +201,7 @@ function setMode(mode) {
 
   const still = ['t2i', 'refine_image', 'ref2i'].includes(mode)
   const upscale = document.querySelector('input[name="upscale"]')
+  const upscaleMethod = document.querySelector('select[name="upscale_method"]')
   const decoder = document.querySelector('select[name="decoder"]')
   const sourceInput = el('#sourceAsset input')
   sourceInput.accept = ['retake', 'extend'].includes(mode) ? 'video/*' : 'image/*,video/*'
@@ -213,9 +215,13 @@ function setMode(mode) {
     decoder.disabled = false
     if (still) upscale.checked = true
   }
+  const pixelAllowed = upscale.checked && !still && !['iclora', 'retake', 'extend'].includes(mode)
+  upscaleMethod.disabled = !pixelAllowed
+  if (!pixelAllowed) upscaleMethod.value = 'latent'
 }
 
 all('.mode').forEach(button => button.addEventListener('click', () => setMode(button.dataset.mode)))
+document.querySelector('input[name="upscale"]').addEventListener('change', () => setMode(el('#mode').value))
 
 async function uploadAsset(slot, file, label) {
   if (!file) return
@@ -409,7 +415,7 @@ el('#generate').addEventListener('submit', async event => {
       guidance_scale: Number(form.get('guidance_scale')),
       seed: Number(form.get('seed')),
       upscale: form.get('upscale') === 'on',
-      upscale_method: 'latent',
+      upscale_method: form.get('upscale_method') || 'latent',
       temporal_upscale: false,
       decoder: form.get('decoder'),
       conditions,

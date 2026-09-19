@@ -51,7 +51,8 @@ async def _keep_warm_loop() -> None:
     interval = max(60, min(modal_client.gpu_idle_seconds // 2, 300))
     while True:
         await asyncio.sleep(interval)
-        await asyncio.to_thread(modal_client.start_warmup)
+        if modal_client.keep_gpu_warm:
+            await asyncio.to_thread(modal_client.start_warmup)
 
 
 @asynccontextmanager
@@ -60,17 +61,14 @@ async def lifespan(_: FastAPI):
     OUTPUT_CACHE.mkdir(parents=True, exist_ok=True)
     UPLOAD_CACHE.mkdir(parents=True, exist_ok=True)
 
-    keep_warm_task = None
+    keep_warm_task = asyncio.create_task(_keep_warm_loop())
     if modal_client.keep_gpu_warm:
-        await asyncio.to_thread(modal_client.set_idle_window, modal_client.gpu_idle_seconds)
-        await asyncio.to_thread(modal_client.start_warmup)
-        keep_warm_task = asyncio.create_task(_keep_warm_loop())
+        await asyncio.to_thread(modal_client.enable_keep_warm)
 
     try:
         yield
     finally:
-        if keep_warm_task is not None:
-            keep_warm_task.cancel()
+        keep_warm_task.cancel()
         if modal_client.keep_gpu_warm:
             try:
                 await asyncio.to_thread(modal_client.set_idle_window, 120)
@@ -105,14 +103,13 @@ def health():
 
 @app.post("/api/admin/warm")
 def admin_warm():
-    modal_client.set_idle_window(modal_client.gpu_idle_seconds)
-    modal_client.start_warmup()
+    modal_client.enable_keep_warm()
     return {"status": "warming"}
 
 
 @app.post("/api/admin/unload")
 def admin_unload():
-    modal_client.set_idle_window(2)
+    modal_client.disable_keep_warm()
     return {"result": "GPU worker will scale to zero after its current input becomes idle"}
 
 

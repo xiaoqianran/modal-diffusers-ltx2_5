@@ -21,15 +21,27 @@ class FakeControl:
         self.jobs = {}
         self.uploads = {}
         self.loras = []
+        self.idle_windows = []
+        self.warmups = 0
 
     def warm_status(self):
         return {"state": "disabled"}
 
-    def set_idle_window(self, _seconds):
-        pass
+    def set_idle_window(self, seconds):
+        self.idle_windows.append(seconds)
 
     def start_warmup(self):
-        pass
+        self.warmups += 1
+        return True
+
+    def enable_keep_warm(self):
+        self.keep_gpu_warm = True
+        self.set_idle_window(self.gpu_idle_seconds)
+        return self.start_warmup()
+
+    def disable_keep_warm(self):
+        self.keep_gpu_warm = False
+        self.set_idle_window(2)
 
     @staticmethod
     def create_session():
@@ -127,6 +139,8 @@ def test_validation():
     assert (direct_1080p.width, direct_1080p.height) == (1920, 1088)
     latent_1080p = GenerateRequest(prompt="x", width=960, height=544, upscale=True)
     assert latent_1080p.upscale is True
+    pixel = GenerateRequest(prompt="x", upscale=True, upscale_method="pixel")
+    assert pixel.upscale_method == "pixel"
 
     with pytest.raises(ValueError):
         GenerateRequest(prompt="x", upscale=False, upscale_method="pixel")
@@ -188,6 +202,22 @@ def test_sessions_and_prompt_enhancer(client):
     assert history.json() == []
     enhancer = test_client.post("/api/prompts/enhance", json={"prompt": "A person walks"})
     assert enhancer.status_code == 503
+
+
+def test_warm_and_unload_toggle_keep_warm(client):
+    test_client, control = client
+
+    response = test_client.post("/api/admin/warm")
+    assert response.status_code == 200
+    assert control.keep_gpu_warm is True
+    assert control.idle_windows[-1] == control.gpu_idle_seconds
+    assert control.warmups == 1
+
+    response = test_client.post("/api/admin/unload")
+    assert response.status_code == 200
+    assert control.keep_gpu_warm is False
+    assert control.idle_windows[-1] == 2
+    assert test_client.get("/api/health").json()["keep_gpu_warm"] is False
 
 
 def test_upload_and_i2v_request(client):
