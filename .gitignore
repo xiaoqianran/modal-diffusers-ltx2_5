@@ -24,3 +24,5 @@ frontend/.vite/
 .ltx25-api-base
 .ltx25-cache/
 .codegraph/
+api-e2e-assets/
+api-e2e-results/
