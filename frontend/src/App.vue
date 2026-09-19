@@ -61,6 +61,7 @@ const workspaceSection = ref(groupOfMode(draft.mode) === 'edit' ? 'edit' : 'gene
 const jobsOpen = ref(false)
 const controlsOpen = ref(false)
 const moreOpen = ref(false)
+const modePickerOpen = ref(false)
 
 const queueIndex = computed(() => buildQueueIndex(allJobs.value))
 const stageQueuePosition = computed(() => (
@@ -127,6 +128,7 @@ const sectionTitle = computed(() => {
 
 function chooseMode(mode) {
   setMode(mode)
+  modePickerOpen.value = false
   showView('generate')
   workspaceSection.value = groupOfMode(mode) === 'edit' ? 'edit' : 'generate'
 }
@@ -235,6 +237,7 @@ async function copySession() {
 
 function closeMenus() {
   moreOpen.value = false
+  modePickerOpen.value = false
 }
 
 function handleOnline() {
@@ -520,51 +523,103 @@ onBeforeUnmount(() => {
 
             <div class="prompt-toolbar">
               <div class="toolbar-controls">
-                <label class="compact-control mode-control">
-                  <span>Mode</span>
-                  <select :value="draft.mode" @change="chooseMode($event.target.value)">
-                    <optgroup v-for="group in MODE_GROUPS" :key="group.id" :label="group.label">
-                      <template v-for="section in group.sections" :key="section.label">
-                        <option v-for="mode in section.modes" :key="mode" :value="mode">
-                          {{ modeLabel(mode) }}
-                        </option>
-                      </template>
-                    </optgroup>
-                  </select>
-                </label>
+                <div class="mode-picker-wrap" @click.stop>
+                  <button
+                    class="mode-trigger"
+                    :class="{ open: modePickerOpen }"
+                    type="button"
+                    aria-haspopup="menu"
+                    :aria-expanded="modePickerOpen"
+                    @click="modePickerOpen = !modePickerOpen"
+                  >
+                    <span class="control-caption">Mode</span>
+                    <span class="mode-trigger-value">{{ modeLabel(draft.mode) }}</span>
+                    <span class="mode-chevron" aria-hidden="true">⌄</span>
+                  </button>
+
+                  <div v-if="modePickerOpen" class="mode-picker" role="menu">
+                    <div class="mode-picker-head">
+                      <span>Generation mode</span>
+                      <small>{{ modeTag(draft.mode) }}</small>
+                    </div>
+
+                    <div
+                      v-for="group in MODE_GROUPS"
+                      :key="group.id"
+                      class="mode-picker-group"
+                    >
+                      <span class="mode-picker-group-label">{{ group.label }}</span>
+                      <div class="mode-picker-grid">
+                        <template v-for="section in group.sections" :key="section.label">
+                          <button
+                            v-for="mode in section.modes"
+                            :key="mode"
+                            class="mode-option"
+                            :class="{ active: draft.mode === mode }"
+                            type="button"
+                            role="menuitem"
+                            @click="chooseMode(mode)"
+                          >
+                            <span>{{ modeLabel(mode) }}</span>
+                            <span v-if="draft.mode === mode" class="mode-check" aria-hidden="true">✓</span>
+                          </button>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </div>
 
                 <button class="model-chip" type="button" tabindex="-1">
                   <span class="model-spark">✦</span>
-                  LTX-2.5
+                  <span>LTX-2.5</span>
                 </button>
 
-                <label class="compact-control">
-                  <span>Ratio</span>
-                  <select v-model="draft.size" aria-label="Aspect ratio">
-                    <option value="768x512">16:9</option>
-                    <option value="704x480">3:2</option>
-                    <option value="640x384">5:3</option>
-                    <option value="512x320">8:5</option>
-                  </select>
-                </label>
+                <div class="choice-cluster">
+                  <span class="control-caption">Ratio</span>
+                  <div class="choice-segments" aria-label="Aspect ratio">
+                    <button
+                      v-for="item in [
+                        ['768x512', '16:9'],
+                        ['704x480', '3:2'],
+                        ['640x384', '5:3'],
+                        ['512x320', '8:5'],
+                      ]"
+                      :key="item[0]"
+                      class="choice-segment"
+                      :class="{ active: draft.size === item[0] }"
+                      type="button"
+                      @click="draft.size = item[0]"
+                    >{{ item[1] }}</button>
+                  </div>
+                </div>
 
-                <label class="compact-control">
-                  <span>Duration</span>
-                  <select v-model.number="draft.numFrames" aria-label="Duration">
-                    <option v-for="item in frameOptions" :key="item.value" :value="item.value">
-                      {{ item.label }}
-                    </option>
-                  </select>
-                </label>
+                <div class="choice-cluster">
+                  <span class="control-caption">Duration</span>
+                  <div class="choice-segments" aria-label="Duration">
+                    <button
+                      v-for="item in frameOptions"
+                      :key="item.value"
+                      class="choice-segment"
+                      :class="{ active: draft.numFrames === item.value }"
+                      type="button"
+                      @click="draft.numFrames = item.value"
+                    >{{ item.label }}</button>
+                  </div>
+                </div>
 
-                <label class="compact-control">
-                  <span>FPS</span>
-                  <select v-model.number="draft.fps" aria-label="FPS">
-                    <option :value="16">16</option>
-                    <option :value="24">24</option>
-                    <option :value="30">30</option>
-                  </select>
-                </label>
+                <div class="choice-cluster">
+                  <span class="control-caption">FPS</span>
+                  <div class="choice-segments" aria-label="FPS">
+                    <button
+                      v-for="value in [16, 24, 30]"
+                      :key="value"
+                      class="choice-segment"
+                      :class="{ active: draft.fps === value }"
+                      type="button"
+                      @click="draft.fps = value"
+                    >{{ value }}</button>
+                  </div>
+                </div>
               </div>
 
               <button
