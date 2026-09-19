@@ -71,7 +71,7 @@ async def lifespan(_: FastAPI):
         keep_warm_task.cancel()
         if modal_client.keep_gpu_warm:
             try:
-                await asyncio.to_thread(modal_client.set_idle_window, 120)
+                await asyncio.to_thread(modal_client.set_idle_window, 2)
             except Exception:
                 pass
 

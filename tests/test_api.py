@@ -220,6 +220,20 @@ def test_warm_and_unload_toggle_keep_warm(client):
     assert test_client.get("/api/health").json()["keep_gpu_warm"] is False
 
 
+def test_app_shutdown_uses_two_second_idle_window(tmp_path, monkeypatch):
+    control = FakeControl(tmp_path)
+    control.keep_gpu_warm = True
+    monkeypatch.setattr(api_module, "modal_client", control)
+    monkeypatch.setattr(api_module, "CACHE_ROOT", tmp_path / "cache")
+    monkeypatch.setattr(api_module, "OUTPUT_CACHE", tmp_path / "cache" / "outputs")
+    monkeypatch.setattr(api_module, "UPLOAD_CACHE", tmp_path / "cache" / "uploads")
+
+    with TestClient(api_module.app):
+        assert control.idle_windows[-1] == control.gpu_idle_seconds
+
+    assert control.idle_windows[-1] == 2
+
+
 def test_upload_and_i2v_request(client):
     test_client, control = client
     image_file = BytesIO()
