@@ -22,6 +22,7 @@ const CONDITION_INDEX = {
 /**
  * @typedef {object} Draft
  * @property {string} mode
+ * @property {string} engine
  * @property {string} prompt
  * @property {string} negativePrompt
  * @property {number} width
@@ -51,6 +52,13 @@ export function validateGenerationDraft(draft, assets = {}, loras = []) {
   const capability = getModeCapabilities(draft.mode)
 
   if (!String(draft.prompt || '').trim()) problems.push('Prompt 不能为空')
+
+  if (draft.engine === 'qwen' && draft.mode !== 't2i') {
+    problems.push('Qwen-Image 2.1 当前只支持 Text → Image')
+  }
+  if (draft.engine === 'qwen' && draft.loraId) {
+    problems.push('Qwen-Image 2.1 暂未接入 LoRA 路由')
+  }
 
   if (capability.input === 'image' && !assets.first) {
     problems.push(`${modeLabel(draft.mode)} 需要先添加参考图片`)
@@ -177,6 +185,7 @@ export function buildGenerationRequest(draft, assets, sessionNumber, seedOffset 
   const body = {
     session_number: sessionNumber,
     mode: draft.mode,
+    engine: draft.engine || 'auto',
     prompt: String(draft.prompt || '').trim(),
     negative_prompt: String(draft.negativePrompt || '').trim() || null,
     width: draft.width,

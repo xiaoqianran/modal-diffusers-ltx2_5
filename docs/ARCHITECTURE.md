@@ -1,6 +1,6 @@
 # Architecture
 
-这个仓库只维护一件事：**把 Diffusers/LTX-2.5 作为高性能 Modal runtime 提供给导演台。**
+这个仓库只维护一件事：**把 LTX-2.5 与可扩展的图像/视频生成模型作为高性能 Modal Director Runtime 提供给导演台。**
 
 ## 主链路
 
@@ -18,7 +18,11 @@ ltx25/modal_client.py
 modal_app.py
    |
    v
-ltx25/runtime.py
+ltx25/director.py            # resident engine routing
+   |        \
+   |         `--> Qwen-Image 2.1 BF16
+   v
+ltx25/runtime.py              # LTX workflow
    | \
    |  \--> ltx25/encoding.py
    v
@@ -63,7 +67,8 @@ ltx25/
 ├─ modal_client.py   # 本地 -> Modal：Job / Dict / warmup / cancel
 ├─ media_store.py    # 单物理媒体 backend：Volume / generic S3-compatible storage
 ├─ media_storage.py  # 稳定 store_id、primary/fallback 路由、MediaRef
-├─ runtime.py        # generation workflow 与采样编排
+├─ director.py       # 常驻模型集合、engine 路由；不依赖 Modal/FastAPI
+├─ runtime.py        # LTX generation workflow 与采样编排
 ├─ models.py         # 模型 load/unload、decoder、precision、加速安装
 ├─ encoding.py       # NVENC / ffmpeg 输出编码
 ├─ schemas.py        # 请求、任务、资产等数据契约
@@ -80,10 +85,17 @@ scripts/             # 模型准备与工具
 tests/               # 行为 + 架构边界
 ```
 
+Director Runtime 默认保持旧客户端兼容：`engine=auto` 与 `engine=ltx` 都走 LTX；
+`engine=qwen` 目前只允许纯 `t2i`。Modal worker 启动时按配置一次性加载 LTX-2.5
+NVFP4 与 Qwen-Image 2.1 BF16，之后 job 只做 engine dispatch，不做模型卸载/重载。
+Qwen 使用与现有 t2i 一致的最终尺寸语义：请求中的 base width/height 在 `upscale=true`
+时直接渲染为 2× 最终 PNG。
+
 持久化按生命周期拆开：
 
 ```text
-ltx25-models   # 模型权重，只读挂载到 GPU worker
+ltx25-models   # LTX 模型权重，只读挂载到 GPU worker
+qwen-image21-cache # Qwen-Image 2.1 HF cache，只读挂载到 GPU worker
 ltx25-state    # Volume 模式的 inputs/outputs + 始终保留的 LoRA/state
 ltx25-kernels  # NATTEN 等已加载 shared-library kernel cache，不参与 state reload
 ltx25-jobs     # Modal Dict：任务状态

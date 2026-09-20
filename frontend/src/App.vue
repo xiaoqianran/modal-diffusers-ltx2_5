@@ -225,6 +225,17 @@ function onUpscaleChange() {
   if (!draft.upscale) draft.upscaleMethod = 'latent'
 }
 
+function onEngineChange() {
+  if (draft.engine !== 'qwen') return
+  // Probe-validated Qwen baseline. Keep LTX defaults untouched when switching back.
+  draft.steps = 40
+  draft.guidanceScale = 1
+  draft.numFrames = 9
+  draft.fps = 24
+  draft.decoder = 'vae'
+  draft.loraId = null
+}
+
 function setOptionalNumber(key, raw) {
   draft[key] = raw === '' ? null : Number(raw)
 }
@@ -746,8 +757,16 @@ onBeforeUnmount(() => {
           <div class="control-section-title">Generation</div>
           <div class="drawer-fields two-col">
             <label class="field">
+              <span>Model engine</span>
+              <select v-model="draft.engine" @change="onEngineChange">
+                <option value="auto">Auto · LTX-2.5</option>
+                <option value="ltx">LTX-2.5 NVFP4</option>
+                <option value="qwen" :disabled="draft.mode !== 't2i'">Qwen-Image 2.1 BF16</option>
+              </select>
+            </label>
+            <label class="field">
               <span>Frames</span>
-              <input v-model.number="draft.numFrames" type="number" min="9" max="481" step="8" />
+              <input v-model.number="draft.numFrames" type="number" min="9" max="481" step="8" :disabled="draft.engine === 'qwen'" />
             </label>
             <label class="field">
               <span>Steps</span>
@@ -755,7 +774,7 @@ onBeforeUnmount(() => {
             </label>
             <label class="field">
               <span>Guidance</span>
-              <input v-model.number="draft.guidanceScale" type="number" min="0" max="20" step="0.1" />
+              <input v-model.number="draft.guidanceScale" type="number" min="0" max="20" step="0.1" :disabled="draft.engine === 'qwen'" />
             </label>
             <label class="field">
               <span>Seed</span>
@@ -767,7 +786,7 @@ onBeforeUnmount(() => {
             </label>
             <label class="field">
               <span>FPS</span>
-              <input v-model.number="draft.fps" type="number" min="8" max="60" />
+              <input v-model.number="draft.fps" type="number" min="8" max="60" :disabled="draft.engine === 'qwen'" />
             </label>
           </div>
         </section>
@@ -836,7 +855,7 @@ onBeforeUnmount(() => {
 
           <label class="field">
             <span>Decoder</span>
-            <select v-model="draft.decoder" :disabled="Boolean(activeCapability.forcesDecoder)">
+            <select v-model="draft.decoder" :disabled="Boolean(activeCapability.forcesDecoder) || draft.engine === 'qwen'">
               <option value="vae">VAE</option>
               <option value="diffusion">Diffusion</option>
             </select>
@@ -847,7 +866,7 @@ onBeforeUnmount(() => {
           <div class="control-section-title">LoRA</div>
           <label class="field">
             <span>Adapter</span>
-            <select v-model="draft.loraId">
+            <select v-model="draft.loraId" :disabled="draft.engine === 'qwen'">
               <option :value="null">None</option>
               <option v-for="item in loras" :key="item.id" :value="item.id">
                 {{ item.name || item.id }}
@@ -856,7 +875,7 @@ onBeforeUnmount(() => {
           </label>
           <label class="field">
             <span>Strength</span>
-            <input v-model.number="draft.loraStrength" type="number" min="-2" max="2" step="0.1" />
+            <input v-model.number="draft.loraStrength" type="number" min="-2" max="2" step="0.1" :disabled="draft.engine === 'qwen'" />
           </label>
         </section>
       </div>

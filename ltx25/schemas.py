@@ -95,6 +95,9 @@ class GenerateRequest(BaseModel):
         "t2av", "i2v", "flf2v", "condition", "iclora", "retake", "extend", "a2v",
         "t2i", "refine_image", "ref2i",
     ] = "t2av"
+    # Explicit resident-engine routing. "auto" preserves historical LTX behavior;
+    # Qwen is opt-in and currently limited to pure text-to-image jobs.
+    engine: Literal["auto", "ltx", "qwen"] = "auto"
     # `quality` is retained for older API clients. New clients should control the
     # rendering pipeline explicitly with `upscale` and `decoder`.
     quality: Literal["high", "draft"] | None = Field(
@@ -162,6 +165,13 @@ class GenerateRequest(BaseModel):
             raise ValueError("2x upscale base resolution cannot exceed 960x544 pixels")
         if self.upscale_method == "pixel" and not self.upscale:
             raise ValueError("pixel upscale method requires upscale=true")
+        if self.engine == "qwen":
+            if self.mode != "t2i":
+                raise ValueError("Qwen-Image 2.1 currently supports t2i mode only")
+            if self.conditions:
+                raise ValueError("Qwen-Image 2.1 t2i does not accept visual conditions")
+            if self.loras:
+                raise ValueError("Qwen-Image 2.1 LoRA routing is not enabled yet")
         if self.mode in STILL_IMAGE_MODES:
             # Probe-verified recipes (scratch_t2i_probe): t2i/refine_image are always
             # two-stage (distilled 8-sigma -> 2x latent upsample -> 3-sigma refine),
@@ -288,6 +298,7 @@ class JobResponse(BaseModel):
     error: str | None = None
     video_url: str | None = None
     image_url: str | None = None
+    engine: str | None = None
     request: GenerateRequest
     created_at: str
     updated_at: str
@@ -301,6 +312,7 @@ class JobRequestSummary(BaseModel):
     """Fields required to render queue/library cards without echoing the full request."""
 
     mode: str
+    engine: str = "auto"
     prompt: str
     width: int
     height: int
@@ -318,6 +330,7 @@ class JobSummaryResponse(BaseModel):
     error: str | None = None
     video_url: str | None = None
     image_url: str | None = None
+    engine: str | None = None
     request: JobRequestSummary
     created_at: str
     updated_at: str

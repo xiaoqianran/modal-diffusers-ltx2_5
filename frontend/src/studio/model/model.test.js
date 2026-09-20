@@ -63,6 +63,7 @@ const job = (overrides = {}) => ({
 
 const draft = (overrides = {}) => ({
   mode: 't2av',
+  engine: 'auto',
   prompt: 'ocean sunset',
   negativePrompt: 'worst quality',
   width: 768, height: 512, numFrames: 121, fps: 24, steps: 8,
@@ -419,6 +420,18 @@ test('valid t2av draft passes', () => {
   assert.deepEqual(validateGenerationDraft(draft(), {}), [])
 })
 
+test('qwen engine is limited to t2i', () => {
+  assert.match(validateGenerationDraft(draft({ engine: 'qwen' }), {}).join(' '), /Text → Image/)
+  assert.deepEqual(validateGenerationDraft(draft({ mode: 't2i', engine: 'qwen' }), {}), [])
+})
+
+test('qwen engine rejects LoRA in the Studio model layer', () => {
+  assert.match(
+    validateGenerationDraft(draft({ mode: 't2i', engine: 'qwen', loraId: 'style.safetensors' }), {}).join(' '),
+    /LoRA/
+  )
+})
+
 test('empty prompt is rejected', () => {
   const problems = validateGenerationDraft(draft({ prompt: '   ' }), {})
   assert.equal(problems.length, 1)
@@ -531,6 +544,11 @@ test('buildConditions for t2av sends nothing', () => {
 test('buildLoras returns one entry with strength', () => {
   assert.deepEqual(buildLoras(draft({ loraId: 'x', loraStrength: 0.8 })), [{ id: 'x', strength: 0.8 }])
   assert.deepEqual(buildLoras(draft()), [])
+})
+
+test('buildGenerationRequest carries explicit engine routing', () => {
+  const body = buildGenerationRequest(draft({ mode: 't2i', engine: 'qwen' }), {}, 99)
+  assert.equal(body.engine, 'qwen')
 })
 
 test('buildGenerationRequest carries the seed offset for batches', () => {

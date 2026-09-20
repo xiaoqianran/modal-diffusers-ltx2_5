@@ -31,6 +31,12 @@ def test_runtime_is_cloud_and_http_agnostic():
     assert "modal" not in imports
 
 
+def test_director_is_cloud_and_http_agnostic():
+    imports = _imports(PKG / "director.py")
+    assert "fastapi" not in imports
+    assert "modal" not in imports
+
+
 
 def test_runtime_job_input_boundary_reaches_both_generation_paths():
     tree = ast.parse((PKG / "runtime.py").read_text(encoding="utf-8"))

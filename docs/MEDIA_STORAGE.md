@@ -88,7 +88,7 @@ AWS_SECRET_ACCESS_KEY=<secret key>
 
 LTX25_MODAL_MEDIA_SECRET=s3-media
 LTX25_MEDIA_PRESIGN_SECONDS=3600
-LTX25_MEDIA_MULTIPART_THRESHOLD_MB=16
+LTX25_MEDIA_MULTIPART_THRESHOLD_MB=24
 LTX25_MEDIA_PART_SIZE_MB=16
 ```
 
@@ -269,7 +269,8 @@ DELETE /api/assets/{asset_id}/upload
 
 Multipart 上传计划按对象大小自适应，而不是固定四并发：
 
-- 16–64 MiB：约 8 MiB/part，2 并发；
+- <24 MiB：单 PUT；
+- 24–64 MiB：约 8 MiB/part，2 并发；
 - 64–256 MiB：约 16 MiB/part，4 并发；
 - 256 MiB 以上：至少 32 MiB/part，6 并发。
 

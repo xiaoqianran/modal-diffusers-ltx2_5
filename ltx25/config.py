@@ -89,5 +89,11 @@ class Settings(BaseSettings):
     # Env: LTX25_PARALLEL_COLD_LOAD
     ltx25_parallel_cold_load: bool = False
 
+    # Director Runtime: keep Qwen-Image 2.1 resident beside LTX-2.5 on 96 GB
+    # Blackwell workers. Local/non-Modal environments leave this disabled unless
+    # explicitly requested.
+    director_qwen_enabled: bool = False
+    qwen_image21_dir: Path = Path("/qwen-cache/huggingface/hub")
+
 
 settings = Settings()

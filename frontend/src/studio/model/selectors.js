@@ -109,6 +109,7 @@ export function selectLibraryJobs(jobs, filter, order) {
 export function describeJob(job) {
   const request = job?.request || {}
   const parts = [modeTag(request.mode)]
+  if (request.engine && request.engine !== 'auto') parts.push(String(request.engine).toUpperCase())
   const scale = request.upscale ? 2 : 1
   if (request.width && request.height) {
     parts.push(`${request.width * scale}×${request.height * scale}`)

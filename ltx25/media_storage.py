@@ -284,7 +284,7 @@ def _s3_store(values: dict[str, str] | os._Environ[str], prefix: str) -> S3Media
         secret_access_key=get("S3_SECRET_ACCESS_KEY"),
         region=get("S3_REGION", "auto"),
         presign_seconds=int(values.get("LTX25_MEDIA_PRESIGN_SECONDS", "3600")),
-        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "16")) * 1024 * 1024,
+        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "24")) * 1024 * 1024,
         part_size=int(values.get("LTX25_MEDIA_PART_SIZE_MB", "16")) * 1024 * 1024,
     )
 
@@ -334,7 +334,7 @@ def create_media_storage(volume: Any, env: dict[str, str] | None = None) -> Medi
         secret_access_key=values.get("AWS_SECRET_ACCESS_KEY", ""),
         region=values.get("LTX25_S3_REGION", "auto"),
         presign_seconds=int(values.get("LTX25_MEDIA_PRESIGN_SECONDS", "3600")),
-        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "16")) * 1024 * 1024,
+        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "24")) * 1024 * 1024,
         part_size=int(values.get("LTX25_MEDIA_PART_SIZE_MB", "16")) * 1024 * 1024,
     )
     return MediaStorage(stores={"s3": legacy}, primary_id="s3")

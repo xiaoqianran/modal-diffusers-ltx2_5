@@ -37,22 +37,23 @@ docker run --rm --gpus 'device=0' \
 ## Modal / RTX PRO 6000 NVFP4
 
 `modal_app.py` 将准备阶段和 GPU 推理解耦：模型下载在 CPU Function 中完成并写入
-`ltx25-models` Volume；RTX PRO 6000 只读挂载该 Volume，在容器启动时完成 NVFP4
-模型装配并开始服务。GPU 侧不会下载 LTX 权重或 diffusion decoder。
+`ltx25-models` Volume；Qwen-Image 2.1 复用独立的 `qwen-image21-cache` Volume。RTX PRO 6000
+只读挂载两者，在容器启动时完成 LTX-2.5 NVFP4 与 Qwen-Image 2.1 BF16 双模型装配。GPU 侧不会下载模型权重或 diffusion decoder。
 
 ```bash
 pip install -r requirements-modal.txt
 modal secret create huggingface HF_TOKEN=hf_...
 
-# CPU only: 下载 base/text encoder/upsamplers/diffusion decoder/NVFP4 checkpoint
+# CPU only: 下载/校验 LTX base/text encoder/upsamplers/decoder/NVFP4；Qwen 使用已有 cache Volume
 modal run modal_app.py::prepare_models
 
 # 部署；只有 GPU 服务容器实际启动时才申请 RTX PRO 6000
 modal deploy modal_app.py
 ```
 
-生产预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`、
-`LTX25_CUDA_GRAPH=1`。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
+生产 Director 预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`，并默认
+`DIRECTOR_QWEN_ENABLED=1`。双模型常驻时先以 `LTX25_CUDA_GRAPH=0` 作为保守默认，避免 retained graph pool
+侵占 Qwen activation headroom；完成同容器双向 smoke 后可显式重新开启。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
 放在 `ltx25-state` Volume；NATTEN 等硬件相关 kernel 缓存单独放在 `ltx25-kernels`
 Volume，避免已加载的 `.so` 阻塞逐任务 `state_volume.reload()`。任务状态保存在
 `ltx25-jobs` Modal Dict。
@@ -63,6 +64,8 @@ Studio 启动时会显式获取 90 秒 warm lease，并每 30 秒续租；active
 `LTX25_MODAL_GPU_IDLE_SECONDS` 配置；模型/状态/kernel Volume 与 HF Secret 名称分别可通过
 `LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、
 `LTX25_MODAL_HF_SECRET` 覆盖。
+导演台请求新增 `engine=auto|ltx|qwen`。`auto` 保持历史 LTX 行为；`qwen` 当前只用于 `t2i`，
+并采用已验证的 40-step / true CFG 1.0 基线。
 
 ### 独立前端
 

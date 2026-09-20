@@ -226,7 +226,7 @@ class S3MediaStore(MediaStore):
         secret_access_key: str,
         region: str = "auto",
         presign_seconds: int = 3600,
-        multipart_threshold: int = 16 * 1024 * 1024,
+        multipart_threshold: int = 24 * 1024 * 1024,
         part_size: int = 16 * 1024 * 1024,
         client: Any | None = None,
     ) -> None:
@@ -482,7 +482,7 @@ def create_media_store(volume: Any, env: dict[str, str] | None = None) -> MediaS
     secret_key = values.get("AWS_SECRET_ACCESS_KEY") or ""
     region = values.get("LTX25_S3_REGION", "auto")
     presign = int(values.get("LTX25_MEDIA_PRESIGN_SECONDS", "3600"))
-    threshold_mb = int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "16"))
+    threshold_mb = int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "24"))
     part_mb = int(values.get("LTX25_MEDIA_PART_SIZE_MB", "16"))
 
     store = S3MediaStore(

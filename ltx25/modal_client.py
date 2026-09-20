@@ -23,6 +23,7 @@ from .schemas import GenerateRequest, LoraResponse
 APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
 STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
+WORKER_CLASS_NAME = os.environ.get("LTX25_MODAL_WORKER_CLASS", "DirectorWorker")
 MODEL_ID = "Lightricks/LTX-2.5-Diffusers"
 ACTIVE_STATUSES = {"queued", "running"}
 
@@ -70,7 +71,7 @@ class ModalClient:
         self.media_storage = create_media_storage(self.state_volume)
         self.media_store = self.media_storage  # compatibility alias for tests/callers
 
-        worker_cls = modal.Cls.from_name(self.app_name, "LTX25Worker")
+        worker_cls = modal.Cls.from_name(self.app_name, WORKER_CLASS_NAME)
         self.worker = worker_cls()
         self.generate_fn = self.worker.generate
         self.ready_fn = self.worker.ready
@@ -174,7 +175,7 @@ class ModalClient:
         request = public.get("request") or {}
         public["request"] = {
             key: request.get(key)
-            for key in ("mode", "prompt", "width", "height", "num_frames", "fps", "steps", "upscale")
+            for key in ("mode", "engine", "prompt", "width", "height", "num_frames", "fps", "steps", "upscale")
         }
         return public
 

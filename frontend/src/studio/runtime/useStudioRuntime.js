@@ -47,6 +47,7 @@ const DEFAULT_RANGE = {
 export function createDraft(overrides = {}) {
   return {
     mode: DEFAULT_MODE,
+    engine: 'auto',
     prompt: '',
     negativePrompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
     size: '768x512',
@@ -278,6 +279,7 @@ export function useStudioRuntime(options = {}) {
   function setMode(mode) {
     const capability = getModeCapabilities(mode)
     draft.mode = mode
+    if (mode !== 't2i' && draft.engine === 'qwen') draft.engine = 'auto'
     // Mirror the backend's normalisation so the controls reflect what is sent.
     if (!capability.supportsUpscale) {
       draft.upscale = false
@@ -515,6 +517,7 @@ export function useStudioRuntime(options = {}) {
     const scale = request.upscale ? 2 : 1
     Object.assign(draft, {
       mode: request.mode,
+      engine: request.engine || 'auto',
       prompt: request.prompt || '',
       negativePrompt: request.negative_prompt || '',
       size: request.width ? `${request.width}x${request.height}` : draft.size,

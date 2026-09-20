@@ -1,8 +1,8 @@
-"""Modal deployment for the RTX PRO 6000 LTX-2.5 NVFP4 worker.
+"""Modal deployment for the RTX PRO 6000 dual-resident Director worker.
 
-Model artifacts are staged by a CPU-only function into a persistent Volume.
-Interactive HTTP/job routing runs on the user's machine and invokes
-this deployed GPU Cls directly through the Modal SDK.
+LTX-2.5 NVFP4 artifacts live in the model Volume while Qwen-Image 2.1 reuses
+a dedicated read-only Hugging Face cache Volume. Interactive HTTP/job routing
+runs on the user's machine and invokes this deployed GPU Cls through Modal RPC.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
 MODEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_MODEL_VOLUME", "ltx25-models")
 STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
 KERNEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_KERNEL_VOLUME", "ltx25-kernels")
+QWEN_CACHE_VOLUME_NAME = os.environ.get("QWEN_IMAGE21_CACHE_VOLUME", "qwen-image21-cache")
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
 MEDIA_BACKEND = os.environ.get("LTX25_MEDIA_BACKEND", "volume").strip().lower()
@@ -30,6 +31,9 @@ MEDIA_FALLBACK_BACKEND = os.environ.get("LTX25_MEDIA_FALLBACK_BACKEND", "s3").st
 MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "media-storage")
 
 GPU_IDLE_SECONDS = int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "600"))
+DIRECTOR_QWEN_ENABLED = os.environ.get("DIRECTOR_QWEN_ENABLED", "1").strip().lower() not in {
+    "", "0", "false", "no", "off"
+}
 
 # IMPORTANT: keep container paths as POSIX strings. This module is evaluated by
 # the local Modal CLI on Windows, where pathlib.Path would turn these into
@@ -37,11 +41,13 @@ GPU_IDLE_SECONDS = int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "600"))
 MODEL_ROOT = "/models/ltx25"
 PIPELINE_DIR = f"{MODEL_ROOT}/pipeline"
 NVFP4_CKPT = f"{MODEL_ROOT}/checkpoints/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors"
+QWEN_IMAGE21_DIR = "/qwen-cache/huggingface/hub"
 
 app = modal.App(APP_NAME)
 model_volume = modal.Volume.from_name(MODEL_VOLUME_NAME, create_if_missing=True)
 state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
 kernel_volume = modal.Volume.from_name(KERNEL_VOLUME_NAME, create_if_missing=True)
+qwen_cache_volume = modal.Volume.from_name(QWEN_CACHE_VOLUME_NAME, create_if_missing=True)
 job_store = modal.Dict.from_name(JOB_DICT_NAME, create_if_missing=True)
 hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
 
@@ -133,11 +139,12 @@ runtime_base_image = (
     modal.Image.debian_slim(python_version="3.12")
     .run_commands(
         "apt-get update && "
-        "apt-get install -y --no-install-recommends build-essential ffmpeg && "
+        "apt-get install -y --no-install-recommends build-essential ffmpeg git && "
         "rm -rf /var/lib/apt/lists/*"
     )
     .pip_install(
         "torch==2.13.0+cu130",
+        "torchvision==0.28.0+cu130",
         index_url="https://download.pytorch.org/whl/cu130",
     )
     .pip_install_from_requirements("requirements.txt")
@@ -179,6 +186,7 @@ def prepare_models() -> dict[str, str]:
     return {
         "pipeline": PIPELINE_DIR,
         "nvfp4_checkpoint": NVFP4_CKPT,
+        "qwen_image21_cache": QWEN_CACHE_VOLUME_NAME if DIRECTOR_QWEN_ENABLED else "disabled",
         "status": "ready",
     }
 
@@ -212,8 +220,15 @@ GPU_ENV = {
     "LTX25_REQUIRE_LOCAL_ASSETS": "1",
     "LTX25_TRANSFORMER_PRECISION": "nvfp4",
     "LTX25_PARALLEL_COLD_LOAD": "1",
+    "DIRECTOR_QWEN_ENABLED": "1" if DIRECTOR_QWEN_ENABLED else "0",
+    "QWEN_IMAGE21_DIR": QWEN_IMAGE21_DIR,
     "OFFLOAD_MODE": "none",
-    "LTX25_CUDA_GRAPH": "1",
+    # Dual residency leaves ~19 GiB free before activations. Start conservatively
+    # without retained CUDA-graph pools; re-enable explicitly after same-container
+    # LTX->Qwen and Qwen->LTX memory smoke tests pass.
+    "LTX25_CUDA_GRAPH": os.environ.get(
+        "LTX25_CUDA_GRAPH", "0" if DIRECTOR_QWEN_ENABLED else "1"
+    ),
     "LTX25_COMPILE_BLOCKS": "off",
     # MP4 muxing performs seeks (notably for faststart), so object-store mode
     # encodes locally first and uploads the finalized file through the S3 API.
@@ -236,6 +251,9 @@ WORKER_VOLUMES = {
     "/data": state_volume,
     "/kernel-cache": kernel_volume,
 }
+if DIRECTOR_QWEN_ENABLED:
+    WORKER_VOLUMES["/qwen-cache"] = qwen_cache_volume.with_mount_options(read_only=True)
+
 if media_mount is not None:
     WORKER_VOLUMES["/media-primary"] = media_mount
 
@@ -261,20 +279,20 @@ WORKER_SECRETS = [hf_secret] + ([media_secret] if media_secret is not None else 
     volumes=WORKER_VOLUMES,
 )
 @modal.concurrent(max_inputs=1)
-class LTX25Worker:
+class DirectorWorker:
     @modal.enter()
     def load(self):
-        """Build the resident model once per GPU container."""
+        """Build both resident model engines once per GPU container."""
         import time
 
         from ltx25.config import settings
+        from ltx25.director import DirectorRuntime
         from ltx25.media_storage import create_media_storage
-        from ltx25.runtime import LTXGenerator
 
         started = time.monotonic()
         self.media_storage = create_media_storage(state_volume)
-        self.generator = LTXGenerator(settings)
-        self.generator.load()
+        self.director = DirectorRuntime(settings)
+        self.director.load()
         self.load_seconds = time.monotonic() - started
 
     @modal.method()
@@ -285,8 +303,11 @@ class LTX25Worker:
         return {
             "status": "ready",
             "load_seconds": self.load_seconds,
+            "model_load_seconds": self.director.load_seconds,
+            "engines": self.director.engines,
             "gpu": torch.cuda.get_device_name(0),
             "allocated_gb": torch.cuda.memory_allocated() / 1024**3,
+            "reserved_gb": torch.cuda.memory_reserved() / 1024**3,
         }
 
     @modal.method()
@@ -398,6 +419,8 @@ class LTX25Worker:
         input_staging_seconds = time.monotonic() - staging_started
         if request.mode in STILL_IMAGE_MODES:
             prefix = {"t2i": "t2i", "refine_image": "refine", "ref2i": "ref2i"}[request.mode]
+            if request.engine == "qwen":
+                prefix = "qwen"
             target = Path(settings.output_dir) / f"{prefix}_{job_id}.png"
         else:
             target = Path(settings.output_dir) / f"{job_id}.mp4"
@@ -426,7 +449,7 @@ class LTX25Worker:
                 _honor_interrupt(job_id, current)
 
             try:
-                metrics = self.generator.generate(request, target, progress, input_dir=input_dir) or {}
+                metrics = self.director.generate(request, target, progress, input_dir=input_dir) or {}
                 generation_seconds = time.monotonic() - generation_started
                 interrupted = _honor_interrupt(job_id, record)
                 if interrupted is not None:
@@ -487,6 +510,7 @@ class LTX25Worker:
                     "error": None,
                     "generation_seconds": generation_seconds,
                     "peak_vram_gb": metrics.get("peak_vram_gb"),
+                    "engine": metrics.get("engine"),
                     "timings": {
                         "queue_seconds": queue_seconds,
                         "state_reload_seconds": state_reload_seconds,
