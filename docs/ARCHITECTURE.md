@@ -61,7 +61,7 @@ Vue 组件不直接 `fetch`、不自己维护轮询；生产入口和测试共�
 ltx25/
 ├─ api.py            # HTTP、上传协议、下载重定向、HTTP 错误映射
 ├─ modal_client.py   # 本地 -> Modal：Job / Dict / warmup / cancel
-├─ media_store.py    # 媒体 data plane：Volume / R2(S3-compatible)
+├─ media_store.py    # 媒体 data plane：Volume / generic S3-compatible storage
 ├─ runtime.py        # generation workflow 与采样编排
 ├─ models.py         # 模型 load/unload、decoder、precision、加速安装
 ├─ encoding.py       # NVENC / ffmpeg 输出编码
@@ -86,7 +86,7 @@ ltx25-models   # 模型权重，只读挂载到 GPU worker
 ltx25-state    # Volume 模式的 inputs/outputs + 始终保留的 LoRA/state
 ltx25-kernels  # NATTEN 等已加载 shared-library kernel cache，不参与 state reload
 ltx25-jobs     # Modal Dict：任务状态
-R2/S3          # 可选媒体 data plane；inputs/outputs 与浏览器直传
+S3-compatible  # 可选媒体 data plane；inputs/outputs 与浏览器直传
 ```
 
 `ltx25-jobs` 同时维护轻量索引：
@@ -107,24 +107,24 @@ lifespan 也执行同样的 2 秒回收兜底。
 ```text
 /api/jobs/status          # 轮询只返回 UI 所需的轻量 Job summary
 /api/jobs/{id}            # 需要复用参数时才读取完整 GenerateRequest
-/api/assets/prepare       # 返回 Volume proxy 或 R2 presigned 上传计划
+/api/assets/prepare       # 返回 Volume proxy 或 S3 presigned 上传计划
 /api/assets/{id}/content  # Volume fallback 的 raw binary PUT
 /api/assets/{id}/complete # finalize + size verify + durable asset registration
 /api/assets/from-job/{id} # Retake/Extend: data-plane server-side copy
-/outputs/{name}           # Volume FileResponse / R2 signed redirect
+/outputs/{name}           # Volume FileResponse / S3 signed redirect
 ```
 
-默认 `VolumeMediaStore` 保持零配置兼容；`S3MediaStore` 可切到 Cloudflare
-R2。R2 模式下浏览器直接 PUT 到对象存储，大文件走并行 multipart，输出下载
+默认 `VolumeMediaStore` 保持零配置兼容；`S3MediaStore` 面向通用 S3-compatible
+对象存储。S3 模式下浏览器直接 PUT 到对象存储，大文件走并行 multipart，输出下载
 通过短时 signed GET/HEAD；Job/Dict 内只保存稳定 object key，不保存会过期的
 presigned URL。
 
 Retake / Extend 不再把已生成视频下载到浏览器后重新上传：Volume 使用
-`Volume.copy_files()`，R2 使用 S3 `CopyObject`。`/api/health` 同时暴露媒体
+`Volume.copy_files()`，S3 使用 `CopyObject`。`/api/health` 同时暴露媒体
 backend 与 upload/download/copy 指标；直传 WAN 时间由浏览器 finalize 时回报。
 
 MP4 主编码路径写入 `+faststart`，将 `moov` 元数据前置，避免浏览器为了读取
-metadata 而等待整个文件尾部。R2 模式下 MP4 先在 GPU container 的本地 scratch
+metadata 而等待整个文件尾部。S3 模式下 MP4 先在 GPU container 的本地 scratch
 完成 mux，再通过 S3 API 上传最终文件；CloudBucketMount 仅只读输入，避免依赖 S3 mount 的目录/POSIX 写入语义。
 
 ## 依赖规则

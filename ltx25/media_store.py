@@ -2,7 +2,7 @@
 
 The serving layer deals only in stable object keys under inputs/ and outputs/.
 This module decides whether those keys live in a Modal Volume or an
-S3-compatible bucket such as Cloudflare R2.
+S3-compatible object storage such as MinIO or another self-hosted provider.
 
 Control-plane state remains in Modal Dict; expiring presigned URLs are never
 persisted in job records.
@@ -211,9 +211,9 @@ class VolumeMediaStore(MediaStore):
 
 
 class S3MediaStore(MediaStore):
-    """S3-compatible media store. Cloudflare R2 uses region auto."""
+    """Generic S3-compatible media store."""
 
-    backend = "r2"
+    backend = "s3"
     direct_upload = True
     direct_download = True
 
@@ -232,7 +232,7 @@ class S3MediaStore(MediaStore):
     ) -> None:
         super().__init__()
         if not bucket or not endpoint_url or not access_key_id or not secret_access_key:
-            raise ValueError("R2/S3 media backend requires bucket, endpoint and access credentials")
+            raise ValueError("S3 media backend requires bucket, endpoint and access credentials")
         if part_size < 5 * 1024 * 1024:
             raise ValueError("S3 multipart part size must be at least 5 MiB")
         self.bucket = bucket
@@ -322,7 +322,7 @@ class S3MediaStore(MediaStore):
         started = time.monotonic()
         if upload_id:
             # Finalize is deliberately idempotent. A multipart completion can
-            # succeed in R2 while its HTTP response is lost. On retry the upload
+            # succeed in object storage while its HTTP response is lost. On retry the upload
             # id no longer exists, but the final object is already durable.
             try:
                 existing = int(
@@ -436,13 +436,13 @@ def create_media_store(volume: Any, env: dict[str, str] | None = None) -> MediaS
     backend = values.get("LTX25_MEDIA_BACKEND", "volume").strip().lower()
     if backend == "volume":
         return VolumeMediaStore(volume)
-    if backend not in {"r2", "s3"}:
-        raise ValueError("LTX25_MEDIA_BACKEND must be 'volume', 'r2', or 's3'")
+    if backend != "s3":
+        raise ValueError("LTX25_MEDIA_BACKEND must be 'volume' or 's3'")
 
-    endpoint = values.get("LTX25_R2_ENDPOINT_URL") or values.get("LTX25_S3_ENDPOINT_URL") or ""
-    bucket = values.get("LTX25_R2_BUCKET") or values.get("LTX25_S3_BUCKET") or ""
-    access_key = values.get("LTX25_R2_ACCESS_KEY_ID") or values.get("AWS_ACCESS_KEY_ID") or ""
-    secret_key = values.get("LTX25_R2_SECRET_ACCESS_KEY") or values.get("AWS_SECRET_ACCESS_KEY") or ""
+    endpoint = values.get("LTX25_S3_ENDPOINT_URL") or ""
+    bucket = values.get("LTX25_S3_BUCKET") or ""
+    access_key = values.get("AWS_ACCESS_KEY_ID") or ""
+    secret_key = values.get("AWS_SECRET_ACCESS_KEY") or ""
     region = values.get("LTX25_S3_REGION", "auto")
     presign = int(values.get("LTX25_MEDIA_PRESIGN_SECONDS", "3600"))
     threshold_mb = int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "96"))

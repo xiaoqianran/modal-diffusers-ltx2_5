@@ -22,7 +22,7 @@ class FakeS3:
         self.calls.append(("presign", operation, dict(Params), ExpiresIn))
         part = Params.get("PartNumber")
         suffix = f"?part={part}" if part else ""
-        return f"https://r2.test/{operation}/{Params['Key']}{suffix}"
+        return f"https://s3.test/{operation}/{Params['Key']}{suffix}"
 
     def create_multipart_upload(self, **kwargs):
         self.calls.append(("create_multipart_upload", kwargs))
@@ -67,7 +67,7 @@ class FakeS3:
 def make_store(client: FakeS3, **overrides):
     return S3MediaStore(
         bucket="media",
-        endpoint_url="https://account.r2.cloudflarestorage.com",
+        endpoint_url="https://s3.example.test",
         access_key_id="key",
         secret_access_key="secret",
         client=client,
@@ -89,7 +89,7 @@ def test_s3_single_put_is_presigned_with_content_type():
 
     assert plan["mode"] == "single"
     assert plan["headers"] == {"Content-Type": "image/png"}
-    assert plan["url"].startswith("https://r2.test/put_object/")
+    assert plan["url"].startswith("https://s3.test/put_object/")
     _, operation, params, expires = client.calls[0]
     assert operation == "put_object"
     assert params["ContentType"] == "image/png"
@@ -200,7 +200,7 @@ def test_client_upload_time_is_tracked_separately():
     assert metrics["client_seconds"] == 1.25
 
 
-def test_create_media_store_maps_r2_environment(monkeypatch):
+def test_create_media_store_maps_s3_environment(monkeypatch):
     client = FakeS3()
     captured = {}
 
@@ -212,18 +212,18 @@ def test_create_media_store_maps_r2_environment(monkeypatch):
     store = create_media_store(
         object(),
         {
-            "LTX25_MEDIA_BACKEND": "r2",
-            "LTX25_R2_BUCKET": "media",
-            "LTX25_R2_ENDPOINT_URL": "https://account.r2.cloudflarestorage.com",
-            "LTX25_R2_ACCESS_KEY_ID": "key",
-            "LTX25_R2_SECRET_ACCESS_KEY": "secret",
+            "LTX25_MEDIA_BACKEND": "s3",
+            "LTX25_S3_BUCKET": "media",
+            "LTX25_S3_ENDPOINT_URL": "https://s3.example.test",
+            "AWS_ACCESS_KEY_ID": "key",
+            "AWS_SECRET_ACCESS_KEY": "secret",
             "LTX25_MEDIA_PRESIGN_SECONDS": "600",
             "LTX25_MEDIA_MULTIPART_THRESHOLD_MB": "80",
             "LTX25_MEDIA_PART_SIZE_MB": "20",
         },
     )
 
-    assert store.backend == "r2"
+    assert store.backend == "s3"
     assert store.bucket == "media"
     assert store.presign_seconds == 600
     assert store.multipart_threshold == 80 * MIB

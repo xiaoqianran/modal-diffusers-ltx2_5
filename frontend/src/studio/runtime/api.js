@@ -144,7 +144,7 @@ export const api = {
   /**
    * Unified media upload.
    *
-   * Volume mode returns a site-local proxy PUT. R2/S3 mode returns either one
+   * Volume mode returns a site-local proxy PUT. S3 mode returns either one
    * presigned PUT or a set of presigned multipart URLs. In object-storage mode
    * media bytes never pass through the local FastAPI process.
    */
@@ -180,7 +180,7 @@ export const api = {
             method: 'DELETE',
           })
         } catch {
-          // Best effort: R2 also expires incomplete multipart uploads by lifecycle.
+          // Best effort: compatible object stores can also expire incomplete multipart uploads by lifecycle.
         }
       }
       throw error

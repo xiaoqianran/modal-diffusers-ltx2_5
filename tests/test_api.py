@@ -433,9 +433,9 @@ def test_rejects_unsupported_upload(client):
 
 def test_output_route_redirects_when_media_store_supports_direct_download(client):
     test_client, control = client
-    control.delivery_url = "https://r2.test/signed-output"
+    control.delivery_url = "https://s3.test/signed-output"
 
     response = test_client.get("/outputs/test.mp4", follow_redirects=False)
 
     assert response.status_code == 307
-    assert response.headers["location"] == "https://r2.test/signed-output"
+    assert response.headers["location"] == "https://s3.test/signed-output"

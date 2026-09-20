@@ -20,8 +20,8 @@ KERNEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_KERNEL_VOLUME", "ltx25-kernels"
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
 MEDIA_BACKEND = os.environ.get("LTX25_MEDIA_BACKEND", "volume").strip().lower()
-MEDIA_BUCKET = os.environ.get("LTX25_R2_BUCKET") or os.environ.get("LTX25_S3_BUCKET")
-MEDIA_ENDPOINT_URL = os.environ.get("LTX25_R2_ENDPOINT_URL") or os.environ.get("LTX25_S3_ENDPOINT_URL")
+MEDIA_BUCKET = os.environ.get("LTX25_S3_BUCKET")
+MEDIA_ENDPOINT_URL = os.environ.get("LTX25_S3_ENDPOINT_URL")
 MEDIA_REGION = os.environ.get("LTX25_S3_REGION", "auto")
 MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "s3-media")
 
@@ -53,9 +53,9 @@ hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
 media_mount = None
 media_secret = None
 MEDIA_ROOT = "/data"
-if MEDIA_BACKEND in {"r2", "s3"}:
+if MEDIA_BACKEND == "s3":
     if not MEDIA_BUCKET:
-        raise RuntimeError("LTX25_R2_BUCKET/LTX25_S3_BUCKET is required for object-storage media")
+        raise RuntimeError("LTX25_S3_BUCKET is required for object-storage media")
     media_secret = modal.Secret.from_name(
         MEDIA_SECRET_NAME,
         required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
@@ -76,7 +76,7 @@ if MEDIA_BACKEND in {"r2", "s3"}:
     media_mount = modal.CloudBucketMount(**mount_kwargs)
     MEDIA_ROOT = "/media"
 elif MEDIA_BACKEND != "volume":
-    raise RuntimeError("LTX25_MEDIA_BACKEND must be volume, r2, or s3")
+    raise RuntimeError("LTX25_MEDIA_BACKEND must be volume or s3")
 
 WORKER_OUTPUT_DIR = "/data/outputs" if MEDIA_BACKEND == "volume" else "/tmp/ltx25-outputs"
 

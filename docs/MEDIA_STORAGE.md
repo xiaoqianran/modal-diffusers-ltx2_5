@@ -10,7 +10,7 @@ Media data plane (Volume fallback)
 Browser -> FastAPI proxy -> Modal Volume -> GPU worker
 
 Media data plane (S3-compatible)
-Browser <--------------------> S3 / MinIO / R2
+Browser <--------------------> S3-compatible storage
                                 ^
                                 |
                        CloudBucketMount
@@ -55,8 +55,8 @@ raw binary PUT to the local router and the router writes the asset to
 ### S3-compatible storage
 
 Set `LTX25_MEDIA_BACKEND=s3` for MinIO, Backblaze B2, Tigris, AWS S3, or
-another compatible service. Cloudflare R2 may use either `s3` or the legacy
-`r2` alias.
+another compatible service. Provider-specific backend aliases are intentionally
+not supported; the media layer depends only on the S3 API contract.
 
 The browser uploads directly to object storage:
 
@@ -100,6 +100,38 @@ modal secret create s3-media \
 The environment used for `modal deploy modal_app.py` must contain the media
 backend, bucket, endpoint, region, and secret name. The local router and
 deployed worker must select the same backend and bucket.
+
+### Tigris
+
+Tigris uses the same provider-neutral S3 path; no Tigris-specific application
+code is required:
+
+```text
+LTX25_MEDIA_BACKEND=s3
+LTX25_S3_BUCKET=ltx25-media
+LTX25_S3_ENDPOINT_URL=https://fly.storage.tigris.dev
+LTX25_S3_REGION=auto
+LTX25_MODAL_MEDIA_SECRET=tigris-media
+```
+
+Keep the scoped `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` out of git and
+place the same pair in the local `.env` and the Modal `tigris-media` Secret.
+
+### Cloudflare R2
+
+Cloudflare R2 is also consumed through the provider-neutral S3 path:
+
+```text
+LTX25_MEDIA_BACKEND=s3
+LTX25_S3_BUCKET=ltx25-media-r2
+LTX25_S3_ENDPOINT_URL=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+LTX25_S3_REGION=auto
+LTX25_MODAL_MEDIA_SECRET=r2-media
+```
+
+Use an R2 S3 access key pair as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+No `r2` application backend alias is required; switching providers is purely
+configuration.
 
 ## Current SG-JP MinIO deployment
 

@@ -1,6 +1,6 @@
 # LTX-2.5 Diffusers Server + Web UI
 
-> 当前仓库结构与主链路请先看 `docs/ARCHITECTURE.md`。主路径是 `frontend -> ltx25/api.py -> ltx25/modal_client.py -> modal_app.py -> ltx25/runtime.py`。媒体 Volume / R2 直传配置见 `docs/MEDIA_STORAGE.md`。
+> 当前仓库结构与主链路请先看 `docs/ARCHITECTURE.md`。主路径是 `frontend -> ltx25/api.py -> ltx25/modal_client.py -> modal_app.py -> ltx25/runtime.py`。媒体 Volume / S3-compatible 直传配置见 `docs/MEDIA_STORAGE.md`。
 
 [English](README_EN.md) | 日本語
 
