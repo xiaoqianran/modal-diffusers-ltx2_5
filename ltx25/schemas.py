@@ -48,6 +48,42 @@ class AssetResponse(BaseModel):
     size: int
 
 
+class AssetUploadPrepareRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    size: int = Field(gt=0, le=1024 * 1024 * 1024)
+    content_type: str | None = Field(default=None, max_length=255)
+
+
+class AssetUploadPart(BaseModel):
+    part_number: int = Field(ge=1, le=10_000)
+    url: str
+
+
+class AssetUploadPrepareResponse(BaseModel):
+    asset_id: str
+    filename: str
+    kind: Literal["image", "video", "audio"]
+    size: int
+    backend: str
+    mode: Literal["proxy", "single", "multipart"]
+    method: Literal["PUT"] = "PUT"
+    url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    upload_id: str | None = None
+    part_size: int | None = None
+    parts: list[AssetUploadPart] = Field(default_factory=list)
+
+
+class AssetUploadCompletedPart(BaseModel):
+    part_number: int = Field(ge=1, le=10_000)
+    etag: str = Field(min_length=1, max_length=512)
+
+
+class AssetUploadCompleteRequest(BaseModel):
+    parts: list[AssetUploadCompletedPart] = Field(default_factory=list, max_length=10_000)
+    client_upload_seconds: float | None = Field(default=None, ge=0.0, le=24 * 60 * 60)
+
+
 STILL_IMAGE_MODES = {"t2i", "refine_image", "ref2i"}
 REF2I_NUM_FRAMES = {25, 41, 49}
 
@@ -252,6 +288,34 @@ class JobResponse(BaseModel):
     video_url: str | None = None
     image_url: str | None = None
     request: GenerateRequest
+    created_at: str
+    updated_at: str
+    generation_seconds: float | None = None
+    peak_vram_gb: float | None = None
+
+
+class JobRequestSummary(BaseModel):
+    """Fields required to render queue/library cards without echoing the full request."""
+
+    mode: str
+    prompt: str
+    width: int
+    height: int
+    num_frames: int | None = None
+    fps: float
+    steps: int
+    upscale: bool
+
+
+class JobSummaryResponse(BaseModel):
+    id: str
+    session_number: int
+    status: str
+    progress: float = 0
+    error: str | None = None
+    video_url: str | None = None
+    image_url: str | None = None
+    request: JobRequestSummary
     created_at: str
     updated_at: str
     generation_seconds: float | None = None

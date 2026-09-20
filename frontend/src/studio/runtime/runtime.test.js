@@ -97,6 +97,7 @@ function fakeApi(overrides = {}) {
     loras: async () => [],
     createSession: async () => ({ session_number: 555 }),
     listJobs: async () => [],
+    getJob: async id => JOB({ id }),
     submitJob: async body => {
       record('submitJob', body)
       return JOB({ id: 'b'.repeat(32) })
@@ -113,9 +114,9 @@ function fakeApi(overrides = {}) {
       record('uploadAsset', file?.name)
       return asset('c'.repeat(32))
     },
-    fetchOutput: async url => {
-      record('fetchOutput', url)
-      return new Blob([new Uint8Array([1, 2, 3])], { type: 'video/mp4' })
+    reuseOutput: async id => {
+      record('reuseOutput', id)
+      return { ...asset('c'.repeat(32)), kind: 'video', filename: 'source.mp4' }
     },
   }
 
@@ -514,7 +515,7 @@ await test('selectJob pins the stage', async () => {
   assert.equal(runtime.stageJob.value.id, 'run')
 })
 
-await test('editFromOutput re-uploads the output and switches mode', async () => {
+await test('editFromOutput reuses the output inside remote storage and switches mode', async () => {
   const api = fakeApi({
     listJobs: async () => [JOB({ id: 'v'.repeat(32), video_url: '/outputs/v.mp4' })],
   })
@@ -528,10 +529,9 @@ await test('editFromOutput re-uploads the output and switches mode', async () =>
   assert.equal(runtime.draft.mode, 'retake')
   assert.equal(runtime.attachments.source.id, 'c'.repeat(32))
   assert.equal(runtime.busy.preparing, false)
-  // The output must have made a full download + re-upload round trip.
   const names = api.calls.map(([name]) => name)
-  assert.ok(names.includes('fetchOutput'), 'should download the output')
-  assert.ok(names.includes('uploadAsset'), 'should re-upload it as an asset')
+  assert.ok(names.includes('reuseOutput'), 'should reuse the remote output')
+  assert.ok(!names.includes('uploadAsset'), 'should not re-upload the output through the browser')
 })
 
 await test('editFromOutput refuses without a completed video', async () => {
@@ -542,10 +542,10 @@ await test('editFromOutput refuses without a completed video', async () => {
   assert.match(runtime.notice.text, /已完成的视频/)
 })
 
-await test('editFromOutput reports upload failures and leaves no source', async () => {
+await test('editFromOutput reports remote reuse failures and leaves no source', async () => {
   const api = fakeApi({
     listJobs: async () => [JOB({ id: 'v'.repeat(32) })],
-    uploadAsset: async () => { throw new ApiError('boom', 500) },
+    reuseOutput: async () => { throw new ApiError('boom', 500) },
   })
   const runtime = makeRuntime(api)
   runtime.sessionNumber.value = 1
@@ -558,19 +558,21 @@ await test('editFromOutput reports upload failures and leaves no source', async 
 })
 
 await test('reuseJob copies parameters back into the draft', async () => {
-  const runtime = makeRuntime(fakeApi({
-    listJobs: async () => [JOB({
+  const full = JOB({
       id: 'r'.repeat(32),
       request: {
         mode: 'i2v', prompt: 'copy me', negative_prompt: 'no', width: 704, height: 480,
         num_frames: 49, fps: 16, steps: 12, guidance_scale: 4, seed: 99, upscale: false,
         upscale_method: 'latent', decoder: 'vae', loras: [{ id: 'L', strength: 0.7 }],
       },
-    })],
+    })
+  const runtime = makeRuntime(fakeApi({
+    listJobs: async () => [{ ...full, request: { mode: 'i2v', prompt: 'copy me', width: 704, height: 480, num_frames: 49, fps: 16, steps: 12, upscale: false } }],
+    getJob: async () => full,
   }))
   runtime.sessionNumber.value = 1
   await runtime.refreshJobs()
-  runtime.reuseJob('r'.repeat(32))
+  await runtime.reuseJob('r'.repeat(32))
   assert.equal(runtime.draft.mode, 'i2v')
   assert.equal(runtime.draft.prompt, 'copy me')
   assert.equal(runtime.draft.size, '704x480')

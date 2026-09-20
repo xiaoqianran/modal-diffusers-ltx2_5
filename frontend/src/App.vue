@@ -496,7 +496,7 @@ onBeforeUnmount(() => {
           </section>
 
           <form class="prompt-dock" @submit.prevent="submit">
-            <div class="reference-strip" :class="{ empty: !attachmentSlots.length }">
+            <div class="reference-strip" :class="{ 'is-empty': !attachmentSlots.length }">
               <template v-if="attachmentSlots.length">
                 <label
                   v-for="item in attachmentSlots"

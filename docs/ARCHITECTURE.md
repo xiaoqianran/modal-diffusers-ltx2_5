@@ -59,8 +59,9 @@ Vue 组件不直接 `fetch`、不自己维护轮询；生产入口和测试共�
 
 ```text
 ltx25/
-├─ api.py            # HTTP、上传下载、HTTP 错误映射
-├─ modal_client.py   # 本地 -> Modal：Job / Dict / Volume / warmup / cancel
+├─ api.py            # HTTP、上传协议、下载重定向、HTTP 错误映射
+├─ modal_client.py   # 本地 -> Modal：Job / Dict / warmup / cancel
+├─ media_store.py    # 媒体 data plane：Volume / R2(S3-compatible)
 ├─ runtime.py        # generation workflow 与采样编排
 ├─ models.py         # 模型 load/unload、decoder、precision、加速安装
 ├─ encoding.py       # NVENC / ffmpeg 输出编码
@@ -78,13 +79,14 @@ scripts/             # 模型准备与工具
 tests/               # 行为 + 架构边界
 ```
 
-Modal 持久化也按生命周期拆开：
+持久化按生命周期拆开：
 
 ```text
 ltx25-models   # 模型权重，只读挂载到 GPU worker
-ltx25-state    # inputs / outputs / LoRA；每个 job 开始前可 reload
+ltx25-state    # Volume 模式的 inputs/outputs + 始终保留的 LoRA/state
 ltx25-kernels  # NATTEN 等已加载 shared-library kernel cache，不参与 state reload
 ltx25-jobs     # Modal Dict：任务状态
+R2/S3          # 可选媒体 data plane；inputs/outputs 与浏览器直传
 ```
 
 `ltx25-jobs` 同时维护轻量索引：
@@ -92,17 +94,45 @@ ltx25-jobs     # Modal Dict：任务状态
 ```text
 session:<session>:jobs  # 当前会话 job id 列表，轮询不再扫描整个 Dict
 cancel:<job>            # durable cancel tombstone，防止 worker 状态回写复活任务
-asset:<asset>           # 上传时间/Volume path，用于输入资产 TTL 清理
+asset:<asset>           # 上传时间/object key，用于输入资产 TTL 清理
+upload:<asset>          # prepare -> PUT -> finalize 期间的临时上传意图
 ```
 
 浏览器进入 Studio 时显式 warm GPU；真正离开页面时发送 keepalive unload，
 本地 Router 将 Modal worker 的 `scaledown_window` 收到 2 秒。Router 自身退出时
 lifespan 也执行同样的 2 秒回收兜底。
 
+媒体传输保持控制面/数据面分离的边界：
+
+```text
+/api/jobs/status          # 轮询只返回 UI 所需的轻量 Job summary
+/api/jobs/{id}            # 需要复用参数时才读取完整 GenerateRequest
+/api/assets/prepare       # 返回 Volume proxy 或 R2 presigned 上传计划
+/api/assets/{id}/content  # Volume fallback 的 raw binary PUT
+/api/assets/{id}/complete # finalize + size verify + durable asset registration
+/api/assets/from-job/{id} # Retake/Extend: data-plane server-side copy
+/outputs/{name}           # Volume FileResponse / R2 signed redirect
+```
+
+默认 `VolumeMediaStore` 保持零配置兼容；`S3MediaStore` 可切到 Cloudflare
+R2。R2 模式下浏览器直接 PUT 到对象存储，大文件走并行 multipart，输出下载
+通过短时 signed GET/HEAD；Job/Dict 内只保存稳定 object key，不保存会过期的
+presigned URL。
+
+Retake / Extend 不再把已生成视频下载到浏览器后重新上传：Volume 使用
+`Volume.copy_files()`，R2 使用 S3 `CopyObject`。`/api/health` 同时暴露媒体
+backend 与 upload/download/copy 指标；直传 WAN 时间由浏览器 finalize 时回报。
+
+MP4 主编码路径写入 `+faststart`，将 `moov` 元数据前置，避免浏览器为了读取
+metadata 而等待整个文件尾部。R2 模式下 MP4 先在 GPU container 的本地 scratch
+完成 mux，再顺序复制到 CloudBucketMount，避免在 S3 mount 上做 seek/random write。
+
 ## 依赖规则
 
 ```text
 api ----------> modal_client ----------> Modal SDK
+                    |
+                    `----------> media_store ----> Volume / S3 API
 
 modal_app ----> runtime ----> models ----> acceleration
                    |

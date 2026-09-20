@@ -6,6 +6,7 @@ import threading
 import pytest
 
 import ltx25.modal_client as modal_client_module
+from ltx25.media_store import VolumeMediaStore
 from ltx25.schemas import GenerateRequest
 from ltx25.modal_client import (
     ActiveJobError,
@@ -51,6 +52,34 @@ class Volume:
         self.removed.append(path)
         del self.files[path]
 
+    def copy_files(self, src_paths, dst_path, recursive=False):
+        assert len(src_paths) == 1
+        source = src_paths[0]
+        if source not in self.files:
+            raise FileNotFoundError(source)
+        self.files[dst_path] = self.files[source]
+
+    def iterdir(self, path, recursive=False):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return [SimpleNamespace(path=path, size=len(self.files[path]))]
+
+    class _Batch:
+        def __init__(self, volume):
+            self.volume = volume
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def put_file(self, local_path, remote_path):
+            self.volume.files[remote_path] = Path(local_path).read_bytes()
+
+    def batch_upload(self, force=False):
+        return self._Batch(self)
+
 
 def make_client(tmp_path: Path):
     control = ModalClient.__new__(ModalClient)
@@ -62,6 +91,7 @@ def make_client(tmp_path: Path):
     control.output_cache = tmp_path / "outputs"
     control.upload_cache = tmp_path / "uploads"
     control.state_volume = Volume()
+    control.media_store = VolumeMediaStore(control.state_volume)
     control.job_store = Store()
     control.worker = SimpleNamespace(update_autoscaler=lambda **_: None)
     control.generate_fn = SimpleNamespace(spawn=lambda *_: SimpleNamespace(object_id="fc-test"))
@@ -109,6 +139,74 @@ def test_download_output_is_cached_locally(tmp_path):
     second = control.download_output("test.mp4")
     assert second == first
     assert second.read_bytes() == b"video"
+    metrics = control.transfer_metrics()["download"]
+    assert metrics["count"] == 1
+    assert metrics["bytes"] == 5
+    assert metrics["cache_hits"] == 1
+
+
+def test_completed_output_can_be_reused_inside_volume_without_download(tmp_path):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="source", session_number=101))
+    record = control.job_store.get(f"job:{job['id']}")
+    record.update(status="completed", video_url=f"/outputs/{job['id']}.mp4")
+    control.job_store.put(f"job:{job['id']}", record)
+    control.state_volume.files[f"outputs/{job['id']}.mp4"] = b"video-data"
+
+    asset = control.copy_output_to_input(job["id"])
+
+    remote_path = control.job_store.get(f"asset:{asset['id']}")["key"]
+    assert control.state_volume.files[remote_path] == b"video-data"
+    assert asset["kind"] == "video"
+    assert asset["size"] == len(b"video-data")
+    assert control.transfer_metrics()["copy"]["count"] == 1
+    assert control.transfer_metrics()["download"]["count"] == 0
+
+
+def test_job_summary_keeps_render_fields_but_drops_heavy_request_details(tmp_path):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="summary", negative_prompt="very long negative", session_number=101))
+
+    summary = control.list_job_summaries(101)[0]
+
+    assert summary["id"] == job["id"]
+    assert summary["request"]["prompt"] == "summary"
+    assert summary["request"]["mode"] == "t2av"
+    assert "negative_prompt" not in summary["request"]
+
+
+def test_prepared_asset_finalize_is_idempotent(tmp_path):
+    control = make_client(tmp_path)
+    payload = tmp_path / "input.png"
+    payload.write_bytes(b"media")
+    plan = control.prepare_asset_upload(
+        filename="input.png",
+        content_type="image/png",
+        size=5,
+        kind="image",
+        suffix=".png",
+    )
+    control.upload_proxy_file(plan["asset_id"], payload)
+
+    first = control.complete_asset_upload(plan["asset_id"], client_upload_seconds=0.25)
+    second = control.complete_asset_upload(plan["asset_id"], client_upload_seconds=9.0)
+
+    assert second == first
+    assert control.transfer_metrics()["upload"]["client_count"] == 1
+    assert control.transfer_metrics()["upload"]["client_seconds"] == 0.25
+
+
+def test_public_job_materializes_stable_url_from_internal_media_key(tmp_path):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="keyed", session_number=101))
+    record = control.job_store.get(f"job:{job['id']}")
+    record.update(status="completed", video_key=f"outputs/{job['id']}.mp4", video_url=None)
+    control.job_store.put(f"job:{job['id']}", record)
+
+    public = control.get_job(job["id"])
+
+    assert public["video_url"] == f"/outputs/{job['id']}.mp4"
+    assert "video_key" not in public
 
 
 def test_keep_warm_dedupes_pending_call_and_unload_cancels_it(tmp_path):

@@ -14,16 +14,21 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from PIL import Image
 
+from .media_store import MediaStoreError
 from .schemas import (
     AssetResponse,
+    AssetUploadCompleteRequest,
+    AssetUploadPrepareRequest,
+    AssetUploadPrepareResponse,
     ConcatRequest,
     GenerateRequest,
     JobResponse,
+    JobSummaryResponse,
     LoraResponse,
     PromptEnhanceRequest,
     PromptEnhanceResponse,
@@ -120,6 +125,8 @@ def health():
         "keep_gpu_warm": modal_client.keep_gpu_warm,
         "gpu_idle_seconds": modal_client.gpu_idle_seconds,
         "warmup": modal_client.warm_status(),
+        "media": modal_client.media_info(),
+        "transfer_metrics": modal_client.transfer_metrics(),
     }
 
 
@@ -146,6 +153,12 @@ def create_job(request: GenerateRequest):
         return modal_client.create_job(request)
     except SubmissionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/jobs/status", response_model=list[JobSummaryResponse])
+def list_job_status(session_number: int | None = None, limit: int = 50):
+    """Compact polling endpoint; full request payloads stay on the detail route."""
+    return modal_client.list_job_summaries(session_number, limit)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -183,15 +196,7 @@ def interrupt(job_id: str | None = Body(None, embed=True)):
 
 @app.post("/api/assets", response_model=AssetResponse, status_code=201)
 def upload_asset(file: UploadFile = File(...)):
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix in IMAGE_SUFFIXES:
-        kind = "image"
-    elif suffix in VIDEO_SUFFIXES:
-        kind = "video"
-    elif suffix in AUDIO_SUFFIXES:
-        kind = "audio"
-    else:
-        raise HTTPException(status_code=415, detail="Unsupported media type")
+    kind, suffix = _upload_kind(file.filename or "")
 
     asset_id = uuid.uuid4().hex
     UPLOAD_CACHE.mkdir(parents=True, exist_ok=True)
@@ -209,38 +214,19 @@ def upload_asset(file: UploadFile = File(...)):
         if size == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-        if kind == "image":
-            with Image.open(local_path) as image:
-                image.verify()
-        elif kind in {"video", "audio"} and suffix != ".gif":
-            ffprobe = shutil.which("ffprobe")
-            if ffprobe:
-                selector = "v:0" if kind == "video" else "a:0"
-                probe = subprocess.run(
-                    [
-                        ffprobe,
-                        "-v",
-                        "error",
-                        "-select_streams",
-                        selector,
-                        "-show_entries",
-                        "stream=codec_name",
-                        "-of",
-                        "csv=p=0",
-                        str(local_path),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if probe.returncode != 0 or not probe.stdout.strip():
-                    raise HTTPException(status_code=400, detail=f"Uploaded {kind} could not be decoded")
+        _validate_uploaded_media(local_path, kind, suffix)
 
         remote_path = f"inputs/{asset_id}{suffix}"
         modal_client.upload_file(local_path, remote_path)
         local_path.unlink(missing_ok=True)
         try:
-            modal_client.register_asset(asset_id, remote_path)
+            modal_client.register_asset(
+                asset_id,
+                remote_path,
+                kind=kind,
+                filename=file.filename or local_path.name,
+                size=size,
+            )
         except Exception as exc:
             try:
                 modal_client.remove_input(remote_path)
@@ -268,6 +254,143 @@ def upload_asset(file: UploadFile = File(...)):
         filename=file.filename or local_path.name,
         size=size,
     )
+
+
+def _upload_kind(filename: str) -> tuple[str, str]:
+    suffix = Path(filename).suffix.lower()
+    if suffix in IMAGE_SUFFIXES:
+        return "image", suffix
+    if suffix in VIDEO_SUFFIXES:
+        return "video", suffix
+    if suffix in AUDIO_SUFFIXES:
+        return "audio", suffix
+    raise HTTPException(status_code=415, detail="Unsupported media type")
+
+
+def _validate_uploaded_media(local_path: Path, kind: str, suffix: str) -> None:
+    if kind == "image":
+        with Image.open(local_path) as image:
+            image.verify()
+        return
+    if suffix == ".gif":
+        return
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return
+    selector = "v:0" if kind == "video" else "a:0"
+    probe = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            selector,
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            str(local_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        raise HTTPException(status_code=400, detail=f"Uploaded {kind} could not be decoded")
+
+
+@app.post("/api/assets/prepare", response_model=AssetUploadPrepareResponse, status_code=201)
+def prepare_asset_upload(request: AssetUploadPrepareRequest):
+    kind, suffix = _upload_kind(request.filename)
+    try:
+        return modal_client.prepare_asset_upload(
+            filename=request.filename,
+            content_type=request.content_type,
+            size=request.size,
+            kind=kind,
+            suffix=suffix,
+        )
+    except (ValueError, MediaStoreError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Could not prepare media upload") from exc
+
+
+@app.put("/api/assets/{asset_id}/content", status_code=204)
+async def upload_asset_content(asset_id: str, request: Request):
+    intent = await asyncio.to_thread(modal_client.get_upload_intent, asset_id)
+    if not intent:
+        raise HTTPException(status_code=404, detail="Upload intent not found")
+    if intent.get("mode") != "proxy":
+        raise HTTPException(status_code=409, detail="This upload must go directly to object storage")
+
+    suffix = Path(str(intent["key"])).suffix.lower()
+    kind = str(intent["kind"])
+    expected_size = int(intent["size"])
+    UPLOAD_CACHE.mkdir(parents=True, exist_ok=True)
+    local_path = UPLOAD_CACHE / f"{asset_id}{suffix}.part"
+    received = 0
+    try:
+        with local_path.open("wb") as output:
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > expected_size:
+                    raise HTTPException(status_code=413, detail="Upload exceeds declared size")
+                output.write(chunk)
+        if received != expected_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Upload size mismatch: expected {expected_size}, got {received}",
+            )
+        _validate_uploaded_media(local_path, kind, suffix)
+        await asyncio.to_thread(modal_client.upload_proxy_file, asset_id, local_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {kind} file: {exc}") from exc
+    finally:
+        local_path.unlink(missing_ok=True)
+    return Response(status_code=204)
+
+
+@app.post("/api/assets/{asset_id}/complete", response_model=AssetResponse)
+def complete_asset_upload(asset_id: str, request: AssetUploadCompleteRequest):
+    try:
+        asset = modal_client.complete_asset_upload(
+            asset_id,
+            [item.model_dump() for item in request.parts],
+            request.client_upload_seconds,
+        )
+        try:
+            modal_client.cleanup_assets()
+        except Exception:
+            pass
+        return AssetResponse(**asset)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Upload intent or uploaded object not found") from exc
+    except MediaStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Could not finalize media upload") from exc
+
+
+@app.delete("/api/assets/{asset_id}/upload", status_code=204)
+def abort_asset_upload(asset_id: str):
+    modal_client.abort_asset_upload(asset_id)
+    return Response(status_code=204)
+
+
+@app.post("/api/assets/from-job/{job_id}", response_model=AssetResponse, status_code=201)
+def asset_from_job(job_id: str):
+    """Reuse a completed video entirely inside Modal storage."""
+    try:
+        return AssetResponse(**modal_client.copy_output_to_input(job_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Completed video output not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Could not reuse output inside Modal storage") from exc
 
 
 @app.get("/api/loras", response_model=list[LoraResponse])
@@ -337,8 +460,11 @@ def concat_jobs(request: ConcatRequest):
 
 
 @app.api_route("/outputs/{filename}", methods=["GET", "HEAD"])
-def output_file(filename: str):
+def output_file(filename: str, request: Request):
     try:
+        redirect_url = modal_client.output_delivery_url(filename, method=request.method)
+        if redirect_url:
+            return RedirectResponse(redirect_url, status_code=307)
         path = modal_client.download_output(filename)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

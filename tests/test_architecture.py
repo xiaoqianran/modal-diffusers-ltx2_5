@@ -52,6 +52,12 @@ def test_modal_client_does_not_know_runtime():
     assert "models" not in imports
 
 
+def test_media_store_has_no_serving_or_generation_dependencies():
+    imports = _imports(PKG / "media_store.py")
+    for forbidden in {"fastapi", "modal", "runtime", "models", "torch", "diffusers"}:
+        assert forbidden not in imports
+
+
 def test_api_does_not_import_modal_sdk_or_runtime():
     imports = _imports(PKG / "api.py")
     assert "modal" not in imports
@@ -76,6 +82,11 @@ def test_encoding_has_no_serving_dependency():
     imports = _imports(PKG / "encoding.py")
     assert "fastapi" not in imports
     assert "modal" not in imports
+
+
+def test_video_encoder_writes_faststart_mp4():
+    source = (PKG / "encoding.py").read_text(encoding="utf-8")
+    assert '"movflags": "+faststart"' in source
 
 
 def test_single_primary_package_and_modal_entrypoint():

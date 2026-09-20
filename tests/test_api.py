@@ -20,12 +20,24 @@ class FakeControl:
         self.root = root
         self.jobs = {}
         self.uploads = {}
+        self.upload_intents = {}
         self.loras = []
         self.idle_windows = []
         self.warmups = 0
+        self.delivery_url = None
 
     def warm_status(self):
         return {"state": "disabled"}
+
+    def transfer_metrics(self):
+        return {
+            "upload": {"count": 0, "bytes": 0, "seconds": 0.0},
+            "download": {"count": 0, "bytes": 0, "seconds": 0.0, "first_byte_seconds": 0.0, "cache_hits": 0},
+            "copy": {"count": 0, "seconds": 0.0},
+        }
+
+    def media_info(self):
+        return {"backend": "volume", "direct_upload": False, "direct_download": False}
 
     def set_idle_window(self, seconds):
         self.idle_windows.append(seconds)
@@ -76,6 +88,18 @@ class FakeControl:
             jobs = [job for job in jobs if job["session_number"] == session_number]
         return jobs[:limit]
 
+    def list_job_summaries(self, session_number=None, limit=50):
+        return [
+            {
+                **job,
+                "request": {
+                    key: job["request"].get(key)
+                    for key in ("mode", "prompt", "width", "height", "num_frames", "fps", "steps", "upscale")
+                },
+            }
+            for job in self.list_jobs(session_number, limit)
+        ]
+
     def delete_job(self, job_id):
         return self.jobs.pop(job_id, None) is not None
 
@@ -85,7 +109,55 @@ class FakeControl:
     def upload_file(self, local_path: Path, remote_path: str):
         self.uploads[remote_path] = local_path.read_bytes()
 
-    def register_asset(self, asset_id: str, remote_path: str):
+    def prepare_asset_upload(self, *, filename, content_type, size, kind, suffix):
+        asset_id = uuid.uuid4().hex
+        intent = {
+            "asset_id": asset_id,
+            "key": f"inputs/{asset_id}{suffix}",
+            "filename": filename,
+            "content_type": content_type,
+            "size": size,
+            "kind": kind,
+            "mode": "proxy",
+        }
+        self.upload_intents[asset_id] = intent
+        return {
+            "asset_id": asset_id,
+            "filename": filename,
+            "kind": kind,
+            "size": size,
+            "backend": "volume",
+            "mode": "proxy",
+            "method": "PUT",
+            "url": f"/api/assets/{asset_id}/content",
+            "headers": {"Content-Type": content_type or "application/octet-stream"},
+            "parts": [],
+        }
+
+    def get_upload_intent(self, asset_id):
+        return self.upload_intents.get(asset_id)
+
+    def upload_proxy_file(self, asset_id, local_path):
+        intent = self.upload_intents[asset_id]
+        self.uploads[intent["key"]] = local_path.read_bytes()
+
+    def complete_asset_upload(self, asset_id, parts=None, client_upload_seconds=None):
+        intent = self.upload_intents.pop(asset_id)
+        return {
+            "id": asset_id,
+            "kind": intent["kind"],
+            "filename": intent["filename"],
+            "size": intent["size"],
+        }
+
+    def abort_asset_upload(self, asset_id):
+        intent = self.upload_intents.pop(asset_id, None)
+        if not intent:
+            return False
+        self.uploads.pop(intent["key"], None)
+        return True
+
+    def register_asset(self, asset_id: str, remote_path: str, **metadata):
         pass
 
     def remove_input(self, remote_path: str):
@@ -96,6 +168,17 @@ class FakeControl:
 
     def download_output(self, filename: str):
         raise FileNotFoundError(filename)
+
+    def output_delivery_url(self, filename: str, method="GET"):
+        return self.delivery_url
+
+    def copy_output_to_input(self, job_id: str):
+        job = self.jobs.get(job_id)
+        if not job or not job.get("video_url"):
+            raise FileNotFoundError(job_id)
+        asset_id = uuid.uuid4().hex
+        self.uploads[f"inputs/{asset_id}.mp4"] = b"server-copy"
+        return {"id": asset_id, "kind": "video", "filename": f"{job_id}.mp4", "size": len(b"server-copy")}
 
     def list_loras(self):
         return self.loras
@@ -117,6 +200,7 @@ def test_health_and_generation(client):
     health = test_client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["transport"] == "local-modal-sdk"
+    assert "transfer_metrics" in health.json()
 
     response = test_client.post("/api/jobs", json={"prompt": "A crane flies over Tokyo"})
     assert response.status_code == 202
@@ -125,6 +209,14 @@ def test_health_and_generation(client):
     assert job["video_url"].endswith(".mp4")
 
     assert test_client.get(f"/api/jobs/{job['id']}").status_code == 200
+    status = test_client.get("/api/jobs/status", params={"session_number": job["session_number"]})
+    assert status.status_code == 200
+    assert status.json()[0]["request"]["prompt"] == "A crane flies over Tokyo"
+    assert "negative_prompt" not in status.json()[0]["request"]
+
+    reused = test_client.post(f"/api/assets/from-job/{job['id']}")
+    assert reused.status_code == 201
+    assert reused.json()["kind"] == "video"
     assert test_client.delete(f"/api/jobs/{job['id']}").status_code == 204
     assert test_client.get(f"/api/jobs/{job['id']}").status_code == 404
 
@@ -270,6 +362,35 @@ def test_upload_and_i2v_request(client):
     assert response.json()["request"]["mode"] == "i2v"
 
 
+def test_prepared_upload_uses_binary_put_and_finalize(client):
+    test_client, control = client
+    image_file = BytesIO()
+    Image.new("RGB", (32, 32), "green").save(image_file, format="PNG")
+    payload = image_file.getvalue()
+
+    prepared = test_client.post(
+        "/api/assets/prepare",
+        json={"filename": "direct.png", "size": len(payload), "content_type": "image/png"},
+    )
+    assert prepared.status_code == 201
+    plan = prepared.json()
+    assert plan["mode"] == "proxy"
+    assert plan["backend"] == "volume"
+
+    uploaded = test_client.put(plan["url"], content=payload, headers=plan["headers"])
+    assert uploaded.status_code == 204
+
+    completed = test_client.post(
+        f"/api/assets/{plan['asset_id']}/complete",
+        json={"parts": []},
+    )
+    assert completed.status_code == 200
+    asset = completed.json()
+    assert asset["id"] == plan["asset_id"]
+    assert asset["kind"] == "image"
+    assert f"inputs/{asset['id']}.png" in control.uploads
+
+
 def test_upload_rolls_back_remote_file_when_asset_registration_fails(client):
     test_client, control = client
     image_file = BytesIO()
@@ -308,3 +429,13 @@ def test_rejects_unsupported_upload(client):
         files={"file": ("notes.txt", b"not media", "text/plain")},
     )
     assert response.status_code == 415
+
+
+def test_output_route_redirects_when_media_store_supports_direct_download(client):
+    test_client, control = client
+    control.delivery_url = "https://r2.test/signed-output"
+
+    response = test_client.get("/outputs/test.mp4", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://r2.test/signed-output"

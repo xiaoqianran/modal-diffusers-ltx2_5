@@ -7,9 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "npm run test:model && npm run test:runtime && npm run test:contract",
+    "test": "npm run test:model && npm run test:runtime && npm run test:api && npm run test:contract",
     "test:model": "node src/studio/model/model.test.js",
     "test:runtime": "node src/studio/runtime/runtime.test.js",
+    "test:api": "node src/studio/runtime/api.test.js",
     "test:contract": "node scripts/run-contract.mjs"
   },
   "devDependencies": {

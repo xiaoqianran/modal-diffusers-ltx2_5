@@ -7,4 +7,5 @@ numpy>=1.26,<3
 torch>=2.5,<3
 safetensors>=0.4,<1
 modal>=1.5,<2
+boto3>=1.40,<2
 pytest>=8,<9

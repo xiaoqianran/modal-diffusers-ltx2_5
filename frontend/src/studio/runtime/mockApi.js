@@ -230,11 +230,15 @@ export const mockApi = {
     }
   },
 
-  async fetchOutput(url) {
-    if (!String(url).startsWith('data:') && !String(url).startsWith('blob:')) {
-      throw new Error('Mock mode only reads browser-local outputs')
+  async reuseOutput(jobId) {
+    const job = jobs.find(item => item.id === jobId)
+    if (!job?.video_url) throw new Error('Mock job has no reusable video output')
+    return {
+      id: nextId(),
+      filename: `${jobId}.mp4`,
+      kind: 'video',
+      size: 0,
+      url: job.video_url,
     }
-    const response = await fetch(url)
-    return response.blob()
   },
 }

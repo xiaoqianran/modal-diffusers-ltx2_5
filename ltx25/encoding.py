@@ -82,7 +82,13 @@ def _encode_video_crf_impl(
         print(f"[ltx25] STAGE_DEBUG mp4.uint8_convert {_time.time() - _t:.3f}s", flush=True)
         _t = _time.time()
 
-    container = av.open(str(output_path), mode="w")
+    # Move the MP4 `moov` atom ahead of media data so browsers can start
+    # metadata/range playback without fetching the whole file first.
+    container = av.open(
+        str(output_path),
+        mode="w",
+        container_options={"movflags": "+faststart"},
+    )
     codec = "h264_nvenc" if encoder == "nvenc" else "libx264"
     try:
         stream = container.add_stream(codec, rate=int(round(fps)))

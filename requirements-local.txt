@@ -3,3 +3,4 @@ uvicorn[standard]>=0.34,<1
 python-multipart>=0.0.20,<1
 Pillow>=10,<12
 modal>=1.5,<2
+boto3>=1.40,<2

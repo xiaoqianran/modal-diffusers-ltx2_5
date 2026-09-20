@@ -3,7 +3,7 @@
  *
  * Named `uploads` rather than `assets` to avoid colliding with the `assets`
  * state object. Contains no Vue and no business rules: it turns a File into an
- * uploaded asset, or a rendered output back into one.
+ * uploaded asset.
  *
  * The API client is passed in rather than imported so the runtime owns the
  * dependency and tests can substitute it, matching the rest of the runtime.
@@ -49,27 +49,5 @@ export async function uploadFile(file, options = {}) {
   if (problem) throw new Error(problem)
   const client = options.client || defaultApi
   const asset = await client.uploadAsset(file)
-  return { ...asset, kind: asset.kind || guessKind(file) }
-}
-
-/**
- * Re-upload a rendered output as a fresh asset.
- *
- * Retake and Extend need a source that lives in the inputs cache, but outputs are
- * served from a different location and carry no asset id, so the file has to make
- * a round trip. `onPhase` reports progress because that transfer is not instant.
- *
- * @param {string} url          Output URL from a completed job.
- * @param {string} filename     Name to present to the server.
- * @param {(phase: string) => void} [onPhase]
- * @param {object} [client]     API client, defaults to the real one.
- */
-export async function uploadFromOutput(url, filename, onPhase = () => {}, client = defaultApi) {
-  onPhase('fetching')
-  const blob = await client.fetchOutput(url)
-  onPhase('uploading')
-  const file = new File([blob], filename, { type: blob.type || 'video/mp4' })
-  const asset = await client.uploadAsset(file)
-  onPhase('done')
   return { ...asset, kind: asset.kind || guessKind(file) }
 }

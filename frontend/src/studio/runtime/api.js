@@ -62,6 +62,62 @@ async function send(path, { method = 'GET', body, signal, keepalive = false } = 
   return payload
 }
 
+async function putBinary(url, body, headers = {}) {
+  const response = await fetch(absolute(url), { method: 'PUT', body, headers })
+  if (!response.ok) {
+    const payload = await parse(response)
+    throw new ApiError(
+      typeof payload?.detail === 'string' ? payload.detail : `上传失败 (${response.status})`,
+      response.status,
+      payload?.detail
+    )
+  }
+  return response
+}
+
+async function uploadMultipart(file, plan, concurrency = 4) {
+  const queue = plan.parts.slice()
+  const completed = []
+
+  async function worker() {
+    while (queue.length) {
+      const part = queue.shift()
+      const start = (part.part_number - 1) * plan.part_size
+      const end = Math.min(start + plan.part_size, file.size)
+      const response = await putBinary(part.url, file.slice(start, end))
+      const etag = response.headers.get('ETag') || response.headers.get('etag')
+      if (!etag) {
+        throw new ApiError(
+          '对象存储没有暴露 ETag；请检查 R2 CORS 的 ExposeHeaders',
+          502
+        )
+      }
+      completed.push({ part_number: part.part_number, etag })
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
+  )
+  return completed.sort((a, b) => a.part_number - b.part_number)
+}
+
+async function finalizeUpload(assetId, body) {
+  let lastError = null
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await send(`/api/assets/${encodeURIComponent(assetId)}/complete`, {
+        method: 'POST',
+        body,
+      })
+    } catch (error) {
+      lastError = error
+      if (error instanceof ApiError && error.status < 500) throw error
+    }
+  }
+  throw lastError
+}
+
 export const api = {
   health: () => send('/api/health'),
 
@@ -74,7 +130,7 @@ export const api = {
   createSession: () => send('/api/sessions', { method: 'POST' }),
 
   listJobs: (sessionNumber, limit = 100) => send(
-    `/api/jobs?session_number=${encodeURIComponent(sessionNumber)}&limit=${limit}`
+    `/api/jobs/status?session_number=${encodeURIComponent(sessionNumber)}&limit=${limit}`
   ),
 
   getJob: id => send(`/api/jobs/${id}`),
@@ -85,31 +141,52 @@ export const api = {
 
   deleteJob: id => send(`/api/jobs/${id}`, { method: 'DELETE' }),
 
-  /** Multipart upload; the browser sets the boundary so no JSON header here. */
+  /**
+   * Unified media upload.
+   *
+   * Volume mode returns a site-local proxy PUT. R2/S3 mode returns either one
+   * presigned PUT or a set of presigned multipart URLs. In object-storage mode
+   * media bytes never pass through the local FastAPI process.
+   */
   async uploadAsset(file) {
-    const form = new FormData()
-    form.append('file', file)
-    const response = await fetch(absolute('/api/assets'), { method: 'POST', body: form })
-    const payload = await parse(response)
-    if (!response.ok) {
-      throw new ApiError(typeof payload?.detail === 'string' ? payload.detail : '上传失败',
-        response.status, payload?.detail)
+    const plan = await send('/api/assets/prepare', {
+      method: 'POST',
+      body: {
+        filename: file.name,
+        size: file.size,
+        content_type: file.type || 'application/octet-stream',
+      },
+    })
+
+    let transferComplete = false
+    try {
+      const uploadStarted = performance.now()
+      let parts = []
+      if (plan.mode === 'multipart') {
+        parts = await uploadMultipart(file, plan)
+      } else {
+        await putBinary(plan.url, file, plan.headers || {})
+      }
+      transferComplete = true
+      const clientUploadSeconds = (performance.now() - uploadStarted) / 1000
+      return await finalizeUpload(plan.asset_id, {
+        parts,
+        client_upload_seconds: clientUploadSeconds,
+      })
+    } catch (error) {
+      if (!transferComplete) {
+        try {
+          await send(`/api/assets/${encodeURIComponent(plan.asset_id)}/upload`, {
+            method: 'DELETE',
+          })
+        } catch {
+          // Best effort: R2 also expires incomplete multipart uploads by lifecycle.
+        }
+      }
+      throw error
     }
-    return payload
   },
 
-  /**
-   * Fetch a rendered output as a Blob, used when re-uploading for Retake/Extend.
-   *
-   * The server returns site-relative URLs like `/outputs/x.mp4`, which `fetch`
-   * cannot parse on its own in every environment, so they are resolved against
-   * the current origin first.
-   */
-  async fetchOutput(url) {
-    const response = await fetch(absolute(url))
-    if (!response.ok) {
-      throw new ApiError(`无法读取输出 (${response.status})`, response.status)
-    }
-    return response.blob()
-  },
+  reuseOutput: jobId => send(`/api/assets/from-job/${encodeURIComponent(jobId)}`, { method: 'POST' }),
+
 }

@@ -19,6 +19,10 @@ STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
 KERNEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_KERNEL_VOLUME", "ltx25-kernels")
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
+MEDIA_BACKEND = os.environ.get("LTX25_MEDIA_BACKEND", "volume").strip().lower()
+MEDIA_BUCKET = os.environ.get("LTX25_R2_BUCKET") or os.environ.get("LTX25_S3_BUCKET")
+MEDIA_ENDPOINT_URL = os.environ.get("LTX25_R2_ENDPOINT_URL") or os.environ.get("LTX25_S3_ENDPOINT_URL")
+MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "r2-media")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -44,6 +48,30 @@ state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
 kernel_volume = modal.Volume.from_name(KERNEL_VOLUME_NAME, create_if_missing=True)
 job_store = modal.Dict.from_name(JOB_DICT_NAME, create_if_missing=True)
 hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
+
+media_mount = None
+media_secret = None
+MEDIA_ROOT = "/data"
+if MEDIA_BACKEND in {"r2", "s3"}:
+    if not MEDIA_BUCKET:
+        raise RuntimeError("LTX25_R2_BUCKET/LTX25_S3_BUCKET is required for object-storage media")
+    media_secret = modal.Secret.from_name(
+        MEDIA_SECRET_NAME,
+        required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+    )
+    mount_kwargs = {
+        "bucket_name": MEDIA_BUCKET,
+        "secret": media_secret,
+        "read_only": False,
+    }
+    if MEDIA_ENDPOINT_URL:
+        mount_kwargs["bucket_endpoint_url"] = MEDIA_ENDPOINT_URL
+    media_mount = modal.CloudBucketMount(**mount_kwargs)
+    MEDIA_ROOT = "/media"
+elif MEDIA_BACKEND != "volume":
+    raise RuntimeError("LTX25_MEDIA_BACKEND must be volume, r2, or s3")
+
+WORKER_OUTPUT_DIR = "/data/outputs" if MEDIA_BACKEND == "volume" else "/tmp/ltx25-outputs"
 
 
 def _cancel_key(job_id: str) -> str:
@@ -170,10 +198,13 @@ GPU_ENV = {
     "OFFLOAD_MODE": "none",
     "LTX25_CUDA_GRAPH": "1",
     "LTX25_COMPILE_BLOCKS": "off",
-    "OUTPUT_DIR": "/data/outputs",
-    "INPUT_DIR": "/data/inputs",
+    # MP4 muxing performs seeks (notably for faststart), while S3 Mountpoint
+    # supports sequential writes. Object-store mode therefore encodes locally
+    # and copies the finalized file to the bucket afterwards.
+    "OUTPUT_DIR": WORKER_OUTPUT_DIR,
+    "INPUT_DIR": f"{MEDIA_ROOT}/inputs",
     "LORA_DIR": "/data/loras",
-    "HISTORY_DB": "/data/outputs/history.sqlite3",
+    "HISTORY_DB": "/data/history.sqlite3",
     # Model files must be local. Kernel Hub remains online because the NATTEN
     # binary is selected for the actual torch/CUDA/SM combination at runtime.
     # Keep hardware-specific kernel binaries on a dedicated Volume. The state
@@ -182,6 +213,16 @@ GPU_ENV = {
     # reload of that same Volume fail with "open files preventing the operation".
     "HF_HOME": "/kernel-cache/hf",
 }
+
+WORKER_VOLUMES = {
+    "/models": model_volume.with_mount_options(read_only=True),
+    "/data": state_volume,
+    "/kernel-cache": kernel_volume,
+}
+if media_mount is not None:
+    WORKER_VOLUMES["/media"] = media_mount
+
+WORKER_SECRETS = [hf_secret] + ([media_secret] if media_secret is not None else [])
 
 
 @app.cls(
@@ -200,13 +241,9 @@ GPU_ENV = {
         initial_delay=2.0,
         max_delay=10.0,
     ),
-    secrets=[hf_secret],
+    secrets=WORKER_SECRETS,
     env=GPU_ENV,
-    volumes={
-        "/models": model_volume.with_mount_options(read_only=True),
-        "/data": state_volume,
-        "/kernel-cache": kernel_volume,
-    },
+    volumes=WORKER_VOLUMES,
 )
 @modal.concurrent(max_inputs=1)
 class LTX25Worker:
@@ -244,6 +281,7 @@ class LTX25Worker:
         while process-level failures such as GPU preemption escape this method and
         are retried by Modal with the same job id/output path.
         """
+        import shutil
         import time
         from pathlib import Path
 
@@ -274,6 +312,7 @@ class LTX25Worker:
             target = Path(settings.output_dir) / f"{prefix}_{job_id}.png"
         else:
             target = Path(settings.output_dir) / f"{job_id}.mp4"
+        target.parent.mkdir(parents=True, exist_ok=True)
 
         started = time.monotonic()
         last_bucket = -1
@@ -298,7 +337,14 @@ class LTX25Worker:
             interrupted = _honor_interrupt(job_id, record)
             if interrupted is not None:
                 return interrupted
-            state_volume.commit()
+            if MEDIA_BACKEND == "volume":
+                state_volume.commit()
+            else:
+                remote_target = Path(MEDIA_ROOT) / "outputs" / target.name
+                if not remote_target.exists():
+                    with target.open("rb") as source, remote_target.open("wb") as destination:
+                        shutil.copyfileobj(source, destination, length=8 * 1024 * 1024)
+                target.unlink(missing_ok=True)
             interrupted = _honor_interrupt(job_id, record)
             if interrupted is not None:
                 return interrupted
@@ -330,8 +376,10 @@ class LTX25Worker:
                 "generation_seconds": time.monotonic() - started,
                 "peak_vram_gb": metrics.get("peak_vram_gb"),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-                "image_url": f"/outputs/{target.name}" if request.mode in STILL_IMAGE_MODES else None,
-                "video_url": None if request.mode in STILL_IMAGE_MODES else f"/outputs/{target.name}",
+                "image_key": f"outputs/{target.name}" if request.mode in STILL_IMAGE_MODES else None,
+                "video_key": None if request.mode in STILL_IMAGE_MODES else f"outputs/{target.name}",
+                "image_url": None,
+                "video_url": None,
             }
         )
         job_store.put(record_key, current)

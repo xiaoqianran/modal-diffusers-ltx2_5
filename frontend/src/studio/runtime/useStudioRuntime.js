@@ -18,7 +18,7 @@ import { computed, reactive, ref, shallowRef } from 'vue'
 
 import { api, ApiError } from './api.js'
 import { createPoller, POLL_HEALTH_MS, POLL_HEALTH_WARMING_MS } from './polling.js'
-import { uploadFile, uploadFromOutput } from './uploads.js'
+import { uploadFile } from './uploads.js'
 
 import { DEFAULT_MODE, STILL_MODES, getModeCapabilities } from '../model/modes.js'
 import { isActive, isPending, makePendingJob, mergePendingJobs } from '../model/jobs.js'
@@ -475,12 +475,7 @@ export function useStudioRuntime(options = {}) {
     }
   }
 
-  /**
-   * Enter an editing mode using the currently staged output as the source.
-   *
-   * The output has to be re-uploaded because it lives outside the inputs cache
-   * and carries no asset id. `busy.preparing` drives the visible wait state.
-   */
+  /** Enter an editing mode by copying the staged output to inputs inside Modal. */
   async function editFromOutput(mode) {
     const job = stageJob.value
     if (!job?.video_url) {
@@ -490,12 +485,9 @@ export function useStudioRuntime(options = {}) {
     busy.preparing = true
     setMode(mode)
     try {
-      attachments.source = await uploadFromOutput(
-        job.video_url,
-        `${job.id}.mp4`,
-        phase => setNotice(`准备源视频：${phase === 'fetching' ? '下载输出' : '重新上传'}`),
-        client
-      )
+      setNotice('准备源视频：云端复用输出')
+      const asset = await client.reuseOutput(job.id)
+      attachments.source = { ...asset, kind: asset.kind || 'video' }
       setNotice(`已载入源视频，可直接${mode === 'retake' ? '重拍' : '延长'}`)
       return { ok: true }
     } catch (error) {
@@ -508,8 +500,14 @@ export function useStudioRuntime(options = {}) {
   }
 
   /** Copy a past job's parameters back into the composer. */
-  function reuseJob(jobId) {
-    const job = jobs.value.find(item => item.id === jobId)
+  async function reuseJob(jobId) {
+    let job = jobs.value.find(item => item.id === jobId)
+    try {
+      job = await client.getJob(jobId)
+    } catch (error) {
+      setNotice(`载入参数失败：${error.message}`, 'error')
+      return
+    }
     if (!job?.request) return
     const request = job.request
     const capability = getModeCapabilities(request.mode)

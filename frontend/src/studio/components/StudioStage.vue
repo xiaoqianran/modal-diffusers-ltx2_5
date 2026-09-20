@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 
 import { JOB_STATUS, isPending } from '../model/jobs.js'
+import { isStillMode } from '../model/modes.js'
 import { describeJob, describePerformance } from '../model/selectors.js'
 
 const props = defineProps({
@@ -16,6 +17,22 @@ const infoOpen = ref(false)
 
 const percent = job => Math.round((job?.progress || 0) * 100)
 
+function generationLabel(job) {
+  return isStillMode(job?.request?.mode) ? 'Generating image' : 'Generating video'
+}
+
+function generationDetail(job) {
+  const request = job?.request || {}
+  if (isStillMode(request.mode)) {
+    return request.width && request.height ? `${request.width}×${request.height}` : 'LTX-2.5'
+  }
+
+  const parts = []
+  if (request.num_frames) parts.push(`${request.num_frames} frames`)
+  if (request.fps) parts.push(`${request.fps} fps`)
+  return parts.join(' · ') || 'LTX-2.5'
+}
+
 function onDrop(event) {
   const file = event.dataTransfer?.files?.[0]
   if (file) emit('drop', file)
@@ -29,53 +46,70 @@ function onDrop(event) {
         <span>{{ props.job ? describeJob(props.job) : 'LTX 2.5' }}</span>
       </div>
 
-      <div v-if="!props.job" class="viewport viewport-empty">
-        <div class="stage-state">
-          <p class="stage-hint-title">准备就绪</p>
-          <small>在下方描述一个镜头，或把图片 / 视频拖到这里开始。</small>
-        </div>
-      </div>
-
-      <div
-        v-else
-        class="viewport"
-        :class="{ 'viewport-image': Boolean(props.job.image_url) }"
-      >
-        <video
-          v-if="props.job.video_url"
-          class="stage-media"
-          controls
-          preload="metadata"
-          :src="props.job.video_url"
-        />
-        <img
-          v-else-if="props.job.image_url"
-          class="stage-media"
-          :src="props.job.image_url"
-          alt="生成结果"
-          loading="lazy"
-        />
-        <div v-else-if="isPending(props.job)" class="stage-state">
-          <p>正在提交</p>
-          <small>任务已加入队列</small>
-        </div>
-        <div v-else-if="props.job.status === JOB_STATUS.QUEUED" class="stage-state">
-          <p>排队中</p>
-          <small>队列位置 #{{ props.queuePosition }}</small>
-        </div>
-        <div v-else-if="props.job.status === JOB_STATUS.RUNNING" class="stage-state stage-running">
-          <p>生成中</p>
-          <strong class="stage-percent">{{ percent(props.job) }}%</strong>
-          <div class="progress">
-            <div class="progress-bar" :style="{ width: percent(props.job) + '%' }" />
+      <div class="viewport-slot">
+        <div v-if="!props.job" class="viewport viewport-empty">
+          <div class="stage-state">
+            <p class="stage-hint-title">准备就绪</p>
+            <small>在下方描述一个镜头，或把图片 / 视频拖到这里开始。</small>
           </div>
         </div>
-        <div v-else-if="props.job.status === JOB_STATUS.FAILED" class="stage-state stage-failed">
-          <p>生成失败</p>
-          <small>{{ props.job.error || '' }}</small>
-        </div>
-        <div v-else class="stage-state">
-          <p>已取消</p>
+
+        <div
+          v-else
+          class="viewport"
+          :class="{ 'viewport-image': Boolean(props.job.image_url) }"
+        >
+          <video
+            v-if="props.job.video_url"
+            class="stage-media"
+            controls
+            preload="metadata"
+            :src="props.job.video_url"
+          />
+          <img
+            v-else-if="props.job.image_url"
+            class="stage-media"
+            :src="props.job.image_url"
+            alt="生成结果"
+            loading="lazy"
+          />
+          <div v-else-if="isPending(props.job)" class="stage-state">
+            <p>正在提交</p>
+            <small>任务已加入队列</small>
+          </div>
+          <div v-else-if="props.job.status === JOB_STATUS.QUEUED" class="stage-state">
+            <p>排队中</p>
+            <small>队列位置 #{{ props.queuePosition }}</small>
+          </div>
+          <template v-else-if="props.job.status === JOB_STATUS.RUNNING">
+            <div class="canvas-run-head" aria-hidden="true">
+              <span class="run-status">
+                <i class="run-dot" />
+                Generating
+              </span>
+              <span class="run-percent-small">{{ percent(props.job) }}%</span>
+            </div>
+
+            <div class="stage-state generation-hud">
+              <strong class="stage-percent">{{ percent(props.job) }}%</strong>
+              <p>{{ generationLabel(props.job) }}</p>
+              <small>{{ generationDetail(props.job) }}</small>
+            </div>
+
+            <div class="canvas-progress-rail" aria-hidden="true">
+              <div
+                class="canvas-progress-fill"
+                :style="{ width: percent(props.job) + '%' }"
+              />
+            </div>
+          </template>
+          <div v-else-if="props.job.status === JOB_STATUS.FAILED" class="stage-state stage-failed">
+            <p>生成失败</p>
+            <small>{{ props.job.error || '' }}</small>
+          </div>
+          <div v-else class="stage-state">
+            <p>已取消</p>
+          </div>
         </div>
       </div>
 

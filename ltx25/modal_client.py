@@ -15,6 +15,7 @@ from typing import Any
 
 import modal
 
+from .media_store import MediaStoreError, create_media_store, media_content_type
 from .schemas import GenerateRequest, LoraResponse
 
 
@@ -58,6 +59,7 @@ class ModalClient:
 
         self.state_volume = modal.Volume.from_name(STATE_VOLUME_NAME)
         self.job_store = modal.Dict.from_name(JOB_DICT_NAME)
+        self.media_store = create_media_store(self.state_volume)
 
         worker_cls = modal.Cls.from_name(self.app_name, "LTX25Worker")
         self.worker = worker_cls()
@@ -90,8 +92,33 @@ class ModalClient:
         return f"asset:{asset_id}"
 
     @staticmethod
+    def _upload_key(asset_id: str) -> str:
+        return f"upload:{asset_id}"
+
+    @staticmethod
     def _public_job(record: dict[str, Any]) -> dict[str, Any]:
-        return {name: value for name, value in record.items() if name != "call_id"}
+        public = {
+            name: value
+            for name, value in record.items()
+            if name not in {"call_id", "video_key", "image_key"}
+        }
+        video_key = record.get("video_key")
+        image_key = record.get("image_key")
+        if isinstance(video_key, str) and video_key:
+            public["video_url"] = f"/outputs/{Path(video_key).name}"
+        if isinstance(image_key, str) and image_key:
+            public["image_url"] = f"/outputs/{Path(image_key).name}"
+        return public
+
+    @staticmethod
+    def _job_summary(record: dict[str, Any]) -> dict[str, Any]:
+        public = ModalClient._public_job(record)
+        request = public.get("request") or {}
+        public["request"] = {
+            key: request.get(key)
+            for key in ("mode", "prompt", "width", "height", "num_frames", "fps", "steps", "upscale")
+        }
+        return public
 
     def _save(self, record: dict[str, Any]) -> dict[str, Any]:
         record["updated_at"] = self._utc_now()
@@ -126,6 +153,16 @@ class ModalClient:
             current["error"] = f"Modal worker failed: {type(exc).__name__}: {exc}"
             self._save(current)
         return current
+
+    def transfer_metrics(self) -> dict[str, dict[str, int | float]]:
+        return self.media_store.metrics()
+
+    def media_info(self) -> dict[str, Any]:
+        return {
+            "backend": self.media_store.backend,
+            "direct_upload": self.media_store.direct_upload,
+            "direct_download": self.media_store.direct_download,
+        }
 
     def _refresh(self, record: dict[str, Any]) -> dict[str, Any]:
         if record.get("status") not in ACTIVE_STATUSES:
@@ -279,6 +316,9 @@ class ModalClient:
             for item in records[: min(max(limit, 1), 200)]
         ]
 
+    def list_job_summaries(self, session_number: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        return [self._job_summary(item) for item in self.list_jobs(session_number, limit)]
+
     def delete_job(self, job_id: str) -> bool:
         record = self._get_record(job_id)
         if not record:
@@ -346,23 +386,183 @@ class ModalClient:
         return {"interrupted": False, "current_job_id": None, "requested_job_id": job_id}
 
     def upload_file(self, local_path: Path, remote_path: str) -> None:
-        with self.state_volume.batch_upload(force=True) as batch:
-            batch.put_file(str(local_path), remote_path)
+        self.media_store.upload_local(local_path, remote_path)
 
-    def register_asset(self, asset_id: str, remote_path: str) -> None:
-        self.job_store.put(
-            self._asset_key(asset_id),
-            {
-                "remote_path": remote_path,
-                "uploaded_at": time.time(),
-            },
+    def prepare_asset_upload(
+        self,
+        *,
+        filename: str,
+        content_type: str | None,
+        size: int,
+        kind: str,
+        suffix: str,
+    ) -> dict[str, Any]:
+        asset_id = uuid.uuid4().hex
+        key = f"inputs/{asset_id}{suffix}"
+        resolved_content_type = media_content_type(filename, content_type)
+        plan = self.media_store.prepare_upload(
+            key=key,
+            content_type=resolved_content_type,
+            size=size,
         )
+        intent = {
+            "asset_id": asset_id,
+            "key": key,
+            "filename": filename,
+            "content_type": resolved_content_type,
+            "size": size,
+            "kind": kind,
+            "mode": plan["mode"],
+            "upload_id": plan.get("upload_id"),
+            "created_at": time.time(),
+        }
+        self.job_store.put(self._upload_key(asset_id), intent)
+        result = {
+            "asset_id": asset_id,
+            "filename": filename,
+            "kind": kind,
+            "size": size,
+            "backend": self.media_store.backend,
+            **plan,
+        }
+        if plan["mode"] == "proxy":
+            result["method"] = "PUT"
+            result["url"] = f"/api/assets/{asset_id}/content"
+        return result
+
+    def get_upload_intent(self, asset_id: str) -> dict[str, Any] | None:
+        return self.job_store.get(self._upload_key(asset_id))
+
+    def upload_proxy_file(self, asset_id: str, local_path: Path) -> None:
+        intent = self.get_upload_intent(asset_id)
+        if not intent or intent.get("mode") != "proxy":
+            raise FileNotFoundError(asset_id)
+        actual = local_path.stat().st_size
+        if actual != int(intent["size"]):
+            raise MediaStoreError(
+                f"Uploaded size mismatch: expected {intent['size']}, got {actual}"
+            )
+        self.media_store.upload_local(local_path, intent["key"])
+
+    def complete_asset_upload(
+        self,
+        asset_id: str,
+        parts: list[dict[str, Any]] | None = None,
+        client_upload_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        intent = self.get_upload_intent(asset_id)
+        if not intent:
+            completed = self.job_store.get(self._asset_key(asset_id))
+            if isinstance(completed, dict) and all(
+                completed.get(name) is not None for name in ("kind", "filename", "size")
+            ):
+                return {
+                    "id": asset_id,
+                    "kind": completed["kind"],
+                    "filename": completed["filename"],
+                    "size": int(completed["size"]),
+                }
+            raise FileNotFoundError(asset_id)
+        actual = self.media_store.complete_upload(
+            key=intent["key"],
+            expected_size=int(intent["size"]),
+            upload_id=intent.get("upload_id"),
+            parts=parts,
+        )
+        self.media_store.record_client_upload(client_upload_seconds)
+        try:
+            self.register_asset(
+                asset_id,
+                intent["key"],
+                kind=intent["kind"],
+                filename=intent["filename"],
+                size=actual,
+            )
+        except Exception:
+            # Keep both the durable object and upload intent. A transient Dict
+            # failure can then retry registration without retransmitting bytes.
+            raise
+        self.job_store.pop(self._upload_key(asset_id), None)
+        return {
+            "id": asset_id,
+            "kind": intent["kind"],
+            "filename": intent["filename"],
+            "size": actual,
+        }
+
+    def abort_asset_upload(self, asset_id: str) -> bool:
+        intent = self.get_upload_intent(asset_id)
+        if not intent:
+            return False
+        self.media_store.abort_upload(
+            key=intent["key"],
+            upload_id=intent.get("upload_id"),
+        )
+        self.media_store.remove(intent["key"])
+        self.job_store.pop(self._upload_key(asset_id), None)
+        return True
+
+    def copy_output_to_input(self, job_id: str) -> dict[str, Any]:
+        """Expose a completed video output as a new input object without WAN round-trips."""
+        record = self._get_record(job_id)
+        if not record or record.get("status") != "completed":
+            raise FileNotFoundError(job_id)
+
+        source = record.get("video_key")
+        if not source and record.get("video_url"):
+            source = f"outputs/{Path(record['video_url']).name}"
+        if not isinstance(source, str) or not source:
+            raise FileNotFoundError(job_id)
+        filename = Path(source).name
+        if Path(filename).name != filename or Path(filename).suffix.lower() != ".mp4":
+            raise ValueError("Job output is not a reusable MP4")
+
+        asset_id = uuid.uuid4().hex
+        destination = f"inputs/{asset_id}.mp4"
+        size = self.media_store.copy(source, destination)
+
+        try:
+            self.register_asset(
+                asset_id,
+                destination,
+                kind="video",
+                filename=filename,
+                size=size,
+            )
+        except Exception:
+            self.media_store.remove(destination)
+            raise
+
+        return {
+            "id": asset_id,
+            "kind": "video",
+            "filename": filename,
+            "size": size,
+        }
+
+    def register_asset(
+        self,
+        asset_id: str,
+        remote_path: str,
+        *,
+        kind: str | None = None,
+        filename: str | None = None,
+        size: int | None = None,
+    ) -> None:
+        record: dict[str, Any] = {
+            "key": remote_path,
+            "uploaded_at": time.time(),
+        }
+        if kind is not None:
+            record["kind"] = kind
+        if filename is not None:
+            record["filename"] = filename
+        if size is not None:
+            record["size"] = int(size)
+        self.job_store.put(self._asset_key(asset_id), record)
 
     def remove_input(self, remote_path: str) -> None:
-        try:
-            self.state_volume.remove_file(remote_path)
-        except FileNotFoundError:
-            pass
+        self.media_store.remove(remote_path)
 
     @staticmethod
     def _request_asset_ids(request: dict[str, Any]) -> set[str]:
@@ -395,14 +595,26 @@ class ModalClient:
             uploaded_at = float(value.get("uploaded_at") or 0)
             if asset_id in active_assets or now - uploaded_at < max_age_seconds:
                 continue
-            remote_path = value.get("remote_path")
+            remote_path = value.get("key") or value.get("remote_path")
             if isinstance(remote_path, str) and remote_path:
-                try:
-                    self.state_volume.remove_file(remote_path)
-                except FileNotFoundError:
-                    pass
+                self.media_store.remove(remote_path)
             self.job_store.pop(key, None)
             removed += 1
+
+        for key, value in list(self.job_store.items()):
+            if not isinstance(key, str) or not key.startswith("upload:") or not isinstance(value, dict):
+                continue
+            created_at = float(value.get("created_at") or 0)
+            if now - created_at < max_age_seconds:
+                continue
+            self.media_store.abort_upload(
+                key=value.get("key") or "",
+                upload_id=value.get("upload_id"),
+            )
+            media_key = value.get("key")
+            if isinstance(media_key, str) and media_key:
+                self.media_store.remove(media_key)
+            self.job_store.pop(key, None)
         return removed
 
     def download_output(self, filename: str) -> Path:
@@ -411,30 +623,16 @@ class ModalClient:
 
         self.output_cache.mkdir(parents=True, exist_ok=True)
         target = self.output_cache / filename
-        if target.is_file():
-            return target
-
         with self._output_lock:
-            if target.is_file():
-                return target
+            return self.media_store.download_to(f"outputs/{filename}", target)
 
-            temporary = target.with_suffix(target.suffix + ".part")
-            try:
-                with temporary.open("wb") as output:
-                    for chunk in self.state_volume.read_file(f"outputs/{filename}"):
-                        output.write(chunk)
-                temporary.replace(target)
-            except Exception:
-                temporary.unlink(missing_ok=True)
-                raise
-
-        return target
+    def output_delivery_url(self, filename: str, *, method: str = "GET") -> str | None:
+        if Path(filename).name != filename:
+            raise ValueError("Invalid output filename")
+        return self.media_store.delivery_url(f"outputs/{filename}", method=method)
 
     def remove_output(self, filename: str) -> None:
-        try:
-            self.state_volume.remove_file(f"outputs/{filename}")
-        except FileNotFoundError:
-            pass
+        self.media_store.remove(f"outputs/{filename}")
         (self.output_cache / filename).unlink(missing_ok=True)
 
     def list_loras(self) -> list[LoraResponse]:
