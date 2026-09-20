@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from ltx25.media_store import S3MediaStore, create_media_store
 
 
@@ -195,6 +197,29 @@ def test_s3_copy_is_server_side_and_delivery_urls_are_method_specific():
     assert ("copy_object", "outputs/job.mp4", "inputs/copy.mp4") in client.calls
     assert "/get_object/" in get_url
     assert "/head_object/" in head_url
+
+
+def test_s3_stat_size_only_maps_real_missing_objects_to_file_not_found():
+    client = FakeS3()
+    store = make_store(client)
+
+    class S3Error(RuntimeError):
+        def __init__(self, status, code):
+            super().__init__(code)
+            self.response = {
+                "ResponseMetadata": {"HTTPStatusCode": status},
+                "Error": {"Code": code},
+            }
+
+    client.head_object = lambda **_: (_ for _ in ()).throw(S3Error(404, "NoSuchKey"))
+    with pytest.raises(FileNotFoundError):
+        store.stat_size("missing.mp4")
+
+    denied = S3Error(403, "AccessDenied")
+    client.head_object = lambda **_: (_ for _ in ()).throw(denied)
+    with pytest.raises(S3Error) as raised:
+        store.stat_size("private.mp4")
+    assert raised.value is denied
 
 
 def test_s3_local_upload_and_download_support_concat_cache(tmp_path: Path):

@@ -107,8 +107,73 @@ def make_client(tmp_path: Path):
     control._output_lock = threading.Lock()
     control._session_lock = threading.Lock()
     control._admission_lock = threading.RLock()
+    control._active_index_initialized = False
     control.job_store.put(control._active_jobs_key(), [])
     return control
+
+
+def test_constructor_does_not_hydrate_modal_state(monkeypatch, tmp_path):
+    class NoIoStore:
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("constructor must not read Modal Dict")
+
+        def items(self):
+            raise AssertionError("constructor must not scan Modal Dict")
+
+        def put(self, *_args, **_kwargs):
+            raise AssertionError("constructor must not write Modal Dict")
+
+    volume = Volume()
+    store = NoIoStore()
+    media = MediaStorage(
+        stores={"volume": VolumeMediaStore(volume)},
+        primary_id="volume",
+    )
+    worker = SimpleNamespace(
+        generate=SimpleNamespace(),
+        ready=SimpleNamespace(),
+    )
+
+    monkeypatch.setenv("LTX25_LOCAL_CACHE", str(tmp_path))
+    monkeypatch.setattr(modal_client_module.modal.Volume, "from_name", lambda *_a, **_k: volume)
+    monkeypatch.setattr(modal_client_module.modal.Dict, "from_name", lambda *_a, **_k: store)
+    monkeypatch.setattr(modal_client_module.modal.Cls, "from_name", lambda *_a, **_k: lambda: worker)
+    monkeypatch.setattr(modal_client_module, "create_media_storage", lambda _volume: media)
+
+    control = ModalClient()
+
+    assert control.job_store is store
+    assert control._active_index_initialized is False
+
+
+def test_active_index_is_lazy_backfilled_once_and_repairs_shape(tmp_path):
+    control = make_client(tmp_path)
+    control.job_store.pop(control._active_jobs_key(), None)
+    control.job_store.put(
+        "job:queued",
+        {"id": "queued", "status": "queued"},
+    )
+    control.job_store.put(
+        "job:done",
+        {"id": "done", "status": "completed"},
+    )
+    control.job_store.items_calls = 0
+
+    assert control.queue_stats()["active"] == 1
+    assert control.job_store.get(control._active_jobs_key()) == ["queued"]
+    assert control.job_store.items_calls == 1
+
+    # Subsequent queue reads stay on the compact index and do not rescan.
+    assert control.queue_stats()["active"] == 1
+    assert control.job_store.items_calls == 1
+
+    # A malformed persisted index is normalized without a global job scan.
+    control._active_index_initialized = False
+    control.job_store.put(control._active_jobs_key(), ["queued", "", "queued", 123])
+    control.job_store.items_calls = 0
+    control.queue_stats()
+    assert control.job_store.get(control._active_jobs_key()) == ["queued"]
+    assert control.job_store.items_calls == 0
 
 
 def test_create_job_does_not_overwrite_fast_worker_state(tmp_path):

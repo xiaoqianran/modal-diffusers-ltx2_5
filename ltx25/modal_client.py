@@ -80,16 +80,10 @@ class ModalClient:
         self._output_lock = threading.Lock()
         self._session_lock = threading.Lock()
         self._admission_lock = threading.RLock()
-        if self.job_store.get(self._active_jobs_key()) is None:
-            active = [
-                key.removeprefix("job:")
-                for key, value in self.job_store.items()
-                if isinstance(key, str)
-                and key.startswith("job:")
-                and isinstance(value, dict)
-                and value.get("status") in ACTIVE_STATUSES
-            ]
-            self.job_store.put(self._active_jobs_key(), active)
+        # Modal object handles are intentionally cheap/lazy at construction
+        # time. Do not hydrate the Dict here: importing the local API must work
+        # without Modal credentials (for CI, tooling, schema tests, etc.).
+        self._active_index_initialized = False
 
     @staticmethod
     def _utc_now() -> str:
@@ -122,6 +116,42 @@ class ModalClient:
     @staticmethod
     def _active_jobs_key() -> str:
         return "active:jobs"
+
+    def _ensure_active_index(self) -> None:
+        """Hydrate/backfill the compact active-job index on first real use.
+
+        Older deployments may not have the index yet, and partially-written or
+        manually-edited state may contain the wrong shape. Repair either case
+        once, then keep the fast indexed path for subsequent queue operations.
+        """
+        if getattr(self, "_active_index_initialized", False):
+            return
+        with self._admission_lock:
+            if getattr(self, "_active_index_initialized", False):
+                return
+
+            current = self.job_store.get(self._active_jobs_key())
+            if isinstance(current, list):
+                normalized: list[str] = []
+                seen: set[str] = set()
+                for job_id in current:
+                    if isinstance(job_id, str) and job_id and job_id not in seen:
+                        normalized.append(job_id)
+                        seen.add(job_id)
+                if normalized != current:
+                    self.job_store.put(self._active_jobs_key(), normalized)
+            else:
+                normalized = [
+                    key.removeprefix("job:")
+                    for key, value in self.job_store.items()
+                    if isinstance(key, str)
+                    and key.startswith("job:")
+                    and isinstance(value, dict)
+                    and value.get("status") in ACTIVE_STATUSES
+                ]
+                self.job_store.put(self._active_jobs_key(), normalized)
+
+            self._active_index_initialized = True
 
     @staticmethod
     def _public_job(record: dict[str, Any]) -> dict[str, Any]:
@@ -176,12 +206,14 @@ class ModalClient:
 
     def _add_active_job(self, job_id: str) -> None:
         with self._admission_lock:
+            self._ensure_active_index()
             job_ids = self.job_store.get(self._active_jobs_key()) or []
             if job_id not in job_ids:
                 self.job_store.put(self._active_jobs_key(), [*job_ids, job_id])
 
     def _remove_active_job(self, job_id: str) -> None:
         with self._admission_lock:
+            self._ensure_active_index()
             job_ids = self.job_store.get(self._active_jobs_key()) or []
             next_ids = [item for item in job_ids if item != job_id]
             self.job_store.put(self._active_jobs_key(), next_ids)
@@ -213,6 +245,7 @@ class ModalClient:
 
     def queue_stats(self) -> dict[str, int]:
         with self._admission_lock:
+            self._ensure_active_index()
             queued = 0
             running = 0
             job_ids = self.job_store.get(self._active_jobs_key()) or []

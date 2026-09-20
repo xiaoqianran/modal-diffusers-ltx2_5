@@ -6,12 +6,13 @@ job state, worker lifecycle, and Volume access live in modal_client.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import subprocess
 import tempfile
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
@@ -47,6 +48,7 @@ from .modal_client import (
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".gif"}
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac"}
+logger = logging.getLogger(__name__)
 
 modal_client = ModalClient()
 CACHE_ROOT = modal_client.cache_root
@@ -74,7 +76,12 @@ async def _keep_warm_loop() -> None:
     interval = max(10, min(modal_client.warm_lease_seconds // 3, 30))
     while True:
         await asyncio.sleep(interval)
-        await asyncio.to_thread(modal_client.maintain_keep_warm)
+        try:
+            await asyncio.to_thread(modal_client.maintain_keep_warm)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("keep-warm maintenance failed; retrying on next tick", exc_info=True)
 
 
 @asynccontextmanager
@@ -96,6 +103,8 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         keep_warm_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await keep_warm_task
         try:
             await asyncio.to_thread(modal_client.set_idle_window, 2)
         except Exception:

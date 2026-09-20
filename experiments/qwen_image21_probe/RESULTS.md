@@ -5,6 +5,7 @@ Measured on Modal using `NVIDIA RTX PRO 6000 Blackwell Server Edition`.
 Configuration:
 
 - `Qwen/Qwen-Image-2.1`
+- model revision `b3179ad355be050328e483a9dfdd9e60cd62adfa`
 - BF16
 - Diffusers main (`0.41.0.dev0`, commit `80c7ed262aeffbeb43ef13ae04baeb9b84515a69`)
 - Transformers 5.17.0

@@ -7,6 +7,8 @@ This experiment intentionally does **not** modify the production LTX runtime or 
 ## Baseline
 
 - GPU: RTX PRO 6000 96 GB
+- Qwen model revision: `b3179ad355be050328e483a9dfdd9e60cd62adfa`
+- Diffusers commit: `80c7ed262aeffbeb43ef13ae04baeb9b84515a69`
 - dtype: BF16
 - 40 steps
 - `true_cfg_scale=1.0`

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from io import BytesIO
@@ -232,6 +233,38 @@ def test_health_and_generation(client):
     assert reused.json()["kind"] == "video"
     assert test_client.delete(f"/api/jobs/{job['id']}").status_code == 204
     assert test_client.get(f"/api/jobs/{job['id']}").status_code == 404
+
+
+def test_keep_warm_loop_survives_transient_failure(monkeypatch, tmp_path):
+    control = FakeControl(tmp_path)
+    attempts = 0
+    sleeps = 0
+
+    def maintain():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient Modal failure")
+        return False
+
+    async def fake_sleep(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 3:
+            raise asyncio.CancelledError
+
+    async def fake_to_thread(func, *args):
+        return func(*args)
+
+    control.maintain_keep_warm = maintain
+    monkeypatch.setattr(api_module, "modal_client", control)
+    monkeypatch.setattr(api_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(api_module.asyncio, "to_thread", fake_to_thread)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(api_module._keep_warm_loop())
+
+    assert attempts == 2
 
 
 def test_queue_full_maps_to_http_429(client):

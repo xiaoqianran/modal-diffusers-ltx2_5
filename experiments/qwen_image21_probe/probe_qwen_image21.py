@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 
 MODEL_ID = "Qwen/Qwen-Image-2.1"
+MODEL_REVISION = "b3179ad355be050328e483a9dfdd9e60cd62adfa"
 
 
 def _gib(value: int | float) -> float:
@@ -50,12 +51,13 @@ class Result:
     output: str
 
 
-def load_pipeline(model_id: str = MODEL_ID):
+def load_pipeline(model_id: str = MODEL_ID, revision: str = MODEL_REVISION):
     from diffusers import QwenImage21Pipeline
 
     start = time.perf_counter()
     pipe = QwenImage21Pipeline.from_pretrained(
         model_id,
+        revision=revision,
         dtype=torch.bfloat16,
     ).to("cuda")
     torch.cuda.synchronize()
@@ -108,6 +110,7 @@ def run_case(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-id", default=MODEL_ID)
+    parser.add_argument("--revision", default=MODEL_REVISION)
     parser.add_argument("--outdir", default="experiments/qwen_image21_probe/runs/local")
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
@@ -120,13 +123,14 @@ def main() -> None:
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    pipe, load_seconds, resident = load_pipeline(args.model_id)
+    pipe, load_seconds, resident = load_pipeline(args.model_id, args.revision)
 
     report: dict[str, Any] = {
         "environment": {
             "python": platform.python_version(),
             "torch": torch.__version__,
             "model_id": args.model_id,
+            "revision": args.revision,
         },
         "load_seconds": load_seconds,
         "resident_memory": resident,

@@ -422,7 +422,15 @@ class S3MediaStore(MediaStore):
         try:
             head = self.client.head_object(Bucket=self.bucket, Key=key)
         except Exception as exc:
-            raise FileNotFoundError(key) from exc
+            response = getattr(exc, "response", None)
+            status = None
+            code = ""
+            if isinstance(response, dict):
+                status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+                code = str((response.get("Error") or {}).get("Code") or "")
+            if status == 404 or code in {"404", "NoSuchKey", "NotFound", "NoSuchObject"}:
+                raise FileNotFoundError(key) from exc
+            raise
         return int(head.get("ContentLength", 0))
 
     def download_to(self, key: str, target: Path) -> Path:

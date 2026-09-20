@@ -11,6 +11,9 @@ APP_NAME = "ltx25-qwen-image21-dual-probe"
 HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
 LTX_MODEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_MODEL_VOLUME", "ltx25-models")
 QWEN_CACHE_VOLUME_NAME = os.environ.get("QWEN_IMAGE21_CACHE_VOLUME", "qwen-image21-cache")
+QWEN_MODEL_ID = "Qwen/Qwen-Image-2.1"
+QWEN_MODEL_REVISION = "b3179ad355be050328e483a9dfdd9e60cd62adfa"
+DIFFUSERS_COMMIT = "80c7ed262aeffbeb43ef13ae04baeb9b84515a69"
 
 MODEL_ROOT = "/models/ltx25"
 PIPELINE_DIR = f"{MODEL_ROOT}/pipeline"
@@ -37,11 +40,11 @@ image = (
         index_url="https://download.pytorch.org/whl/cu130",
     )
     .pip_install(
-        "git+https://github.com/huggingface/diffusers.git",
-        "transformers>=5.0.0",
-        "accelerate>=1.4",
-        "safetensors>=0.4",
-        "huggingface-hub>=0.30",
+        f"git+https://github.com/huggingface/diffusers.git@{DIFFUSERS_COMMIT}",
+        "transformers==5.17.0",
+        "accelerate==1.15.0",
+        "safetensors==0.8.0",
+        "huggingface-hub==1.32.0",
         "Pillow>=10",
     )
     .pip_install(
@@ -137,7 +140,8 @@ class DualResidentProbe:
         qwen_started = time.perf_counter()
         try:
             self.qwen = QwenImage21Pipeline.from_pretrained(
-                "Qwen/Qwen-Image-2.1",
+                QWEN_MODEL_ID,
+                revision=QWEN_MODEL_REVISION,
                 dtype=torch.bfloat16,
             ).to("cuda")
         finally:
