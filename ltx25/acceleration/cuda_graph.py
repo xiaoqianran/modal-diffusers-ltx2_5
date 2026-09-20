@@ -68,6 +68,16 @@ class ForwardGraphRunner:
             torch.cuda.synchronize()
             print(f"[ltx25] cudagraph: reset ({n} captures dropped)", flush=True)
 
+    def stats(self) -> dict[str, int | bool]:
+        """Return cheap graph-cache counters for Director observability."""
+        return {
+            "enabled": self.enabled,
+            "captures": sum(1 for v in self._captures.values() if v is not _EAGER),
+            "eager_shapes": sum(1 for v in self._captures.values() if v is _EAGER),
+            "replays": self.replays,
+            "max_captures": self._max_captures,
+        }
+
     # -- internal ----------------------------------------------------------
     def _key(self, kwargs: dict) -> tuple | None:
         parts = []

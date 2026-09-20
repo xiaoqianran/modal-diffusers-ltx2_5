@@ -3,7 +3,7 @@ import { ref } from 'vue'
 
 import { JOB_STATUS, isPending } from '../model/jobs.js'
 import { isStillMode } from '../model/modes.js'
-import { describeJob, describePerformance } from '../model/selectors.js'
+import { describeDirectorPlan, describeJob, describePerformance } from '../model/selectors.js'
 
 const props = defineProps({
   job: { type: Object, default: null },
@@ -160,6 +160,7 @@ function onDrop(event) {
             <button class="stage-act" type="button" title="详细信息" @click="infoOpen = !infoOpen">···</button>
             <div v-if="infoOpen" class="popover">
               <span class="popover-note">{{ describeJob(props.job) }}</span>
+              <span v-if="describeDirectorPlan(props.job)" class="popover-note">{{ describeDirectorPlan(props.job) }}</span>
               <span class="popover-note">{{ isPending(props.job) ? '提交中' : 'ID ' + props.job.id }}</span>
               <span
                 v-for="item in describePerformance(props.job)"

@@ -65,7 +65,9 @@ Studio 启动时会显式获取 90 秒 warm lease，并每 30 秒续租；active
 `LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、
 `LTX25_MODAL_HF_SECRET` 覆盖。
 导演台请求支持 `engine=auto|ltx|qwen`。`auto` 会把纯 `t2i` 路由到 Qwen-Image 2.1，
-视频、参考/编辑和 LoRA 条件任务仍走 LTX；显式 `ltx/qwen` 始终优先于自动策略。
+视频、参考/编辑和 LoRA 条件任务仍走 LTX；显式 `ltx/qwen` 始终优先于自动策略。每个请求会先被纯函数
+编译为 `ExecutionPlan`，任务结果返回 `plan`（resolved engine / reason / resource class / acceleration）以及
+LTX 的实际 `graph` capture/replay counters，因此自动决策不会成为黑盒。
 
 ### 独立前端
 

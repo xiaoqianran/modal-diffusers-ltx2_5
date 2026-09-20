@@ -120,11 +120,35 @@ export function describeJob(job) {
   return parts.join(' · ')
 }
 
+/** Human-readable Director decision, kept separate from the request itself. */
+export function describeDirectorPlan(job) {
+  const plan = job?.plan
+  if (!plan?.engine) return ''
+  const labels = { ltx: 'LTX-2.5', qwen: 'Qwen-Image 2.1' }
+  const engine = labels[plan.engine] || String(plan.engine).toUpperCase()
+  const route = plan.requested_engine === 'auto' ? `Auto → ${engine}` : `Engine · ${engine}`
+  const reasons = {
+    'auto:pure_t2i': 'pure t2i',
+    'auto:pure_t2i:qwen_unavailable': 'Qwen unavailable · fallback',
+    'auto:pure_t2i:no_available_engine': 'no engine available',
+    'auto:ltx_capability': 'capability route',
+    'auto:ltx_capability:unavailable': 'LTX unavailable',
+    'explicit:ltx': 'explicit',
+    'explicit:qwen': 'explicit',
+    'explicit:ltx:unavailable': 'explicit · unavailable',
+    'explicit:qwen:unavailable': 'explicit · unavailable',
+  }
+  return `${route} · ${reasons[plan.reason] || plan.reason}`
+}
+
 /** Runtime metadata strings, shown only where there is room for them. */
 export function describePerformance(job) {
   const parts = []
   if (job?.generation_seconds != null) parts.push(`${job.generation_seconds.toFixed(2)}s`)
   if (job?.peak_vram_gb != null) parts.push(`${job.peak_vram_gb.toFixed(1)} GiB peak`)
+  if (job?.graph?.capture_delta > 0) parts.push('CUDA Graph · capture')
+  else if (job?.graph?.replay_delta > 0) parts.push('CUDA Graph · replay')
+  else if (job?.graph?.eager_shape_delta > 0) parts.push('CUDA Graph · eager fallback')
   return parts
 }
 

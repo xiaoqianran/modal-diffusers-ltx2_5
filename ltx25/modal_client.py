@@ -408,6 +408,8 @@ class ModalClient:
                 "updated_at": now,
                 "generation_seconds": None,
                 "peak_vram_gb": None,
+                "plan": None,
+                "graph": None,
                 "call_id": None,
             }
             self._save(record)

@@ -18,7 +18,7 @@ import {
 } from './jobs.js'
 import {
   selectStageJob, selectTakes, selectQueue, selectCounts, selectAvailableModes,
-  filterJobs, sortJobs, selectLibraryJobs, describeJob, describePerformance,
+  filterJobs, sortJobs, selectLibraryJobs, describeDirectorPlan, describeJob, describePerformance,
   clipDuration, selectJobActions, takeLabel,
 } from './selectors.js'
 import {
@@ -374,8 +374,16 @@ test('describeJob omits upscale scaling when disabled', () => {
   assert.match(describeJob(plain), /768×512/)
 })
 
-test('describePerformance returns both metrics', () => {
-  assert.deepEqual(describePerformance(job()), ['8.10s', '46.8 GiB peak'])
+test('describeDirectorPlan exposes auto routing without hiding the resolved engine', () => {
+  const routed = job({
+    plan: { requested_engine: 'auto', engine: 'qwen', reason: 'auto:pure_t2i' },
+  })
+  assert.equal(describeDirectorPlan(routed), 'Auto → Qwen-Image 2.1 · pure t2i')
+})
+
+test('describePerformance returns generation, VRAM and actual graph action', () => {
+  const graphed = job({ graph: { capture_delta: 0, replay_delta: 8, eager_shape_delta: 0 } })
+  assert.deepEqual(describePerformance(graphed), ['8.10s', '46.8 GiB peak', 'CUDA Graph · replay'])
 })
 
 test('describePerformance is empty without metrics', () => {

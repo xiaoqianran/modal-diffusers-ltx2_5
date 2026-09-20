@@ -67,7 +67,7 @@ ltx25/
 ├─ modal_client.py   # 本地 -> Modal：Job / Dict / warmup / cancel
 ├─ media_store.py    # 单物理媒体 backend：Volume / generic S3-compatible storage
 ├─ media_storage.py  # 稳定 store_id、primary/fallback 路由、MediaRef
-├─ director.py       # 常驻模型集合、engine 路由；不依赖 Modal/FastAPI
+├─ director.py       # Request -> ExecutionPlan 纯规划 + 常驻模型执行；不依赖 Modal/FastAPI
 ├─ runtime.py        # LTX generation workflow 与采样编排
 ├─ models.py         # 模型 load/unload、decoder、precision、加速安装
 ├─ encoding.py       # NVENC / ffmpeg 输出编码
@@ -85,12 +85,17 @@ scripts/             # 模型准备与工具
 tests/               # 行为 + 架构边界
 ```
 
-Director Runtime 的 `engine=auto` 会把无条件纯 `t2i` 路由到 Qwen；视频、参考/编辑、LoRA
-任务保持在 LTX。显式 `engine=ltx|qwen` 覆盖自动策略，其中 `qwen` 目前只允许纯 `t2i`。Modal worker 启动时按配置一次性加载 LTX-2.5
-NVFP4 与 Qwen-Image 2.1 BF16，之后 job 只做 engine dispatch，不做模型卸载/重载。
-Qwen 使用与现有 t2i 一致的最终尺寸语义：请求中的 base width/height 在 `upscale=true`
-时直接渲染为 2× 最终 PNG。双模型生产默认启用 LTX CUDA Graph，但将 capture cache 限制为 1 个 shape，
-避免多 shape graph pool 持续侵占 Qwen activation headroom。
+Director 的核心流现在是 **Request -> Plan -> Execute -> Observe**。`build_execution_plan()` 是纯函数：
+它只读取 `GenerateRequest + RuntimeSnapshot`，产出不可变 `ExecutionPlan`，不访问 CUDA、Modal、存储或模型对象。
+Plan 显式记录 requested/resolved engine、availability fallback、route reason、已验证资源 envelope 与 acceleration eligibility；
+`DirectorRuntime.execute()` 只执行这个 plan，不再在生成过程中偷偷改 engine。
+
+`engine=auto` 会把无条件纯 `t2i` 路由到 Qwen；视频、参考/编辑、LoRA 任务保持在 LTX。Qwen 不可用时，
+只有 `auto` 的纯 t2i 可以在规划阶段 fallback 到 LTX；显式 `engine=ltx|qwen` 永不静默 fallback。Modal worker
+启动时按配置一次性加载 LTX-2.5 NVFP4 与 Qwen-Image 2.1 BF16，之后 job 不做模型卸载/重载。
+Qwen 使用与现有 t2i 一致的最终尺寸语义：请求中的 base width/height 在 `upscale=true` 时直接渲染为 2× 最终 PNG。
+双模型生产默认启用 LTX CUDA Graph，但 capture cache 限制为 1 个 shape。Planner 只标记 `cuda_graph_eligible`；
+实际 capture/replay/eager fallback 由 LTX graph runner 执行，并通过 job 的 `graph` counters 返回。
 
 2026-09-21 RTX PRO 6000 96 GB 生产实测：双模型 idle 约 75.49 GiB reserved；同一
 512×288×121f / 8-step LTX workload 的 eager warm generation 为 7.60 s，单-shape graph replay

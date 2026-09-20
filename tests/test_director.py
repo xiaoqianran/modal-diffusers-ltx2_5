@@ -1,30 +1,104 @@
 import pytest
 from pydantic import ValidationError
 
-from ltx25.director import LTX_ENGINE, QWEN_ENGINE, qwen_output_size, resolve_engine
+from ltx25.director import (
+    LTX_ENGINE,
+    QWEN_ENGINE,
+    RuntimeSnapshot,
+    build_execution_plan,
+    qwen_output_size,
+)
 from ltx25.schemas import GenerateRequest
 
 
-def test_auto_engine_routes_pure_t2i_to_qwen():
+def runtime(*engines, graph=True, captures=1):
+    return RuntimeSnapshot(
+        available_engines=frozenset(engines),
+        ltx_cuda_graph_enabled=graph,
+        ltx_cuda_graph_max_captures=captures,
+    )
+
+
+def test_auto_pure_t2i_compiles_to_qwen_plan():
     request = GenerateRequest(mode="t2i", prompt="cinematic city", width=512, height=512)
 
-    assert request.engine == "auto"
-    assert resolve_engine(request) == QWEN_ENGINE
+    plan = build_execution_plan(request, runtime(LTX_ENGINE, QWEN_ENGINE))
+
+    assert plan.requested_engine == "auto"
+    assert plan.engine == QWEN_ENGINE
+    assert plan.fallback_engine == LTX_ENGINE
+    assert plan.fallback_applied is False
+    assert plan.reason == "auto:pure_t2i"
+    assert plan.resource_class == "qwen_verified_1024"
+    assert plan.acceleration == "qwen_default"
 
 
-def test_auto_engine_keeps_video_and_lora_work_on_ltx():
+def test_auto_t2i_falls_back_during_planning_when_qwen_is_unavailable():
+    request = GenerateRequest(mode="t2i", prompt="cinematic city", width=512, height=512)
+
+    plan = build_execution_plan(request, runtime(LTX_ENGINE))
+
+    assert plan.engine == LTX_ENGINE
+    assert plan.fallback_engine == LTX_ENGINE
+    assert plan.fallback_applied is True
+    assert plan.reason == "auto:pure_t2i:qwen_unavailable"
+    assert plan.acceleration == "ltx_cuda_graph_eligible"
+
+
+def test_auto_video_and_lora_compile_to_ltx():
     video = GenerateRequest(mode="t2av", prompt="cinematic city")
     styled = GenerateRequest(
         mode="t2i",
         prompt="cinematic city",
         loras=[{"id": "style.safetensors", "strength": 1.0}],
     )
+    snapshot = runtime(LTX_ENGINE, QWEN_ENGINE)
 
-    assert resolve_engine(video) == LTX_ENGINE
-    assert resolve_engine(styled) == LTX_ENGINE
+    video_plan = build_execution_plan(video, snapshot)
+    styled_plan = build_execution_plan(styled, snapshot)
+
+    assert video_plan.engine == LTX_ENGINE
+    assert video_plan.reason == "auto:ltx_capability"
+    assert video_plan.acceleration == "ltx_cuda_graph_eligible"
+    assert styled_plan.engine == LTX_ENGINE
+    assert styled_plan.acceleration == "ltx_eager_lora_safe"
 
 
-def test_qwen_t2i_routes_to_qwen_and_preserves_final_size_contract():
+def test_explicit_engine_never_silently_falls_back():
+    qwen = GenerateRequest(mode="t2i", engine="qwen", prompt="cinematic city")
+    ltx = GenerateRequest(mode="t2i", engine="ltx", prompt="cinematic city")
+
+    qwen_plan = build_execution_plan(qwen, runtime(LTX_ENGINE))
+    ltx_plan = build_execution_plan(ltx, runtime(LTX_ENGINE, QWEN_ENGINE))
+
+    assert qwen_plan.engine == QWEN_ENGINE
+    assert qwen_plan.fallback_engine is None
+    assert qwen_plan.fallback_applied is False
+    assert qwen_plan.reason == "explicit:qwen:unavailable"
+    assert ltx_plan.engine == LTX_ENGINE
+    assert ltx_plan.reason == "explicit:ltx"
+
+
+def test_qwen_verified_resource_envelopes_are_descriptive_not_predictive():
+    medium = GenerateRequest(
+        mode="t2i", prompt="city", width=768, height=512, upscale=True
+    )
+    large = GenerateRequest(
+        mode="t2i", prompt="city", width=960, height=544, upscale=True
+    )
+    snapshot = runtime(LTX_ENGINE, QWEN_ENGINE)
+
+    assert build_execution_plan(medium, snapshot).resource_class == "qwen_verified_1536x1024"
+    assert build_execution_plan(large, snapshot).resource_class == "qwen_unverified_large"
+
+
+def test_graph_disabled_compiles_ltx_to_eager():
+    request = GenerateRequest(mode="t2av", prompt="cinematic city")
+    plan = build_execution_plan(request, runtime(LTX_ENGINE, graph=False, captures=0))
+    assert plan.acceleration == "ltx_eager"
+
+
+def test_qwen_t2i_preserves_final_size_contract():
     request = GenerateRequest(
         mode="t2i",
         engine="qwen",
@@ -34,7 +108,6 @@ def test_qwen_t2i_routes_to_qwen_and_preserves_final_size_contract():
         steps=40,
     )
 
-    assert resolve_engine(request) == QWEN_ENGINE
     assert request.upscale is True
     assert qwen_output_size(request) == (1024, 1024)
 

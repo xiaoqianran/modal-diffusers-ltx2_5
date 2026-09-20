@@ -366,6 +366,13 @@ class DirectorWorker:
             return interrupted
 
         request = GenerateRequest.model_validate(request_payload)
+        plan = self.director.plan(request)
+        record = job_store.get(record_key) or record
+        record["plan"] = plan.as_dict()
+        record["engine"] = plan.engine
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        job_store.put(record_key, record)
+
         workspace = Path(f"/tmp/ltx25-jobs/{job_id}")
         input_dir = workspace / "inputs"
         shutil.rmtree(workspace, ignore_errors=True)
@@ -420,7 +427,7 @@ class DirectorWorker:
         input_staging_seconds = time.monotonic() - staging_started
         if request.mode in STILL_IMAGE_MODES:
             prefix = {"t2i": "t2i", "refine_image": "refine", "ref2i": "ref2i"}[request.mode]
-            if request.engine == "qwen":
+            if plan.engine == "qwen":
                 prefix = "qwen"
             target = Path(settings.output_dir) / f"{prefix}_{job_id}.png"
         else:
@@ -450,7 +457,9 @@ class DirectorWorker:
                 _honor_interrupt(job_id, current)
 
             try:
-                metrics = self.director.generate(request, target, progress, input_dir=input_dir) or {}
+                metrics = self.director.execute(
+                    plan, request, target, progress, input_dir=input_dir
+                ) or {}
                 generation_seconds = time.monotonic() - generation_started
                 interrupted = _honor_interrupt(job_id, record)
                 if interrupted is not None:
@@ -512,6 +521,8 @@ class DirectorWorker:
                     "generation_seconds": generation_seconds,
                     "peak_vram_gb": metrics.get("peak_vram_gb"),
                     "engine": metrics.get("engine"),
+                    "plan": metrics.get("plan", plan.as_dict()),
+                    "graph": metrics.get("graph"),
                     "timings": {
                         "queue_seconds": queue_seconds,
                         "state_reload_seconds": state_reload_seconds,

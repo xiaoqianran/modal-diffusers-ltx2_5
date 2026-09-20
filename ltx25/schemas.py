@@ -299,6 +299,8 @@ class JobResponse(BaseModel):
     video_url: str | None = None
     image_url: str | None = None
     engine: str | None = None
+    plan: dict[str, str | bool | None] | None = None
+    graph: dict[str, int | bool] | None = None
     request: GenerateRequest
     created_at: str
     updated_at: str
@@ -331,6 +333,8 @@ class JobSummaryResponse(BaseModel):
     video_url: str | None = None
     image_url: str | None = None
     engine: str | None = None
+    plan: dict[str, str | bool | None] | None = None
+    graph: dict[str, int | bool] | None = None
     request: JobRequestSummary
     created_at: str
     updated_at: str

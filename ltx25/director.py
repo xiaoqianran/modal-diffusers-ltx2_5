@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -21,19 +22,97 @@ LTX_ENGINE = "ltx"
 ProgressCallback = Callable[[float], None]
 
 
-def resolve_engine(request: GenerateRequest) -> str:
-    """Resolve a request to the best resident engine.
+@dataclass(frozen=True)
+class RuntimeSnapshot:
+    """Small immutable set of runtime facts available to the pure planner."""
 
-    Explicit engine selection always wins. Auto routes unconstrained text-to-image
-    work to Qwen and keeps video, reference/edit, and LoRA work on LTX.
+    available_engines: frozenset[str]
+    ltx_cuda_graph_enabled: bool = False
+    ltx_cuda_graph_max_captures: int = 0
+
+
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """Decision compiled before generation side effects.
+
+    ``fallback_engine`` is an availability fallback for ``engine=auto`` only; a
+    generation failure never silently reroutes an explicit or already-started job.
     """
-    if request.engine == "ltx":
-        return LTX_ENGINE
-    if request.engine == "qwen":
-        return QWEN_ENGINE
-    if request.mode == "t2i" and not request.conditions and not request.loras:
-        return QWEN_ENGINE
-    return LTX_ENGINE
+
+    requested_engine: str
+    engine: str
+    fallback_engine: str | None
+    fallback_applied: bool
+    reason: str
+    resource_class: str
+    acceleration: str
+
+    def as_dict(self) -> dict[str, str | bool | None]:
+        return asdict(self)
+
+
+def _qwen_resource_class(request: GenerateRequest) -> str:
+    width, height = qwen_output_size(request)
+    short, long = sorted((width, height))
+    if long <= 1024:
+        return "qwen_verified_1024"
+    if short <= 1024 and long <= 1536:
+        return "qwen_verified_1536x1024"
+    return "qwen_unverified_large"
+
+
+def _acceleration_for(request: GenerateRequest, engine: str, runtime: RuntimeSnapshot) -> str:
+    if engine == QWEN_ENGINE:
+        return "qwen_default"
+    if request.loras or request.upscale_method == "pixel":
+        return "ltx_eager_lora_safe"
+    if runtime.ltx_cuda_graph_enabled and runtime.ltx_cuda_graph_max_captures > 0:
+        return "ltx_cuda_graph_eligible"
+    return "ltx_eager"
+
+
+def build_execution_plan(request: GenerateRequest, runtime: RuntimeSnapshot) -> ExecutionPlan:
+    """Pure Request -> Plan compiler. It performs no GPU, model, storage, or Modal I/O."""
+    available = runtime.available_engines
+    requested = request.engine
+    fallback_engine: str | None = None
+    fallback_applied = False
+
+    if requested in {LTX_ENGINE, QWEN_ENGINE}:
+        engine = requested
+        reason = f"explicit:{engine}"
+        if engine not in available:
+            reason += ":unavailable"
+    elif request.mode == "t2i" and not request.conditions and not request.loras:
+        fallback_engine = LTX_ENGINE if LTX_ENGINE in available else None
+        if QWEN_ENGINE in available:
+            engine = QWEN_ENGINE
+            reason = "auto:pure_t2i"
+        elif fallback_engine is not None:
+            engine = fallback_engine
+            fallback_applied = True
+            reason = "auto:pure_t2i:qwen_unavailable"
+        else:
+            engine = QWEN_ENGINE
+            reason = "auto:pure_t2i:no_available_engine"
+    else:
+        engine = LTX_ENGINE
+        reason = "auto:ltx_capability"
+        if engine not in available:
+            reason += ":unavailable"
+
+    resource_class = (
+        _qwen_resource_class(request) if engine == QWEN_ENGINE else "ltx_default"
+    )
+    return ExecutionPlan(
+        requested_engine=requested,
+        engine=engine,
+        fallback_engine=fallback_engine,
+        fallback_applied=fallback_applied,
+        reason=reason,
+        resource_class=resource_class,
+        acceleration=_acceleration_for(request, engine, runtime),
+    )
 
 
 def qwen_output_size(request: GenerateRequest) -> tuple[int, int]:
@@ -130,7 +209,7 @@ class QwenImage21Generator:
 
 
 class DirectorRuntime:
-    """Own both resident engines and route explicit requests between them."""
+    """Own resident engines and execute immutable plans produced by the pure planner."""
 
     def __init__(self, config):
         from .runtime import LTXGenerator
@@ -160,6 +239,63 @@ class DirectorRuntime:
             engines.append(QWEN_ENGINE)
         return engines
 
+    def snapshot(self) -> RuntimeSnapshot:
+        graph = self._ltx_graph_stats()
+        return RuntimeSnapshot(
+            available_engines=frozenset(self.engines),
+            ltx_cuda_graph_enabled=bool(graph["enabled"]),
+            ltx_cuda_graph_max_captures=int(graph["max_captures"]),
+        )
+
+    def plan(self, request: GenerateRequest) -> ExecutionPlan:
+        return build_execution_plan(request, self.snapshot())
+
+    def _ltx_graph_stats(self) -> dict[str, int | bool]:
+        runner = getattr(self.ltx, "_graph_runner", None)
+        if runner is None:
+            return {
+                "enabled": False,
+                "captures": 0,
+                "eager_shapes": 0,
+                "replays": 0,
+                "max_captures": 0,
+            }
+        return runner.stats()
+
+    def execute(
+        self,
+        plan: ExecutionPlan,
+        request: GenerateRequest,
+        target: Path,
+        progress: ProgressCallback | None = None,
+        *,
+        input_dir: Path | None = None,
+    ) -> dict:
+        if plan.engine == QWEN_ENGINE:
+            if self.qwen is None:
+                raise RuntimeError("Execution plan selected unavailable Qwen-Image 2.1 engine")
+            metrics = self.qwen.generate(request, target, progress)
+            metrics["plan"] = plan.as_dict()
+            return metrics
+
+        if plan.engine != LTX_ENGINE:
+            raise RuntimeError(f"Execution plan selected unknown engine: {plan.engine}")
+
+        before = self._ltx_graph_stats()
+        metrics = self.ltx.generate(request, target, progress, input_dir=input_dir) or {}
+        after = self._ltx_graph_stats()
+        metrics["engine"] = LTX_ENGINE
+        metrics["plan"] = plan.as_dict()
+        metrics["graph"] = {
+            "enabled": after["enabled"],
+            "captures": after["captures"],
+            "capture_delta": int(after["captures"]) - int(before["captures"]),
+            "replay_delta": int(after["replays"]) - int(before["replays"]),
+            "eager_shape_delta": int(after["eager_shapes"]) - int(before["eager_shapes"]),
+            "max_captures": after["max_captures"],
+        }
+        return metrics
+
     def generate(
         self,
         request: GenerateRequest,
@@ -168,16 +304,11 @@ class DirectorRuntime:
         *,
         input_dir: Path | None = None,
     ) -> dict:
-        engine = resolve_engine(request)
-        if engine == QWEN_ENGINE:
-            if self.qwen is None:
-                if request.engine == "auto":
-                    engine = LTX_ENGINE
-                else:
-                    raise RuntimeError("Qwen-Image 2.1 engine is disabled")
-            else:
-                return self.qwen.generate(request, target, progress)
-
-        metrics = self.ltx.generate(request, target, progress, input_dir=input_dir) or {}
-        metrics["engine"] = LTX_ENGINE
-        return metrics
+        """Compatibility entry point; new worker code should plan once then execute."""
+        return self.execute(
+            self.plan(request),
+            request,
+            target,
+            progress,
+            input_dir=input_dir,
+        )
