@@ -190,6 +190,62 @@ async function testFinalizeRetriesWithoutReuploadingBytes() {
   assert.ok(!calls.some(call => call.init.method === 'DELETE'))
 }
 
+
+async function testFallbackAfterPrimaryTransferFailure() {
+  const calls = []
+  let primaryAttempts = 0
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url)
+    calls.push({ url: u, init })
+    if (/\/api\/assets\/prepare$/.test(u)) {
+      return json({
+        asset_id: 'f'.repeat(32),
+        filename: 'fallback.png',
+        kind: 'image',
+        size: 1,
+        backend: 's3',
+        mode: 'single',
+        method: 'PUT',
+        url: 'https://r2.test/fail',
+        headers: {},
+        parts: [],
+      }, 201)
+    }
+    if (u === 'https://r2.test/fail') {
+      primaryAttempts += 1
+      return json({ detail: 'r2 unavailable' }, 503)
+    }
+    if (/\/upload$/.test(u) && init.method === 'DELETE') return new Response(null, { status: 204 })
+    if (/\/fallback$/.test(u) && init.method === 'POST') {
+      return json({
+        asset_id: 'f'.repeat(32),
+        filename: 'fallback.png',
+        kind: 'image',
+        size: 1,
+        backend: 's3',
+        mode: 'single',
+        method: 'PUT',
+        url: 'https://minio.test/ok',
+        headers: {},
+        parts: [],
+      })
+    }
+    if (u === 'https://minio.test/ok') return new Response('ok', { status: 200 })
+    if (/\/complete$/.test(u)) {
+      return json({ id: 'f'.repeat(32), kind: 'image', filename: 'fallback.png', size: 1 })
+    }
+    throw new Error(`unexpected request: ${u}`)
+  }
+
+  const file = new File([new Uint8Array([1])], 'fallback.png', { type: 'image/png' })
+  const asset = await api.uploadAsset(file)
+
+  assert.equal(asset.id, 'f'.repeat(32))
+  assert.equal(primaryAttempts, 3)
+  assert.equal(calls.filter(call => call.url === 'https://minio.test/ok').length, 1)
+  assert.equal(calls.filter(call => /\/fallback$/.test(call.url)).length, 1)
+}
+
 await testSinglePut()
 console.log('  ok   single presigned PUT')
 await testMultipartPut()
@@ -200,4 +256,6 @@ await testFinalizeFailureDoesNotDeleteTransferredObject()
 console.log('  ok   finalize failure preserves transferred object')
 await testFinalizeRetriesWithoutReuploadingBytes()
 console.log('  ok   finalize retries without retransmitting bytes')
-console.log('\n5/5 passed')
+await testFallbackAfterPrimaryTransferFailure()
+console.log('  ok   primary retry then fallback upload')
+console.log('\n6/6 passed')

@@ -75,6 +75,21 @@ async function putBinary(url, body, headers = {}) {
   return response
 }
 
+async function putBinaryWithRetry(url, body, headers = {}, attempts = 3) {
+  let lastError = null
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await putBinary(url, body, headers)
+    } catch (error) {
+      lastError = error
+      const retryable = !(error instanceof ApiError) || error.status >= 500
+      if (!retryable || attempt + 1 >= attempts) break
+      await new Promise(resolve => setTimeout(resolve, 150 * (2 ** attempt)))
+    }
+  }
+  throw lastError
+}
+
 async function uploadMultipart(file, plan, concurrency = 4) {
   const queue = plan.parts.slice()
   const completed = []
@@ -84,7 +99,7 @@ async function uploadMultipart(file, plan, concurrency = 4) {
       const part = queue.shift()
       const start = (part.part_number - 1) * plan.part_size
       const end = Math.min(start + plan.part_size, file.size)
-      const response = await putBinary(part.url, file.slice(start, end))
+      const response = await putBinaryWithRetry(part.url, file.slice(start, end))
       const etag = response.headers.get('ETag') || response.headers.get('etag')
       if (!etag) {
         throw new ApiError(
@@ -149,7 +164,7 @@ export const api = {
    * media bytes never pass through the local FastAPI process.
    */
   async uploadAsset(file) {
-    const plan = await send('/api/assets/prepare', {
+    let plan = await send('/api/assets/prepare', {
       method: 'POST',
       body: {
         filename: file.name,
@@ -158,31 +173,56 @@ export const api = {
       },
     })
 
-    let transferComplete = false
-    try {
+    async function abortPlan(currentPlan) {
+      try {
+        await send(`/api/assets/${encodeURIComponent(currentPlan.asset_id)}/upload`, {
+          method: 'DELETE',
+        })
+      } catch {
+        // Best effort: compatible object stores can also expire incomplete multipart uploads by lifecycle.
+      }
+    }
+
+    async function transfer(currentPlan) {
       const uploadStarted = performance.now()
       let parts = []
-      if (plan.mode === 'multipart') {
-        parts = await uploadMultipart(file, plan)
+      if (currentPlan.mode === 'multipart') {
+        parts = await uploadMultipart(file, currentPlan)
       } else {
-        await putBinary(plan.url, file, plan.headers || {})
+        await putBinaryWithRetry(currentPlan.url, file, currentPlan.headers || {})
       }
-      transferComplete = true
-      const clientUploadSeconds = (performance.now() - uploadStarted) / 1000
-      return await finalizeUpload(plan.asset_id, {
+      return {
         parts,
-        client_upload_seconds: clientUploadSeconds,
+        clientUploadSeconds: (performance.now() - uploadStarted) / 1000,
+      }
+    }
+
+    let transferred = false
+    try {
+      let result
+      try {
+        result = await transfer(plan)
+      } catch (primaryError) {
+        try {
+          const fallbackPlan = await send(`/api/assets/${encodeURIComponent(plan.asset_id)}/fallback`, {
+            method: 'POST',
+          })
+          if (!fallbackPlan || !fallbackPlan.mode) throw new Error('Fallback upload plan is unavailable')
+          plan = fallbackPlan
+        } catch {
+          await abortPlan(plan)
+          throw primaryError
+        }
+        result = await transfer(plan)
+      }
+
+      transferred = true
+      return await finalizeUpload(plan.asset_id, {
+        parts: result.parts,
+        client_upload_seconds: result.clientUploadSeconds,
       })
     } catch (error) {
-      if (!transferComplete) {
-        try {
-          await send(`/api/assets/${encodeURIComponent(plan.asset_id)}/upload`, {
-            method: 'DELETE',
-          })
-        } catch {
-          // Best effort: compatible object stores can also expire incomplete multipart uploads by lifecycle.
-        }
-      }
+      if (!transferred) await abortPlan(plan)
       throw error
     }
   },

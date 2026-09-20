@@ -9,13 +9,16 @@ Browser -> FastAPI -> Modal Dict / Modal RPC
 Media data plane (Volume fallback)
 Browser -> FastAPI proxy -> Modal Volume -> GPU worker
 
-Media data plane (S3-compatible)
-Browser <--------------------> S3-compatible storage
-                                ^
-                                |
-                       CloudBucketMount
-                                |
-                           GPU worker
+Media data plane (routed S3-compatible)
+Browser <--------------------> primary store (R2)
+                                 |
+                                 | failover on transfer/write failure
+                                 v
+                              fallback (MinIO)
+
+GPU input fast path: primary R2 -> CloudBucketMount -> job-local namespace
+GPU fallback input:  MinIO -> S3 GET -> job-local namespace
+GPU output: local scratch -> MediaStorage -> primary/fallback
 ```
 
 Job records store stable object keys such as `outputs/<job>.mp4`. They never
@@ -148,6 +151,76 @@ LTX25_MODAL_MEDIA_SECRET=s3-media
 Long-lived credentials are intentionally kept out of git. The local copy lives
 in the ignored `.env` file; the GPU worker receives them from the Modal
 `s3-media` Secret.
+
+
+## Routed primary/fallback storage
+
+Production can configure multiple physical stores while keeping each adapter single-backend.
+`media_store.py` owns one Volume/S3 backend; `media_storage.py` owns stable routing.
+
+```text
+MediaRef(store_id, key)
+        |
+        v
+MediaStorage
+   |          |
+ primary   fallback
+   |          |
+  R2        MinIO
+```
+
+`store_id` is persisted with every uploaded asset and generated output. It is an opaque,
+stable identifier such as `r2` or `minio`, not the mutable role name `primary`/`fallback`.
+This means the deployment can swap roles later without invalidating historical metadata.
+
+Current production policy:
+
+```text
+primary  = Cloudflare R2
+fallback = SG-JP MinIO
+```
+
+Failover is deliberately **not replication**. A successful R2 write is not mirrored to MinIO.
+If historical-object read HA is required later, add replication as a separate subsystem rather
+than coupling it to the write-routing path.
+
+### Upload invariant
+
+One upload intent is pinned to exactly one store from prepare through complete. Browser PUTs
+retry the selected provider first. If byte transfer still fails, the browser requests a fresh
+fallback plan; the old multipart session is aborted best-effort and the file is retransmitted
+from the beginning. Multipart ETags are never reused across stores.
+
+### GPU input invariant
+
+`runtime.py` only consumes ordinary filesystem paths. The Modal deployment shell constructs a
+job-local input namespace under `/tmp/ltx25-jobs/<job>/inputs`: primary R2 objects may use a
+read-only CloudBucketMount fast path, while fallback objects are materialized locally through
+`MediaStorage.download_to()`. The generation core does not import storage or Modal APIs.
+
+### Routed configuration
+
+```text
+LTX25_MEDIA_PRIMARY_ID=r2
+LTX25_MEDIA_PRIMARY_BACKEND=s3
+LTX25_MEDIA_PRIMARY_S3_BUCKET=ltx25-media-r2
+LTX25_MEDIA_PRIMARY_S3_ENDPOINT_URL=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+LTX25_MEDIA_PRIMARY_S3_REGION=auto
+LTX25_MEDIA_PRIMARY_S3_ACCESS_KEY_ID=<key>
+LTX25_MEDIA_PRIMARY_S3_SECRET_ACCESS_KEY=<secret>
+
+LTX25_MEDIA_FALLBACK_ID=minio
+LTX25_MEDIA_FALLBACK_BACKEND=s3
+LTX25_MEDIA_FALLBACK_S3_BUCKET=ltx25-media
+LTX25_MEDIA_FALLBACK_S3_ENDPOINT_URL=https://minio.example.com
+LTX25_MEDIA_FALLBACK_S3_REGION=us-east-1
+LTX25_MEDIA_FALLBACK_S3_ACCESS_KEY_ID=<key>
+LTX25_MEDIA_FALLBACK_S3_SECRET_ACCESS_KEY=<secret>
+```
+
+The Modal worker secret also exposes the primary credentials as `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` for CloudBucketMount, plus both prefixed credential pairs for
+`MediaStorage`.
 
 ## Browser CORS
 

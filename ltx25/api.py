@@ -217,7 +217,7 @@ def upload_asset(file: UploadFile = File(...)):
         _validate_uploaded_media(local_path, kind, suffix)
 
         remote_path = f"inputs/{asset_id}{suffix}"
-        modal_client.upload_file(local_path, remote_path)
+        media_ref = modal_client.upload_file(local_path, remote_path)
         local_path.unlink(missing_ok=True)
         try:
             modal_client.register_asset(
@@ -226,6 +226,7 @@ def upload_asset(file: UploadFile = File(...)):
                 kind=kind,
                 filename=file.filename or local_path.name,
                 size=size,
+                store_id=media_ref.store_id,
             )
         except Exception as exc:
             try:
@@ -314,6 +315,18 @@ def prepare_asset_upload(request: AssetUploadPrepareRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Could not prepare media upload") from exc
+
+
+@app.post("/api/assets/{asset_id}/fallback", response_model=AssetUploadPrepareResponse)
+def prepare_asset_fallback(asset_id: str):
+    try:
+        return modal_client.prepare_asset_fallback(asset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Upload intent not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Could not prepare fallback media upload") from exc
 
 
 @app.put("/api/assets/{asset_id}/content", status_code=204)
@@ -452,7 +465,8 @@ def concat_jobs(request: ConcatRequest):
         if result.returncode != 0:
             target.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Video concatenation failed: {result.stderr[-500:]}")
-        modal_client.upload_file(target, f"outputs/{target.name}")
+        media_ref = modal_client.upload_file(target, f"outputs/{target.name}")
+        modal_client.register_output(target.name, media_ref, size=target.stat().st_size)
     finally:
         list_path.unlink(missing_ok=True)
 

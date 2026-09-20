@@ -20,10 +20,14 @@ KERNEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_KERNEL_VOLUME", "ltx25-kernels"
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
 MEDIA_BACKEND = os.environ.get("LTX25_MEDIA_BACKEND", "volume").strip().lower()
-MEDIA_BUCKET = os.environ.get("LTX25_S3_BUCKET")
-MEDIA_ENDPOINT_URL = os.environ.get("LTX25_S3_ENDPOINT_URL")
-MEDIA_REGION = os.environ.get("LTX25_S3_REGION", "auto")
-MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "s3-media")
+MEDIA_PRIMARY_ID = os.environ.get("LTX25_MEDIA_PRIMARY_ID", "").strip()
+MEDIA_PRIMARY_BACKEND = os.environ.get("LTX25_MEDIA_PRIMARY_BACKEND", "s3").strip().lower() if MEDIA_PRIMARY_ID else MEDIA_BACKEND
+MEDIA_PRIMARY_BUCKET = os.environ.get("LTX25_MEDIA_PRIMARY_S3_BUCKET") if MEDIA_PRIMARY_ID else os.environ.get("LTX25_S3_BUCKET")
+MEDIA_PRIMARY_ENDPOINT_URL = os.environ.get("LTX25_MEDIA_PRIMARY_S3_ENDPOINT_URL") if MEDIA_PRIMARY_ID else os.environ.get("LTX25_S3_ENDPOINT_URL")
+MEDIA_PRIMARY_REGION = os.environ.get("LTX25_MEDIA_PRIMARY_S3_REGION", "auto") if MEDIA_PRIMARY_ID else os.environ.get("LTX25_S3_REGION", "auto")
+MEDIA_FALLBACK_ID = os.environ.get("LTX25_MEDIA_FALLBACK_ID", "").strip()
+MEDIA_FALLBACK_BACKEND = os.environ.get("LTX25_MEDIA_FALLBACK_BACKEND", "s3").strip().lower()
+MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "media-storage")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -53,32 +57,27 @@ hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
 media_mount = None
 media_secret = None
 MEDIA_ROOT = "/data"
-if MEDIA_BACKEND == "s3":
-    if not MEDIA_BUCKET:
-        raise RuntimeError("LTX25_S3_BUCKET is required for object-storage media")
+if MEDIA_PRIMARY_BACKEND == "s3":
+    if not MEDIA_PRIMARY_BUCKET:
+        raise RuntimeError("Primary S3 bucket is required for object-storage media")
     media_secret = modal.Secret.from_name(
         MEDIA_SECRET_NAME,
         required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
     )
     mount_kwargs = {
-        "bucket_name": MEDIA_BUCKET,
+        "bucket_name": MEDIA_PRIMARY_BUCKET,
         "secret": media_secret,
-        # The worker only reads source media through Mountpoint. Generated
-        # outputs are uploaded with the S3 API after local mux/finalization.
         "read_only": True,
     }
-    if MEDIA_ENDPOINT_URL:
-        mount_kwargs["bucket_endpoint_url"] = MEDIA_ENDPOINT_URL
-        # Self-hosted S3 endpoints such as MinIO may not provide wildcard
-        # bucket DNS. Keep the bucket in the request path instead of resolving
-        # <bucket>.<endpoint>.
+    if MEDIA_PRIMARY_ENDPOINT_URL:
+        mount_kwargs["bucket_endpoint_url"] = MEDIA_PRIMARY_ENDPOINT_URL
         mount_kwargs["force_path_style"] = True
     media_mount = modal.CloudBucketMount(**mount_kwargs)
-    MEDIA_ROOT = "/media"
-elif MEDIA_BACKEND != "volume":
-    raise RuntimeError("LTX25_MEDIA_BACKEND must be volume or s3")
+    MEDIA_ROOT = "/media-primary"
+elif MEDIA_PRIMARY_BACKEND != "volume":
+    raise RuntimeError("Primary media backend must be volume or s3")
 
-WORKER_OUTPUT_DIR = "/data/outputs" if MEDIA_BACKEND == "volume" else "/tmp/ltx25-outputs"
+WORKER_OUTPUT_DIR = "/data/outputs" if MEDIA_PRIMARY_BACKEND == "volume" else "/tmp/ltx25-outputs"
 
 
 def _cancel_key(job_id: str) -> str:
@@ -200,9 +199,16 @@ GPU_ENV = {
     # these values are missing there, the code falls back to `volume` and the
     # serialized CloudBucketMount dependency graph no longer matches.
     "LTX25_MEDIA_BACKEND": MEDIA_BACKEND,
-    "LTX25_S3_BUCKET": MEDIA_BUCKET or "",
-    "LTX25_S3_ENDPOINT_URL": MEDIA_ENDPOINT_URL or "",
-    "LTX25_S3_REGION": MEDIA_REGION,
+    "LTX25_MEDIA_PRIMARY_ID": MEDIA_PRIMARY_ID,
+    "LTX25_MEDIA_PRIMARY_BACKEND": MEDIA_PRIMARY_BACKEND,
+    "LTX25_MEDIA_PRIMARY_S3_BUCKET": MEDIA_PRIMARY_BUCKET or "",
+    "LTX25_MEDIA_PRIMARY_S3_ENDPOINT_URL": MEDIA_PRIMARY_ENDPOINT_URL or "",
+    "LTX25_MEDIA_PRIMARY_S3_REGION": MEDIA_PRIMARY_REGION,
+    "LTX25_MEDIA_FALLBACK_ID": MEDIA_FALLBACK_ID,
+    "LTX25_MEDIA_FALLBACK_BACKEND": MEDIA_FALLBACK_BACKEND,
+    "LTX25_MEDIA_FALLBACK_S3_BUCKET": os.environ.get("LTX25_MEDIA_FALLBACK_S3_BUCKET", ""),
+    "LTX25_MEDIA_FALLBACK_S3_ENDPOINT_URL": os.environ.get("LTX25_MEDIA_FALLBACK_S3_ENDPOINT_URL", ""),
+    "LTX25_MEDIA_FALLBACK_S3_REGION": os.environ.get("LTX25_MEDIA_FALLBACK_S3_REGION", "auto"),
     "LTX25_MODAL_MEDIA_SECRET": MEDIA_SECRET_NAME,
     "QUANTIZED_MODEL_DIR": PIPELINE_DIR,
     "LTX25_TEXT_ENCODER_DIR": f"{PIPELINE_DIR}/text_encoder",
@@ -218,7 +224,7 @@ GPU_ENV = {
     # encodes locally first and uploads the finalized file through the S3 API.
     # CloudBucketMount is kept read-only for source-media access.
     "OUTPUT_DIR": WORKER_OUTPUT_DIR,
-    "INPUT_DIR": f"{MEDIA_ROOT}/inputs",
+    "INPUT_DIR": "/tmp/ltx25-inputs",
     "LORA_DIR": "/data/loras",
     "HISTORY_DB": "/data/history.sqlite3",
     # Model files must be local. Kernel Hub remains online because the NATTEN
@@ -236,7 +242,7 @@ WORKER_VOLUMES = {
     "/kernel-cache": kernel_volume,
 }
 if media_mount is not None:
-    WORKER_VOLUMES["/media"] = media_mount
+    WORKER_VOLUMES["/media-primary"] = media_mount
 
 WORKER_SECRETS = [hf_secret] + ([media_secret] if media_secret is not None else [])
 
@@ -269,11 +275,11 @@ class LTX25Worker:
         import time
 
         from ltx25.config import settings
-        from ltx25.media_store import create_media_store
+        from ltx25.media_storage import create_media_storage
         from ltx25.runtime import LTXGenerator
 
         started = time.monotonic()
-        self.media_store = create_media_store(None) if MEDIA_BACKEND != "volume" else None
+        self.media_storage = create_media_storage(state_volume)
         self.generator = LTXGenerator(settings)
         self.generator.load()
         self.load_seconds = time.monotonic() - started
@@ -299,10 +305,13 @@ class LTX25Worker:
         while process-level failures such as GPU preemption escape this method and
         are retried by Modal with the same job id/output path.
         """
+        import os as _os
+        import shutil
         import time
         from pathlib import Path
 
         from ltx25.config import settings
+        from ltx25.media_storage import MediaRef
         from ltx25.schemas import GenerateRequest, STILL_IMAGE_MODES
 
         record_key = f"job:{job_id}"
@@ -324,6 +333,28 @@ class LTX25Worker:
             return interrupted
 
         request = GenerateRequest.model_validate(request_payload)
+        workspace = Path(f"/tmp/ltx25-jobs/{job_id}")
+        input_dir = workspace / "inputs"
+        shutil.rmtree(workspace, ignore_errors=True)
+        input_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            asset_ids = {item.asset_id for item in request.conditions}
+            if request.audio_asset_id:
+                asset_ids.add(request.audio_asset_id)
+            for asset_id in asset_ids:
+                asset_record = job_store.get(f"asset:{asset_id}")
+                if not isinstance(asset_record, dict):
+                    raise FileNotFoundError(f"Input asset metadata not found: {asset_id}")
+                ref = MediaRef.from_value(asset_record, default_store_id=self.media_storage.primary_id)
+                target_input = input_dir / Path(ref.key).name
+                if media_mount is not None and ref.store_id == self.media_storage.primary_id:
+                    mounted = Path("/media-primary") / ref.key
+                    _os.symlink(mounted, target_input)
+                else:
+                    self.media_storage.download_to(ref, target_input)
+        except Exception:
+            shutil.rmtree(workspace, ignore_errors=True)
+            raise
         if request.mode in STILL_IMAGE_MODES:
             prefix = {"t2i": "t2i", "refine_image": "refine", "ref2i": "ref2i"}[request.mode]
             target = Path(settings.output_dir) / f"{prefix}_{job_id}.png"
@@ -331,48 +362,76 @@ class LTX25Worker:
             target = Path(settings.output_dir) / f"{job_id}.mp4"
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        started = time.monotonic()
-        last_bucket = -1
-
-        def progress(value: float) -> None:
-            nonlocal last_bucket
-            bucket = int(max(0.0, min(1.0, value)) * 20)
-            if bucket <= last_bucket:
-                return
-            last_bucket = bucket
-            current = job_store.get(record_key) or record
-            if _honor_interrupt(job_id, current) is not None:
-                return
-            current["status"] = "running"
-            current["progress"] = max(0.0, min(1.0, value))
-            current["updated_at"] = datetime.now(timezone.utc).isoformat()
-            job_store.put(record_key, current)
-            _honor_interrupt(job_id, current)
-
         try:
-            metrics = self.generator.generate(request, target, progress) or {}
-            interrupted = _honor_interrupt(job_id, record)
-            if interrupted is not None:
-                return interrupted
-            if MEDIA_BACKEND == "volume":
-                state_volume.commit()
-            else:
-                self.media_store.upload_local(target, f"outputs/{target.name}")
-                target.unlink(missing_ok=True)
-            interrupted = _honor_interrupt(job_id, record)
-            if interrupted is not None:
-                return interrupted
-        except Exception as exc:  # ordinary generation failure: do not waste retries
-            interrupted = _honor_interrupt(job_id, record)
-            if interrupted is not None:
-                return interrupted
+            started = time.monotonic()
+            last_bucket = -1
+
+            def progress(value: float) -> None:
+                nonlocal last_bucket
+                bucket = int(max(0.0, min(1.0, value)) * 20)
+                if bucket <= last_bucket:
+                    return
+                last_bucket = bucket
+                current = job_store.get(record_key) or record
+                if _honor_interrupt(job_id, current) is not None:
+                    return
+                current["status"] = "running"
+                current["progress"] = max(0.0, min(1.0, value))
+                current["updated_at"] = datetime.now(timezone.utc).isoformat()
+                job_store.put(record_key, current)
+                _honor_interrupt(job_id, current)
+
+            try:
+                metrics = self.generator.generate(request, target, progress, input_dir=input_dir) or {}
+                interrupted = _honor_interrupt(job_id, record)
+                if interrupted is not None:
+                    return interrupted
+                output_size = target.stat().st_size
+                if MEDIA_PRIMARY_BACKEND == "volume" and not MEDIA_FALLBACK_ID:
+                    state_volume.commit()
+                    output_ref = MediaRef(self.media_storage.primary_id, f"outputs/{target.name}")
+                else:
+                    output_ref = self.media_storage.upload_local(target, f"outputs/{target.name}")
+                    target.unlink(missing_ok=True)
+                job_store.put(
+                    f"output:{target.name}",
+                    {**output_ref.as_dict(), "size": output_size},
+                )
+                interrupted = _honor_interrupt(job_id, record)
+                if interrupted is not None:
+                    return interrupted
+            except Exception as exc:  # ordinary generation failure: do not waste retries
+                interrupted = _honor_interrupt(job_id, record)
+                if interrupted is not None:
+                    return interrupted
+                current = job_store.get(record_key) or record
+                current.update(
+                    {
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "generation_seconds": time.monotonic() - started,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                job_store.put(record_key, current)
+                interrupted = _honor_interrupt(job_id, current)
+                if interrupted is not None:
+                    return interrupted
+                return current
+
             current = job_store.get(record_key) or record
             current.update(
                 {
-                    "status": "failed",
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "status": "completed",
+                    "progress": 1.0,
+                    "error": None,
                     "generation_seconds": time.monotonic() - started,
+                    "peak_vram_gb": metrics.get("peak_vram_gb"),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "image_key": f"outputs/{target.name}" if request.mode in STILL_IMAGE_MODES else None,
+                    "video_key": None if request.mode in STILL_IMAGE_MODES else f"outputs/{target.name}",
+                    "image_url": None,
+                    "video_url": None,
                 }
             )
             job_store.put(record_key, current)
@@ -380,28 +439,8 @@ class LTX25Worker:
             if interrupted is not None:
                 return interrupted
             return current
-
-        current = job_store.get(record_key) or record
-        current.update(
-            {
-                "status": "completed",
-                "progress": 1.0,
-                "error": None,
-                "generation_seconds": time.monotonic() - started,
-                "peak_vram_gb": metrics.get("peak_vram_gb"),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "image_key": f"outputs/{target.name}" if request.mode in STILL_IMAGE_MODES else None,
-                "video_key": None if request.mode in STILL_IMAGE_MODES else f"outputs/{target.name}",
-                "image_url": None,
-                "video_url": None,
-            }
-        )
-        job_store.put(record_key, current)
-        interrupted = _honor_interrupt(job_id, current)
-        if interrupted is not None:
-            return interrupted
-        return current
-
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 @app.local_entrypoint()

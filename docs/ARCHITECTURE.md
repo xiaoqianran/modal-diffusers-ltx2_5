@@ -61,7 +61,8 @@ Vue 组件不直接 `fetch`、不自己维护轮询；生产入口和测试共�
 ltx25/
 ├─ api.py            # HTTP、上传协议、下载重定向、HTTP 错误映射
 ├─ modal_client.py   # 本地 -> Modal：Job / Dict / warmup / cancel
-├─ media_store.py    # 媒体 data plane：Volume / generic S3-compatible storage
+├─ media_store.py    # 单物理媒体 backend：Volume / generic S3-compatible storage
+├─ media_storage.py  # 稳定 store_id、primary/fallback 路由、MediaRef
 ├─ runtime.py        # generation workflow 与采样编排
 ├─ models.py         # 模型 load/unload、decoder、precision、加速安装
 ├─ encoding.py       # NVENC / ffmpeg 输出编码
@@ -114,25 +115,32 @@ lifespan 也执行同样的 2 秒回收兜底。
 /outputs/{name}           # Volume FileResponse / S3 signed redirect
 ```
 
-默认 `VolumeMediaStore` 保持零配置兼容；`S3MediaStore` 面向通用 S3-compatible
-对象存储。S3 模式下浏览器直接 PUT 到对象存储，大文件走并行 multipart，输出下载
-通过短时 signed GET/HEAD；Job/Dict 内只保存稳定 object key，不保存会过期的
-presigned URL。
+默认 `VolumeMediaStore` 保持零配置兼容；`S3MediaStore` 始终只描述一个物理
+S3-compatible backend。多存储选择由 `MediaStorage` 负责：对象元数据持久化稳定
+`store_id + key`，当前生产配置为 R2 primary、SG-JP MinIO fallback。`store_id` 是
+稳定标识而不是 `primary/fallback` 角色，因此以后角色互换不会让历史对象指向错误位置。
+
+浏览器直传先在当前 store 内做有限 retry；只有字节传输仍失败时才请求新的 fallback
+upload plan。一次 upload intent 从 prepare 到 complete 固定在一个 store，multipart ETag
+绝不跨 store 复用。输出同样记录 `output:<filename> -> store_id + key`，外部 API 仍只
+暴露稳定 `/outputs/<filename>`。
 
 Retake / Extend 不再把已生成视频下载到浏览器后重新上传：Volume 使用
 `Volume.copy_files()`，S3 使用 `CopyObject`。`/api/health` 同时暴露媒体
 backend 与 upload/download/copy 指标；直传 WAN 时间由浏览器 finalize 时回报。
 
-MP4 主编码路径写入 `+faststart`，将 `moov` 元数据前置，避免浏览器为了读取
-metadata 而等待整个文件尾部。S3 模式下 MP4 先在 GPU container 的本地 scratch
-完成 mux，再通过 S3 API 上传最终文件；CloudBucketMount 仅只读输入，避免依赖 S3 mount 的目录/POSIX 写入语义。
+MP4 主编码路径写入 `+faststart`，将 `moov` 元数据前置。输出先在 GPU container
+本地 scratch 完成 mux，再通过 `MediaStorage` 上传；primary 不可用时可直接写 fallback。
+输入在每个 job 下建立独立本地 namespace：primary R2 可通过只读 CloudBucketMount
+做 fast path，fallback 对象 materialize 到本地文件。`runtime.py` 始终只看到普通本地
+`input_dir`，不知道 R2 / MinIO / S3 / Modal。
 
 ## 依赖规则
 
 ```text
 api ----------> modal_client ----------> Modal SDK
                     |
-                    `----------> media_store ----> Volume / S3 API
+                    `----------> media_storage ----> media_store ----> Volume / S3 API
 
 modal_app ----> runtime ----> models ----> acceleration
                    |
@@ -147,6 +155,8 @@ models / runtime ----------------------------> config
 ```text
 runtime       -X-> FastAPI
 runtime       -X-> Modal
+runtime       -X-> media_storage / media_store
+media_store   -X-> media_storage
 models        -X-> FastAPI / Modal / runtime
 acceleration  -X-> serving 层
 modal_client  -X-> runtime / models

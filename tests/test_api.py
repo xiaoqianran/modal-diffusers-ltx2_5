@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -108,6 +109,8 @@ class FakeControl:
 
     def upload_file(self, local_path: Path, remote_path: str):
         self.uploads[remote_path] = local_path.read_bytes()
+        return SimpleNamespace(store_id="volume", key=remote_path)
+        return SimpleNamespace(store_id="volume", key=remote_path)
 
     def prepare_asset_upload(self, *, filename, content_type, size, kind, suffix):
         asset_id = uuid.uuid4().hex

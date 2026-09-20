@@ -7,6 +7,7 @@ import pytest
 
 import ltx25.modal_client as modal_client_module
 from ltx25.media_store import VolumeMediaStore
+from ltx25.media_storage import MediaStorage
 from ltx25.schemas import GenerateRequest
 from ltx25.modal_client import (
     ActiveJobError,
@@ -92,6 +93,7 @@ def make_client(tmp_path: Path):
     control.upload_cache = tmp_path / "uploads"
     control.state_volume = Volume()
     control.media_store = VolumeMediaStore(control.state_volume)
+    control.media_storage = MediaStorage(stores={"volume": control.media_store}, primary_id="volume")
     control.job_store = Store()
     control.worker = SimpleNamespace(update_autoscaler=lambda **_: None)
     control.generate_fn = SimpleNamespace(spawn=lambda *_: SimpleNamespace(object_id="fc-test"))

@@ -31,6 +31,18 @@ def test_runtime_is_cloud_and_http_agnostic():
     assert "modal" not in imports
 
 
+
+def test_runtime_job_input_boundary_reaches_both_generation_paths():
+    tree = ast.parse((PKG / "runtime.py").read_text(encoding="utf-8"))
+    methods = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for name in {"generate", "_generate_impl", "_generate_still_impl"}:
+        params = {arg.arg for arg in methods[name].args.args + methods[name].args.kwonlyargs}
+        assert "input_dir" in params, name
+
 def test_models_is_cloud_and_http_agnostic():
     imports = _imports(PKG / "models.py")
     assert "fastapi" not in imports
@@ -56,6 +68,24 @@ def test_media_store_has_no_serving_or_generation_dependencies():
     imports = _imports(PKG / "media_store.py")
     for forbidden in {"fastapi", "modal", "runtime", "models", "torch", "diffusers"}:
         assert forbidden not in imports
+
+
+def test_media_storage_owns_routing_without_generation_dependencies():
+    imports = _imports(PKG / "media_storage.py")
+    for forbidden in {"fastapi", "modal", "runtime", "models", "torch", "diffusers"}:
+        assert forbidden not in imports
+
+
+def test_runtime_does_not_depend_on_media_storage():
+    imports = _imports(PKG / "runtime.py")
+    assert "ltx25.media_storage" not in imports
+    assert "media_storage" not in imports
+
+
+def test_media_store_does_not_depend_on_routing_layer():
+    imports = _imports(PKG / "media_store.py")
+    assert "ltx25.media_storage" not in imports
+    assert "media_storage" not in imports
 
 
 def test_api_does_not_import_modal_sdk_or_runtime():

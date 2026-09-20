@@ -302,7 +302,13 @@ class LTXGenerator(ModelLifecycle):
         if n_cast:
             print(f"[ltx25] fp8 LoRA compat: cast {n_cast} lora_A/lora_B modules to bf16", flush=True)
 
-    def generate(self, request: GenerateRequest, target: Path, progress: Callable[[float], None]) -> dict[str, float]:
+    def generate(
+        self,
+        request: GenerateRequest,
+        target: Path,
+        progress: Callable[[float], None],
+        input_dir: Path | None = None,
+    ) -> dict[str, float]:
         pipe = self.load()
         patches = _PatchRegistry()
         adapter_names = []
@@ -342,8 +348,8 @@ class LTXGenerator(ModelLifecycle):
                 pipe.set_adapters(adapter_names, adapter_weights=[item.strength for item in request.loras])
                 self._cast_lora_layers_to_bf16(pipe)
             if request.mode in STILL_IMAGE_MODES:
-                return self._generate_still_impl(request, target, progress)
-            return self._generate_impl(request, target, progress, patches)
+                return self._generate_still_impl(request, target, progress, input_dir=input_dir)
+            return self._generate_impl(request, target, progress, patches, input_dir=input_dir)
         finally:
             patches.restore_all()
             if request.loras or request.upscale_method == "pixel":
@@ -363,7 +369,12 @@ class LTXGenerator(ModelLifecycle):
                 self._graph_runner.enabled = True
 
     def _generate_still_impl(
-        self, request: GenerateRequest, target: Path, progress: Callable[[float], None]
+        self,
+        request: GenerateRequest,
+        target: Path,
+        progress: Callable[[float], None],
+        *,
+        input_dir: Path | None = None,
     ) -> dict[str, float]:
         """Still-image modes (t2i / refine_image / ref2i), kept independent from the
         video path. Recipes are faithful ports of the verified probes under
@@ -382,7 +393,7 @@ class LTXGenerator(ModelLifecycle):
         generator = torch.Generator(device="cpu").manual_seed(request.seed)
 
         image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
-        input_dir = self.config.input_dir.resolve()
+        input_dir = (input_dir or self.config.input_dir).resolve()
         conditions = []
         for condition in request.conditions:
             matches = list(input_dir.glob(f"{condition.asset_id}.*"))
@@ -561,6 +572,8 @@ class LTXGenerator(ModelLifecycle):
         target: Path,
         progress: Callable[[float], None],
         patches: _PatchRegistry,
+        *,
+        input_dir: Path | None = None,
     ) -> dict[str, float]:
         import torch
         from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
@@ -580,7 +593,7 @@ class LTXGenerator(ModelLifecycle):
         conditions = []
         image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
         video_suffixes = {".mp4", ".mov", ".webm", ".mkv", ".gif"}
-        input_dir = self.config.input_dir.resolve()
+        input_dir = (input_dir or self.config.input_dir).resolve()
         source_edit_path = None
         source_frames = None
         for condition in request.conditions:
