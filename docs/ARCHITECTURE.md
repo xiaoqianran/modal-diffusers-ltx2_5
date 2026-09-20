@@ -85,11 +85,17 @@ scripts/             # 模型准备与工具
 tests/               # 行为 + 架构边界
 ```
 
-Director Runtime 默认保持旧客户端兼容：`engine=auto` 与 `engine=ltx` 都走 LTX；
-`engine=qwen` 目前只允许纯 `t2i`。Modal worker 启动时按配置一次性加载 LTX-2.5
+Director Runtime 的 `engine=auto` 会把无条件纯 `t2i` 路由到 Qwen；视频、参考/编辑、LoRA
+任务保持在 LTX。显式 `engine=ltx|qwen` 覆盖自动策略，其中 `qwen` 目前只允许纯 `t2i`。Modal worker 启动时按配置一次性加载 LTX-2.5
 NVFP4 与 Qwen-Image 2.1 BF16，之后 job 只做 engine dispatch，不做模型卸载/重载。
 Qwen 使用与现有 t2i 一致的最终尺寸语义：请求中的 base width/height 在 `upscale=true`
-时直接渲染为 2× 最终 PNG。
+时直接渲染为 2× 最终 PNG。双模型生产默认启用 LTX CUDA Graph，但将 capture cache 限制为 1 个 shape，
+避免多 shape graph pool 持续侵占 Qwen activation headroom。
+
+2026-09-21 RTX PRO 6000 96 GB 生产实测：双模型 idle 约 75.49 GiB reserved；同一
+512×288×121f / 8-step LTX workload 的 eager warm generation 为 7.60 s，单-shape graph replay
+为 4.89 s（约快 35.7%），graph 常驻后约 76.40 GiB reserved。保留该 graph 时 Qwen 1536×1024 / 40-step
+仍在同容器完成，generation 18.63 s，peak reserved 88.19 GiB。
 
 持久化按生命周期拆开：
 

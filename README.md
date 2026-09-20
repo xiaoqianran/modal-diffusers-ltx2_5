@@ -52,8 +52,8 @@ modal deploy modal_app.py
 ```
 
 生产 Director 预设固定为 `LTX25_TRANSFORMER_PRECISION=nvfp4`、`OFFLOAD_MODE=none`，并默认
-`DIRECTOR_QWEN_ENABLED=1`。双模型常驻时先以 `LTX25_CUDA_GRAPH=0` 作为保守默认，避免 retained graph pool
-侵占 Qwen activation headroom；完成同容器双向 smoke 后可显式重新开启。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
+`DIRECTOR_QWEN_ENABLED=1`。实机双模型测试后默认启用 `LTX25_CUDA_GRAPH=1`，但双常驻模式将
+`LTX25_CUDA_GRAPH_MAX_CAPTURES=1`，只保留一个 LTX shape 的 graph，以限制显存常驻增长。模型 Volume 在 GPU 容器中以只读方式挂载，输入、输出、LoRA
 放在 `ltx25-state` Volume；NATTEN 等硬件相关 kernel 缓存单独放在 `ltx25-kernels`
 Volume，避免已加载的 `.so` 阻塞逐任务 `state_volume.reload()`。任务状态保存在
 `ltx25-jobs` Modal Dict。
@@ -64,8 +64,8 @@ Studio 启动时会显式获取 90 秒 warm lease，并每 30 秒续租；active
 `LTX25_MODAL_GPU_IDLE_SECONDS` 配置；模型/状态/kernel Volume 与 HF Secret 名称分别可通过
 `LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、
 `LTX25_MODAL_HF_SECRET` 覆盖。
-导演台请求新增 `engine=auto|ltx|qwen`。`auto` 保持历史 LTX 行为；`qwen` 当前只用于 `t2i`，
-并采用已验证的 40-step / true CFG 1.0 基线。
+导演台请求支持 `engine=auto|ltx|qwen`。`auto` 会把纯 `t2i` 路由到 Qwen-Image 2.1，
+视频、参考/编辑和 LoRA 条件任务仍走 LTX；显式 `ltx/qwen` 始终优先于自动策略。
 
 ### 独立前端
 
@@ -204,7 +204,7 @@ curl -X POST http://127.0.0.1:48125/api/jobs \
 - `LTX25_VIDEO_CRF`: 出力MP4のlibx264 CRF（既定18）。全経路（draft/high、全デコーダ）に適用されます。従来の既定CRF~23より高ビットレートで、圧縮によるディテール損失を抑えます
 - `LTX25_TRANSFORMER_PRECISION`: transformerの精度。`nf4`（既定・bnb 4bit）、`fp8`（bf16重みをlayerwise castingでfp8_e4m3fnストレージ化・演算はbf16）、`bf16`（リリース重み約38GB）。`fp8`は品質がbf16同等のまま実測ピークVRAMが静止画26.5GB / 動画121フレーム28.9GBに収まる48GB級GPU向けの推奨構成です（castはCPU上で適用するためGPU側の一時38GBピークは発生しません。要: bf16 transformerシャード約38GBのHFキャッシュ）。`bf16`は96GB級GPU向け、24GB級では`nf4`のまま使ってください。text_encoderはいずれの値でもNF4です。**`nvfp4`（2026-09追加・sm_120 Blackwell専用）**: Lightricks公式配布のBlackwellネイティブFP4蒸留transformer（常駐約19GB）を`torch._scaled_mm`のFP4 GEMMで直接実行します（`ltx25/acceleration/nvfp4.py`。GEMM素でbf16比3.2〜3.8倍、リアルタイム用途の最速構成。`LTX25_NVFP4_CKPT`でローカルファイルを指定可、未指定ならHF Hubから自動取得）
 - `LTX25_CUDA_GRAPH`: `1`でtransformer forward全体をCUDA Graph capture/replayし、denoiseのCPUカーネル起動コストを消します（`ltx25/acceleration/cuda_graph.py`）。出力はeagerと**bit完全一致**。`OFFLOAD_MODE=none`前提（それ以外では警告して無効）。LoRAを使うジョブは自動でeagerに落ちます。効果は小解像度×少ステップほど大きい（下記「リアルタイム生成と高速化」参照）
-- `LTX25_CUDA_GRAPH_MAX_CAPTURES`: graphを保持するshape数の上限（既定8）。解像度・フレーム数・fps・モード（t2av/a2v）の組ごとに1本captureされ、**上限超過のshapeは警告ログの上、黙ってeagerにフォールバック**します。多shape運用では引き上げてください
+- `LTX25_CUDA_GRAPH_MAX_CAPTURES`: graphを保持するshape数の上限（汎用既定8、dual-resident Modal Director は既定1）。解像度・フレーム数・fps・モード（t2av/a2v）の組ごとに1本captureされ、**上限超過のshapeは警告ログの上、黙ってeagerにフォールバック**します。多shape運用ではQwen headroomを確認してから引き上げてください
 - `LTX25_COMPILE_BLOCKS`: 【実験的・非推奨】per-block torch.compile（`ltx25/acceleration/compile.py`のdocstring参照）。probeではgraph単体に勝つがサーバE2Eでは利得なし・小解像度では退行、と実測済みのため既定`off`
 - `LTX25_VIDEO_ENCODER`: `nvenc`（既定・h264_nvenc）または`x264`。NVENC不在環境はx264へ自動フォールバック
 - `LTX25_NVENC_PRESET`: NVENCプリセット（`p1`最速〜`p7`最高品質、既定`p7`）。リアルタイム用途は`p4`でエンコード0.1〜0.15s短縮

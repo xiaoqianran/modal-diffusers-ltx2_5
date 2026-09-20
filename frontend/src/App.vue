@@ -759,7 +759,7 @@ onBeforeUnmount(() => {
             <label class="field">
               <span>Model engine</span>
               <select v-model="draft.engine" @change="onEngineChange">
-                <option value="auto">Auto · LTX-2.5</option>
+                <option value="auto">Auto · Director</option>
                 <option value="ltx">LTX-2.5 NVFP4</option>
                 <option value="qwen" :disabled="draft.mode !== 't2i'">Qwen-Image 2.1 BF16</option>
               </select>

@@ -95,8 +95,8 @@ class GenerateRequest(BaseModel):
         "t2av", "i2v", "flf2v", "condition", "iclora", "retake", "extend", "a2v",
         "t2i", "refine_image", "ref2i",
     ] = "t2av"
-    # Explicit resident-engine routing. "auto" preserves historical LTX behavior;
-    # Qwen is opt-in and currently limited to pure text-to-image jobs.
+    # Explicit resident-engine routing. "auto" selects Qwen for unconstrained
+    # text-to-image jobs and LTX for video/reference/edit/LoRA work.
     engine: Literal["auto", "ltx", "qwen"] = "auto"
     # `quality` is retained for older API clients. New clients should control the
     # rendering pipeline explicitly with `upscale` and `decoder`.

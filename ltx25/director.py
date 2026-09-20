@@ -22,8 +22,16 @@ ProgressCallback = Callable[[float], None]
 
 
 def resolve_engine(request: GenerateRequest) -> str:
-    """Resolve a request to one resident engine without changing legacy behavior."""
+    """Resolve a request to the best resident engine.
+
+    Explicit engine selection always wins. Auto routes unconstrained text-to-image
+    work to Qwen and keeps video, reference/edit, and LoRA work on LTX.
+    """
+    if request.engine == "ltx":
+        return LTX_ENGINE
     if request.engine == "qwen":
+        return QWEN_ENGINE
+    if request.mode == "t2i" and not request.conditions and not request.loras:
         return QWEN_ENGINE
     return LTX_ENGINE
 
@@ -163,8 +171,12 @@ class DirectorRuntime:
         engine = resolve_engine(request)
         if engine == QWEN_ENGINE:
             if self.qwen is None:
-                raise RuntimeError("Qwen-Image 2.1 engine is disabled")
-            return self.qwen.generate(request, target, progress)
+                if request.engine == "auto":
+                    engine = LTX_ENGINE
+                else:
+                    raise RuntimeError("Qwen-Image 2.1 engine is disabled")
+            else:
+                return self.qwen.generate(request, target, progress)
 
         metrics = self.ltx.generate(request, target, progress, input_dir=input_dir) or {}
         metrics["engine"] = LTX_ENGINE

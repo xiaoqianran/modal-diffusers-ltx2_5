@@ -223,11 +223,12 @@ GPU_ENV = {
     "DIRECTOR_QWEN_ENABLED": "1" if DIRECTOR_QWEN_ENABLED else "0",
     "QWEN_IMAGE21_DIR": QWEN_IMAGE21_DIR,
     "OFFLOAD_MODE": "none",
-    # Dual residency leaves ~19 GiB free before activations. Start conservatively
-    # without retained CUDA-graph pools; re-enable explicitly after same-container
-    # LTX->Qwen and Qwen->LTX memory smoke tests pass.
-    "LTX25_CUDA_GRAPH": os.environ.get(
-        "LTX25_CUDA_GRAPH", "0" if DIRECTOR_QWEN_ENABLED else "1"
+    # Dual-resident production smoke shows one retained LTX graph costs <1 GiB
+    # while materially reducing repeat latency. Bound the cache to one shape so
+    # Qwen keeps predictable activation headroom on the 96 GB worker.
+    "LTX25_CUDA_GRAPH": os.environ.get("LTX25_CUDA_GRAPH", "1"),
+    "LTX25_CUDA_GRAPH_MAX_CAPTURES": os.environ.get(
+        "LTX25_CUDA_GRAPH_MAX_CAPTURES", "1" if DIRECTOR_QWEN_ENABLED else "8"
     ),
     "LTX25_COMPILE_BLOCKS": "off",
     # MP4 muxing performs seeks (notably for faststart), so object-store mode
