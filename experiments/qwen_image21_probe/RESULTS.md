@@ -46,3 +46,30 @@ For 1024² and 1536×1024, Qwen activation headroom over its resident baseline i
 - 2048²: about +26.30 GiB allocated over resident
 
 Therefore the Director Runtime should initially target 1024-class and 1536×1024-class Qwen generation while both models remain resident. 2048² should be treated as a high-memory mode until the exact current LTX resident allocation is re-measured inside the same container.
+
+## Dual-resident validation
+
+The two production-scale models were then loaded in the **same RTX PRO 6000 container**:
+
+| Stage | Allocated | Reserved | Free |
+|---|---:|---:|---:|
+| LTX-2.5 NVFP4 resident | 44.852 GiB | 45.098 GiB | 49.240 GiB |
+| LTX + Qwen-Image-2.1 resident | 75.081 GiB | 75.494 GiB | 18.844 GiB |
+
+Load times in the dual-resident probe:
+
+- LTX-2.5: 14.231 s
+- Qwen-Image-2.1 after LTX: 8.667 s
+
+With LTX still resident, Qwen-Image-2.1 successfully generated a 1024×1024 / 40-step image:
+
+| Metric | Result |
+|---|---:|
+| Total generation time | 10.454 s |
+| Peak allocated | 81.701 GiB |
+| Peak reserved | 83.857 GiB |
+| Free VRAM at peak measurement | 10.459 GiB |
+
+After generation the dual-resident state returned to about 75.117 GiB allocated / 75.527 GiB reserved.
+
+This validates the core Director Runtime assumption: **LTX-2.5 NVFP4 and Qwen-Image-2.1 BF16 can remain resident together on one RTX PRO 6000 and Qwen can execute a 1024-class generation without unloading LTX.**
