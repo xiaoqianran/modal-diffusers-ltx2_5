@@ -54,9 +54,9 @@ class FakeS3:
         if source in self.objects:
             self.objects[Key] = self.objects[source]
 
-    def upload_fileobj(self, source, bucket, key, ExtraArgs=None):
+    def upload_fileobj(self, source, bucket, key, ExtraArgs=None, Config=None):
         data = source.read()
-        self.calls.append(("upload_fileobj", bucket, key, ExtraArgs or {}))
+        self.calls.append(("upload_fileobj", bucket, key, ExtraArgs or {}, Config))
         self.objects[key] = data
         self.sizes[key] = len(data)
 
@@ -72,7 +72,7 @@ def make_store(client: FakeS3, **overrides):
         secret_access_key="secret",
         client=client,
         presign_seconds=900,
-        multipart_threshold=overrides.get("multipart_threshold", 96 * MIB),
+        multipart_threshold=overrides.get("multipart_threshold", 16 * MIB),
         part_size=overrides.get("part_size", 16 * MIB),
     )
 
@@ -111,6 +111,31 @@ def test_s3_large_upload_uses_parallelizable_multipart_plan():
     assert plan["part_size"] == 5 * MIB
     assert [part["part_number"] for part in plan["parts"]] == [1, 2, 3]
     assert all("upload_part" in part["url"] for part in plan["parts"])
+
+
+def test_s3_upload_plan_adapts_part_size_and_concurrency_to_object_size():
+    client = FakeS3()
+    store = make_store(client)
+
+    medium = store.prepare_upload(
+        key="inputs/medium.mp4",
+        content_type="video/mp4",
+        size=20 * MIB,
+    )
+    large = store.prepare_upload(
+        key="inputs/large.mp4",
+        content_type="video/mp4",
+        size=100 * MIB,
+    )
+    huge = store.prepare_upload(
+        key="inputs/huge.mp4",
+        content_type="video/mp4",
+        size=300 * MIB,
+    )
+
+    assert (medium["part_size"], medium["concurrency"]) == (8 * MIB, 2)
+    assert (large["part_size"], large["concurrency"]) == (16 * MIB, 4)
+    assert (huge["part_size"], huge["concurrency"]) == (32 * MIB, 6)
 
 
 def test_s3_multipart_completion_forwards_etags_and_verifies_size():

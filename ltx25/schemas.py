@@ -71,6 +71,7 @@ class AssetUploadPrepareResponse(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     upload_id: str | None = None
     part_size: int | None = None
+    concurrency: int | None = Field(default=None, ge=1, le=16)
     parts: list[AssetUploadPart] = Field(default_factory=list)
 
 
@@ -292,6 +293,8 @@ class JobResponse(BaseModel):
     updated_at: str
     generation_seconds: float | None = None
     peak_vram_gb: float | None = None
+    timings: dict[str, float] | None = None
+    input_staging: dict[str, int] | None = None
 
 
 class JobRequestSummary(BaseModel):
@@ -320,6 +323,7 @@ class JobSummaryResponse(BaseModel):
     updated_at: str
     generation_seconds: float | None = None
     peak_vram_gb: float | None = None
+    timings: dict[str, float] | None = None
 
 
 class SessionResponse(BaseModel):

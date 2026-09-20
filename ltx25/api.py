@@ -39,6 +39,7 @@ from .modal_client import (
     JobStateError,
     ModalClient,
     ModalOperationError,
+    QueueFullError,
     SubmissionError,
 )
 
@@ -70,11 +71,10 @@ def _prune_local_upload_cache(max_age_seconds: int = 24 * 60 * 60) -> int:
 
 
 async def _keep_warm_loop() -> None:
-    interval = max(60, min(modal_client.gpu_idle_seconds // 2, 300))
+    interval = max(10, min(modal_client.warm_lease_seconds // 3, 30))
     while True:
         await asyncio.sleep(interval)
-        if modal_client.keep_gpu_warm:
-            await asyncio.to_thread(modal_client.start_warmup)
+        await asyncio.to_thread(modal_client.maintain_keep_warm)
 
 
 @asynccontextmanager
@@ -96,11 +96,10 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         keep_warm_task.cancel()
-        if modal_client.keep_gpu_warm:
-            try:
-                await asyncio.to_thread(modal_client.set_idle_window, 2)
-            except Exception:
-                pass
+        try:
+            await asyncio.to_thread(modal_client.set_idle_window, 2)
+        except Exception:
+            pass
 
 
 app = FastAPI(title="LTX-2.5 Local Modal Router", version="4.0.0", lifespan=lifespan)
@@ -125,6 +124,7 @@ def health():
         "keep_gpu_warm": modal_client.keep_gpu_warm,
         "gpu_idle_seconds": modal_client.gpu_idle_seconds,
         "warmup": modal_client.warm_status(),
+        "queue": modal_client.queue_stats(),
         "media": modal_client.media_info(),
         "transfer_metrics": modal_client.transfer_metrics(),
     }
@@ -151,6 +151,8 @@ def create_session():
 def create_job(request: GenerateRequest):
     try:
         return modal_client.create_job(request)
+    except QueueFullError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except SubmissionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

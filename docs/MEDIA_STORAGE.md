@@ -88,7 +88,7 @@ AWS_SECRET_ACCESS_KEY=<secret key>
 
 LTX25_MODAL_MEDIA_SECRET=s3-media
 LTX25_MEDIA_PRESIGN_SECONDS=3600
-LTX25_MEDIA_MULTIPART_THRESHOLD_MB=96
+LTX25_MEDIA_MULTIPART_THRESHOLD_MB=16
 LTX25_MEDIA_PART_SIZE_MB=16
 ```
 
@@ -267,7 +267,22 @@ DELETE /api/assets/{asset_id}/upload
   -> best-effort abort after a failed multipart upload
 ```
 
-Multipart uploads default to four concurrent browser PUTs.
+Multipart 上传计划按对象大小自适应，而不是固定四并发：
+
+- 16–64 MiB：约 8 MiB/part，2 并发；
+- 64–256 MiB：约 16 MiB/part，4 并发；
+- 256 MiB 以上：至少 32 MiB/part，6 并发。
+
+GPU worker 的 S3 输出上传使用同一套 multipart shape，并启用 boto3 transfer
+并发/连接池，因此浏览器上行与 GPU->object-store 下行采用同一策略。
+
+Primary 还有独立 circuit breaker。默认连续 3 次可 failover 的 data-plane
+失败后打开 60 秒；窗口内新写入直接走 fallback，避免每个请求重复等待 R2 失败。
+401/403、签名或 access-key 配置错误不会被 breaker/fallback 静默吞掉。
+浏览器侧 PUT 失败会在请求 fallback plan 时回报给 breaker。
+
+GPU 输入 staging 默认将 <=32 MiB 的对象并行 materialize 到 job-local `/tmp`
+（默认 4 workers），大 primary 对象保留 CloudBucketMount 路径。
 
 ## Output delivery
 

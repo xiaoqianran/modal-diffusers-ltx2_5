@@ -226,7 +226,7 @@ class S3MediaStore(MediaStore):
         secret_access_key: str,
         region: str = "auto",
         presign_seconds: int = 3600,
-        multipart_threshold: int = 96 * 1024 * 1024,
+        multipart_threshold: int = 16 * 1024 * 1024,
         part_size: int = 16 * 1024 * 1024,
         client: Any | None = None,
     ) -> None:
@@ -258,9 +258,26 @@ class S3MediaStore(MediaStore):
                 config=Config(
                     signature_version="s3v4",
                     s3={"addressing_style": "path"},
+                    max_pool_connections=16,
+                    retries={"max_attempts": 3, "mode": "adaptive"},
+                    connect_timeout=5,
+                    read_timeout=60,
                 ),
             )
         self.client = client
+
+    def _transfer_shape(self, size: int) -> tuple[int, int]:
+        """Choose multipart part size/concurrency from object size.
+
+        Small media stays cheap; medium/large video gets enough independent PUTs
+        to fill a typical WAN path without creating hundreds of S3 requests.
+        """
+        mib = 1024 * 1024
+        if size < 64 * mib:
+            return max(5 * mib, min(self.part_size, 8 * mib)), 2
+        if size < 256 * mib:
+            return max(8 * mib, min(max(self.part_size, 16 * mib), 32 * mib)), 4
+        return max(self.part_size, 32 * mib), 6
 
     def prepare_upload(self, *, key: str, content_type: str, size: int) -> dict[str, Any]:
         if size < self.multipart_threshold:
@@ -276,13 +293,14 @@ class S3MediaStore(MediaStore):
                 "headers": {"Content-Type": content_type},
             }
 
+        part_size, concurrency = self._transfer_shape(size)
         created = self.client.create_multipart_upload(
             Bucket=self.bucket,
             Key=key,
             ContentType=content_type,
         )
         upload_id = created["UploadId"]
-        part_count = math.ceil(size / self.part_size)
+        part_count = math.ceil(size / part_size)
         if part_count > 10_000:
             self.client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
             raise MediaStoreError("Upload would exceed S3's 10,000-part limit")
@@ -306,7 +324,8 @@ class S3MediaStore(MediaStore):
             "mode": "multipart",
             "method": "PUT",
             "upload_id": upload_id,
-            "part_size": self.part_size,
+            "part_size": part_size,
+            "concurrency": min(concurrency, part_count),
             "parts": parts,
             "headers": {},
         }
@@ -367,13 +386,23 @@ class S3MediaStore(MediaStore):
     def upload_local(self, local_path: Path, key: str) -> None:
         started = time.monotonic()
         byte_count = local_path.stat().st_size
-        with local_path.open("rb") as source:
-            self.client.upload_fileobj(
-                source,
-                self.bucket,
-                key,
-                ExtraArgs={"ContentType": media_content_type(key)},
+        part_size, concurrency = self._transfer_shape(byte_count)
+        try:
+            from boto3.s3.transfer import TransferConfig
+
+            transfer_config = TransferConfig(
+                multipart_threshold=self.multipart_threshold,
+                multipart_chunksize=part_size,
+                max_concurrency=concurrency,
+                use_threads=True,
             )
+        except ImportError:
+            transfer_config = None
+        with local_path.open("rb") as source:
+            kwargs = {"ExtraArgs": {"ContentType": media_content_type(key)}}
+            if transfer_config is not None:
+                kwargs["Config"] = transfer_config
+            self.client.upload_fileobj(source, self.bucket, key, **kwargs)
         self._record("upload", elapsed=time.monotonic() - started, byte_count=byte_count)
 
     def copy(self, source_key: str, destination_key: str) -> int:
@@ -445,7 +474,7 @@ def create_media_store(volume: Any, env: dict[str, str] | None = None) -> MediaS
     secret_key = values.get("AWS_SECRET_ACCESS_KEY") or ""
     region = values.get("LTX25_S3_REGION", "auto")
     presign = int(values.get("LTX25_MEDIA_PRESIGN_SECONDS", "3600"))
-    threshold_mb = int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "96"))
+    threshold_mb = int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "16"))
     part_mb = int(values.get("LTX25_MEDIA_PART_SIZE_MB", "16"))
 
     store = S3MediaStore(

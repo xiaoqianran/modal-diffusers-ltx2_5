@@ -90,9 +90,10 @@ async function putBinaryWithRetry(url, body, headers = {}, attempts = 3) {
   throw lastError
 }
 
-async function uploadMultipart(file, plan, concurrency = 4) {
+async function uploadMultipart(file, plan, concurrency = null) {
   const queue = plan.parts.slice()
   const completed = []
+  const parallelism = Math.max(1, Math.min(16, Number(concurrency || plan.concurrency || 4)))
 
   async function worker() {
     while (queue.length) {
@@ -112,7 +113,7 @@ async function uploadMultipart(file, plan, concurrency = 4) {
   }
 
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
+    Array.from({ length: Math.min(parallelism, queue.length) }, () => worker())
   )
   return completed.sort((a, b) => a.part_number - b.part_number)
 }

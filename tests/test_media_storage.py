@@ -16,8 +16,10 @@ class FakeStore:
         self.objects = {}
         self.aborted = []
         self.client_uploads = []
+        self.prepare_calls = 0
 
     def prepare_upload(self, *, key, content_type, size):
+        self.prepare_calls += 1
         if self.fail_prepare:
             raise OSError(f"{self.name} unavailable")
         return {"mode": "single", "method": "PUT", "url": f"https://{self.name}/{key}", "headers": {}}
@@ -110,3 +112,31 @@ def test_local_validation_error_does_not_fail_over(tmp_path):
         storage.upload_local(source, "outputs/out.mp4")
     assert not fallback.objects
     assert storage.metrics()["routing"]["failover_count"] == 0
+
+
+def test_primary_circuit_breaker_skips_r2_after_repeated_transfer_failures():
+    primary = FakeStore("primary")
+    fallback = FakeStore("fallback")
+    storage = MediaStorage(
+        stores={"r2": primary, "minio": fallback},
+        primary_id="r2",
+        fallback_id="minio",
+        breaker_failure_threshold=2,
+        breaker_cooldown_seconds=60,
+    )
+
+    storage.report_transfer_failure("r2")
+    storage.report_transfer_failure("r2")
+    plan = storage.prepare_upload(key="inputs/a.mp4", content_type="video/mp4", size=10)
+
+    assert plan["store_id"] == "minio"
+    assert primary.prepare_calls == 0
+    assert fallback.prepare_calls == 1
+    breaker = storage.metrics()["routing"]["circuit_breaker"]
+    assert breaker["state"] == "open"
+    assert breaker["consecutive_failures"] == 2
+
+    storage._breaker_open_until = 0.0
+    plan = storage.prepare_upload(key="inputs/b.mp4", content_type="video/mp4", size=10)
+    assert plan["store_id"] == "r2"
+    assert storage.metrics()["routing"]["circuit_breaker"]["state"] == "closed"

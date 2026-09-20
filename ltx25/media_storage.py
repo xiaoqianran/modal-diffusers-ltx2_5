@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 import os
 import threading
+import time
 
 from .media_store import MediaStore, MediaStoreError, S3MediaStore, VolumeMediaStore
 
@@ -40,7 +41,23 @@ class MediaRef:
 def _should_failover(exc: Exception) -> bool:
     # Local/programming/validation failures must remain visible. Failover is for
     # backend availability failures, not for hiding invalid application state.
-    return not isinstance(exc, (FileNotFoundError, ValueError, MediaStoreError))
+    if isinstance(exc, (FileNotFoundError, ValueError, MediaStoreError)):
+        return False
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        metadata = response.get("ResponseMetadata") or {}
+        error = response.get("Error") or {}
+        status = metadata.get("HTTPStatusCode")
+        code = str(error.get("Code") or "")
+        if status in {401, 403} or code in {
+            "AccessDenied",
+            "InvalidAccessKeyId",
+            "SignatureDoesNotMatch",
+            "InvalidToken",
+            "ExpiredToken",
+        }:
+            return False
+    return True
 
 
 class MediaStorage:
@@ -52,6 +69,8 @@ class MediaStorage:
         stores: dict[str, MediaStore],
         primary_id: str,
         fallback_id: str | None = None,
+        breaker_failure_threshold: int = 3,
+        breaker_cooldown_seconds: float = 60.0,
     ) -> None:
         if primary_id not in stores:
             raise ValueError(f"Unknown primary media store: {primary_id}")
@@ -64,6 +83,10 @@ class MediaStorage:
         self.fallback_id = fallback_id
         self._lock = threading.Lock()
         self._failovers = 0
+        self._breaker_failure_threshold = max(1, int(breaker_failure_threshold))
+        self._breaker_cooldown_seconds = max(1.0, float(breaker_cooldown_seconds))
+        self._breaker_failures = 0
+        self._breaker_open_until = 0.0
 
     @property
     def backend(self) -> str:
@@ -87,6 +110,21 @@ class MediaStorage:
         with self._lock:
             self._failovers += 1
 
+    def _primary_allowed(self) -> bool:
+        with self._lock:
+            return time.monotonic() >= self._breaker_open_until
+
+    def _note_primary_success(self) -> None:
+        with self._lock:
+            self._breaker_failures = 0
+            self._breaker_open_until = 0.0
+
+    def _note_primary_failure(self) -> None:
+        with self._lock:
+            self._breaker_failures += 1
+            if self._breaker_failures >= self._breaker_failure_threshold:
+                self._breaker_open_until = time.monotonic() + self._breaker_cooldown_seconds
+
     def prepare_upload(
         self,
         *,
@@ -96,14 +134,26 @@ class MediaStorage:
         store_id: str | None = None,
     ) -> dict[str, Any]:
         selected = store_id or self.primary_id
+        if store_id is None and self.fallback_id and not self._primary_allowed():
+            self._note_failover()
+            selected = self.fallback_id
         try:
             plan = self.store(selected).prepare_upload(key=key, content_type=content_type, size=size)
         except Exception as exc:
-            if store_id is not None or not self.fallback_id or not _should_failover(exc):
+            if (
+                selected != self.primary_id
+                or store_id is not None
+                or not self.fallback_id
+                or not _should_failover(exc)
+            ):
                 raise
+            self._note_primary_failure()
             selected = self.fallback_id
             self._note_failover()
             plan = self.store(selected).prepare_upload(key=key, content_type=content_type, size=size)
+        else:
+            if selected == self.primary_id:
+                self._note_primary_success()
         return {**plan, "store_id": selected}
 
     def prepare_fallback_upload(
@@ -131,24 +181,39 @@ class MediaStorage:
         upload_id: str | None = None,
         parts: list[dict[str, Any]] | None = None,
     ) -> int:
-        return self.store(ref.store_id).complete_upload(
+        actual = self.store(ref.store_id).complete_upload(
             key=ref.key,
             expected_size=expected_size,
             upload_id=upload_id,
             parts=parts,
         )
+        if ref.store_id == self.primary_id:
+            self._note_primary_success()
+        return actual
+
+    def report_transfer_failure(self, store_id: str) -> None:
+        """Feed browser-side data-plane failures into the primary breaker."""
+        if store_id == self.primary_id and self.fallback_id:
+            self._note_primary_failure()
 
     def abort_upload(self, ref: MediaRef, *, upload_id: str | None) -> None:
         self.store(ref.store_id).abort_upload(key=ref.key, upload_id=upload_id)
 
     def upload_local(self, local_path: Path, key: str) -> MediaRef:
         primary = MediaRef(self.primary_id, key)
+        if self.fallback_id and not self._primary_allowed():
+            fallback = MediaRef(self.fallback_id, key)
+            self._note_failover()
+            self.store(fallback.store_id).upload_local(local_path, key)
+            return fallback
         try:
             self.store(primary.store_id).upload_local(local_path, key)
+            self._note_primary_success()
             return primary
         except Exception as exc:
             if not self.fallback_id or not _should_failover(exc):
                 raise
+            self._note_primary_failure()
         fallback = MediaRef(self.fallback_id, key)
         self._note_failover()
         self.store(fallback.store_id).upload_local(local_path, key)
@@ -176,6 +241,8 @@ class MediaStorage:
     def metrics(self) -> dict[str, Any]:
         with self._lock:
             failovers = self._failovers
+            breaker_failures = self._breaker_failures
+            retry_after = max(0.0, self._breaker_open_until - time.monotonic())
         per_store = {store_id: store.metrics() for store_id, store in self.stores.items()}
         aggregate: dict[str, dict[str, int | float]] = {}
         for kind in ("upload", "download", "copy"):
@@ -193,6 +260,11 @@ class MediaStorage:
                 "primary_id": self.primary_id,
                 "fallback_id": self.fallback_id,
                 "failover_count": failovers,
+                "circuit_breaker": {
+                    "state": "open" if retry_after > 0 else "closed",
+                    "consecutive_failures": breaker_failures,
+                    "retry_after_seconds": round(retry_after, 3),
+                },
             },
             "stores": per_store,
         }
@@ -212,7 +284,7 @@ def _s3_store(values: dict[str, str] | os._Environ[str], prefix: str) -> S3Media
         secret_access_key=get("S3_SECRET_ACCESS_KEY"),
         region=get("S3_REGION", "auto"),
         presign_seconds=int(values.get("LTX25_MEDIA_PRESIGN_SECONDS", "3600")),
-        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "96")) * 1024 * 1024,
+        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "16")) * 1024 * 1024,
         part_size=int(values.get("LTX25_MEDIA_PART_SIZE_MB", "16")) * 1024 * 1024,
     )
 
@@ -241,7 +313,13 @@ def create_media_storage(volume: Any, env: dict[str, str] | None = None) -> Medi
             else:
                 raise ValueError("LTX25_MEDIA_FALLBACK_BACKEND must be 'volume' or 's3'")
             stores[fallback_id] = fallback_store
-        return MediaStorage(stores=stores, primary_id=primary_id, fallback_id=fallback_id)
+        return MediaStorage(
+            stores=stores,
+            primary_id=primary_id,
+            fallback_id=fallback_id,
+            breaker_failure_threshold=int(values.get("LTX25_MEDIA_BREAKER_FAILURES", "3")),
+            breaker_cooldown_seconds=float(values.get("LTX25_MEDIA_BREAKER_COOLDOWN_SECONDS", "60")),
+        )
 
     # Backward-compatible single-backend configuration.
     backend = values.get("LTX25_MEDIA_BACKEND", "volume").strip().lower()
@@ -256,7 +334,7 @@ def create_media_storage(volume: Any, env: dict[str, str] | None = None) -> Medi
         secret_access_key=values.get("AWS_SECRET_ACCESS_KEY", ""),
         region=values.get("LTX25_S3_REGION", "auto"),
         presign_seconds=int(values.get("LTX25_MEDIA_PRESIGN_SECONDS", "3600")),
-        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "96")) * 1024 * 1024,
+        multipart_threshold=int(values.get("LTX25_MEDIA_MULTIPART_THRESHOLD_MB", "16")) * 1024 * 1024,
         part_size=int(values.get("LTX25_MEDIA_PART_SIZE_MB", "16")) * 1024 * 1024,
     )
     return MediaStorage(stores={"s3": legacy}, primary_id="s3")

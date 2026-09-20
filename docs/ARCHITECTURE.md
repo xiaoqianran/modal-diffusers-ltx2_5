@@ -99,9 +99,10 @@ asset:<asset>           # 上传时间/object key，用于输入资产 TTL 清�
 upload:<asset>          # prepare -> PUT -> finalize 期间的临时上传意图
 ```
 
-浏览器进入 Studio 时显式 warm GPU；真正离开页面时发送 keepalive unload，
-本地 Router 将 Modal worker 的 `scaledown_window` 收到 2 秒。Router 自身退出时
-lifespan 也执行同样的 2 秒回收兜底。
+浏览器进入 Studio 时获取短期 GPU warm lease（默认 90 秒），前端每 30 秒续租；
+active job 也会自动续住 worker。租约过期且没有 active job 时，本地 Router 自动将
+Modal worker 的 `scaledown_window` 收到 2 秒，因此浏览器崩溃/网络断开也不会让
+Router 永久续命 GPU。页面正常离开时仍发送 keepalive unload 立即释放租约。
 
 媒体传输保持控制面/数据面分离的边界：
 
@@ -131,9 +132,14 @@ backend 与 upload/download/copy 指标；直传 WAN 时间由浏览器 finalize
 
 MP4 主编码路径写入 `+faststart`，将 `moov` 元数据前置。输出先在 GPU container
 本地 scratch 完成 mux，再通过 `MediaStorage` 上传；primary 不可用时可直接写 fallback。
-输入在每个 job 下建立独立本地 namespace：primary R2 可通过只读 CloudBucketMount
-做 fast path，fallback 对象 materialize 到本地文件。`runtime.py` 始终只看到普通本地
-`input_dir`，不知道 R2 / MinIO / S3 / Modal。
+输入在每个 job 下建立独立本地 namespace：小对象（默认 <=32 MiB）和 fallback
+对象并行 prefetch 到本地 scratch；较大的 primary R2 对象继续通过只读
+CloudBucketMount fast path。这样避免小图/音频承担 mount 首读延迟，也避免大视频
+无意义地完整复制。`runtime.py` 始终只看到普通本地 `input_dir`。
+
+任务 admission 使用 `active:jobs` 紧凑索引；`MAX_QUEUE_SIZE` 在 Modal
+`.spawn()` 前硬限制 queued+running 总数，超限返回 HTTP 429。每个 job 记录
+`queue/state_reload/input_staging/generation/output_store/worker` 分阶段耗时。
 
 ## 依赖规则
 

@@ -35,6 +35,10 @@ class SubmissionError(RuntimeError):
     pass
 
 
+class QueueFullError(RuntimeError):
+    pass
+
+
 class JobStateError(RuntimeError):
     pass
 
@@ -50,9 +54,12 @@ class ModalClient:
         self.app_name = APP_NAME
         self.model_id = MODEL_ID
         self.gpu_idle_seconds = int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "600"))
-        self.keep_gpu_warm = os.environ.get("LTX25_LOCAL_KEEP_GPU_WARM", "1").strip().lower() not in {
+        self.keep_gpu_warm = os.environ.get("LTX25_LOCAL_KEEP_GPU_WARM", "0").strip().lower() not in {
             "", "0", "false", "no", "off"
         }
+        self.warm_lease_seconds = max(30, int(os.environ.get("LTX25_WARM_LEASE_SECONDS", "90")))
+        self.max_queue_size = max(1, int(os.environ.get("MAX_QUEUE_SIZE", "4")))
+        self._warm_lease_until = time.monotonic() + self.warm_lease_seconds if self.keep_gpu_warm else 0.0
 
         self.cache_root = Path(os.environ.get("LTX25_LOCAL_CACHE", ".ltx25-cache")).resolve()
         self.output_cache = self.cache_root / "outputs"
@@ -72,6 +79,17 @@ class ModalClient:
         self._warm_lock = threading.Lock()
         self._output_lock = threading.Lock()
         self._session_lock = threading.Lock()
+        self._admission_lock = threading.RLock()
+        if self.job_store.get(self._active_jobs_key()) is None:
+            active = [
+                key.removeprefix("job:")
+                for key, value in self.job_store.items()
+                if isinstance(key, str)
+                and key.startswith("job:")
+                and isinstance(value, dict)
+                and value.get("status") in ACTIVE_STATUSES
+            ]
+            self.job_store.put(self._active_jobs_key(), active)
 
     @staticmethod
     def _utc_now() -> str:
@@ -100,6 +118,10 @@ class ModalClient:
     @staticmethod
     def _output_key(filename: str) -> str:
         return f"output:{filename}"
+
+    @staticmethod
+    def _active_jobs_key() -> str:
+        return "active:jobs"
 
     @staticmethod
     def _public_job(record: dict[str, Any]) -> dict[str, Any]:
@@ -152,12 +174,25 @@ class ModalClient:
             else:
                 self.job_store.pop(key, None)
 
+    def _add_active_job(self, job_id: str) -> None:
+        with self._admission_lock:
+            job_ids = self.job_store.get(self._active_jobs_key()) or []
+            if job_id not in job_ids:
+                self.job_store.put(self._active_jobs_key(), [*job_ids, job_id])
+
+    def _remove_active_job(self, job_id: str) -> None:
+        with self._admission_lock:
+            job_ids = self.job_store.get(self._active_jobs_key()) or []
+            next_ids = [item for item in job_ids if item != job_id]
+            self.job_store.put(self._active_jobs_key(), next_ids)
+
     def _fail_record(self, record: dict[str, Any], exc: Exception) -> dict[str, Any]:
         current = self._get_record(record["id"]) or record
         if current.get("status") in ACTIVE_STATUSES:
             current["status"] = "failed"
             current["error"] = f"Modal worker failed: {type(exc).__name__}: {exc}"
             self._save(current)
+            self._remove_active_job(current["id"])
         return current
 
     def transfer_metrics(self) -> dict[str, Any]:
@@ -174,6 +209,32 @@ class ModalClient:
             "fallback_id": self.media_storage.fallback_id,
             "direct_upload": self.media_storage.direct_upload,
             "direct_download": self.media_storage.direct_download,
+        }
+
+    def queue_stats(self) -> dict[str, int]:
+        with self._admission_lock:
+            queued = 0
+            running = 0
+            job_ids = self.job_store.get(self._active_jobs_key()) or []
+            active_ids: list[str] = []
+            for job_id in job_ids:
+                value = self._get_record(job_id)
+                if not isinstance(value, dict):
+                    continue
+                status = value.get("status")
+                if status == "queued":
+                    queued += 1
+                    active_ids.append(job_id)
+                elif status == "running":
+                    running += 1
+                    active_ids.append(job_id)
+            if active_ids != job_ids:
+                self.job_store.put(self._active_jobs_key(), active_ids)
+        return {
+            "queued": queued,
+            "running": running,
+            "active": queued + running,
+            "capacity": self.max_queue_size,
         }
 
     def _refresh(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +261,8 @@ class ModalClient:
             if current.get("status") in ACTIVE_STATUSES:
                 current.update(result)
                 self._save(current)
+                if current.get("status") not in ACTIVE_STATUSES:
+                    self._remove_active_job(current["id"])
                 return current
 
         return self._get_record(record["id"]) or record
@@ -218,16 +281,21 @@ class ModalClient:
                 except (TimeoutError, modal.exception.TimeoutError):
                     return False
                 except Exception:
-                    pass
+                    self._warm_call = None
+                else:
+                    return False
             self._warm_call = self.ready_fn.spawn()
             return True
 
     def enable_keep_warm(self) -> bool:
-        self.keep_gpu_warm = True
-        self.set_idle_window(self.gpu_idle_seconds)
+        self._warm_lease_until = time.monotonic() + self.warm_lease_seconds
+        if not self.keep_gpu_warm:
+            self.keep_gpu_warm = True
+            self.set_idle_window(self.gpu_idle_seconds)
         return self.start_warmup()
 
     def disable_keep_warm(self) -> None:
+        self._warm_lease_until = 0.0
         self.keep_gpu_warm = False
         with self._warm_lock:
             warm_call = self._warm_call
@@ -239,14 +307,42 @@ class ModalClient:
                 pass
         self.set_idle_window(2)
 
+    def maintain_keep_warm(self) -> bool:
+        """Keep the worker resident only while a Studio lease or active job exists."""
+        lease_active = time.monotonic() < self._warm_lease_until
+        active_jobs = self.queue_stats()["active"] > 0
+        if active_jobs:
+            if not self.keep_gpu_warm:
+                self.keep_gpu_warm = True
+                self.set_idle_window(self.gpu_idle_seconds)
+            if not lease_active:
+                return False
+            return self.start_warmup()
+        if lease_active:
+            if not self.keep_gpu_warm:
+                self.keep_gpu_warm = True
+                self.set_idle_window(self.gpu_idle_seconds)
+            return self.start_warmup()
+        if self.keep_gpu_warm:
+            self.disable_keep_warm()
+        return False
+
     def warm_status(self) -> dict[str, Any]:
+        lease_remaining = max(0.0, self._warm_lease_until - time.monotonic())
         if self._warm_call is None:
-            return {"state": "disabled" if not self.keep_gpu_warm else "idle"}
+            return {
+                "state": "disabled" if not self.keep_gpu_warm else "idle",
+                "lease_remaining_seconds": round(lease_remaining, 1),
+            }
         try:
             result = self._warm_call.get(timeout=0)
-            return {"state": "ready", **(result if isinstance(result, dict) else {})}
+            return {
+                "state": "ready",
+                "lease_remaining_seconds": round(lease_remaining, 1),
+                **(result if isinstance(result, dict) else {}),
+            }
         except (TimeoutError, modal.exception.TimeoutError):
-            return {"state": "warming"}
+            return {"state": "warming", "lease_remaining_seconds": round(lease_remaining, 1)}
         except Exception as exc:
             return {"state": "error", "error": f"{type(exc).__name__}: {exc}"}
 
@@ -255,36 +351,44 @@ class ModalClient:
         return int(time.time() * 1000)
 
     def create_job(self, request: GenerateRequest) -> dict[str, Any]:
-        session_number = request.session_number or self.create_session()
-        request.session_number = session_number
-        now = self._utc_now()
-        job_id = uuid.uuid4().hex
-        record: dict[str, Any] = {
-            "id": job_id,
-            "session_number": session_number,
-            "status": "queued",
-            "progress": 0.0,
-            "error": None,
-            "video_url": None,
-            "image_url": None,
-            "request": request.model_dump(mode="json"),
-            "created_at": now,
-            "updated_at": now,
-            "generation_seconds": None,
-            "peak_vram_gb": None,
-            "call_id": None,
-        }
-        self._save(record)
-        self._index_job(session_number, job_id)
-
-        try:
-            call = self.generate_fn.spawn(job_id, request.model_dump(mode="json"))
-            self.job_store.put(f"call:{job_id}", call.object_id)
-        except Exception as exc:
-            record["status"] = "failed"
-            record["error"] = f"Could not submit GPU job: {type(exc).__name__}: {exc}"
+        with self._admission_lock:
+            stats = self.queue_stats()
+            if stats["active"] >= self.max_queue_size:
+                raise QueueFullError(
+                    f"GPU queue is full ({stats['active']}/{self.max_queue_size}); retry after a job finishes"
+                )
+            session_number = request.session_number or self.create_session()
+            request.session_number = session_number
+            now = self._utc_now()
+            job_id = uuid.uuid4().hex
+            record: dict[str, Any] = {
+                "id": job_id,
+                "session_number": session_number,
+                "status": "queued",
+                "progress": 0.0,
+                "error": None,
+                "video_url": None,
+                "image_url": None,
+                "request": request.model_dump(mode="json"),
+                "created_at": now,
+                "updated_at": now,
+                "generation_seconds": None,
+                "peak_vram_gb": None,
+                "call_id": None,
+            }
             self._save(record)
-            raise SubmissionError(record["error"]) from exc
+            self._index_job(session_number, job_id)
+            self._add_active_job(job_id)
+
+            try:
+                call = self.generate_fn.spawn(job_id, request.model_dump(mode="json"))
+                self.job_store.put(f"call:{job_id}", call.object_id)
+            except Exception as exc:
+                record["status"] = "failed"
+                record["error"] = f"Could not submit GPU job: {type(exc).__name__}: {exc}"
+                self._save(record)
+                self._remove_active_job(job_id)
+                raise SubmissionError(record["error"]) from exc
 
         return self._public_job(self._get_record(job_id) or record)
 
@@ -389,6 +493,7 @@ class ModalClient:
             target["status"] = "interrupted"
             target["error"] = "Interrupted by user"
             self._save(target)
+            self._remove_active_job(target["id"])
             return {
                 "interrupted": True,
                 "current_job_id": target["id"],
@@ -453,6 +558,7 @@ class ModalClient:
             self.media_storage.abort_upload(current, upload_id=intent.get("upload_id"))
         except Exception:
             pass
+        self.media_storage.report_transfer_failure(current.store_id)
         plan = self.media_storage.prepare_fallback_upload(
             key=intent["key"],
             content_type=intent["content_type"],

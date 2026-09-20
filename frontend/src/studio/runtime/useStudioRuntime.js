@@ -117,6 +117,7 @@ export function useStudioRuntime(options = {}) {
 
   let pendingSeq = 0
   let disposed = false
+  let warmLeaseTimer = null
 
   // ------------------------------------------------------------ computeds
 
@@ -549,6 +550,9 @@ export function useStudioRuntime(options = {}) {
     if (disposed) return
     await warmGpu()
     if (disposed) return
+    warmLeaseTimer = globalThis.setInterval(() => {
+      if (!disposed && client.warm) void Promise.resolve(client.warm()).catch(() => {})
+    }, 30000)
     healthPoller.start()
     jobPoller.start()
     await Promise.all([ensureSession().catch(() => null), refreshLoras(), refreshHealth()])
@@ -557,7 +561,12 @@ export function useStudioRuntime(options = {}) {
   }
 
   function dispose() {
+    if (disposed) return
     disposed = true
+    if (warmLeaseTimer !== null) {
+      globalThis.clearInterval(warmLeaseTimer)
+      warmLeaseTimer = null
+    }
     jobPoller.stop()
     healthPoller.stop()
   }

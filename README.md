@@ -57,10 +57,12 @@ modal deploy modal_app.py
 Volume，避免已加载的 `.so` 阻塞逐任务 `state_volume.reload()`。任务状态保存在
 `ltx25-jobs` Modal Dict。
 本地 `ltx25/modal_client.py` 通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器。
-Studio 启动时会显式 warm GPU；页面真正离开时前端通过 keepalive 调用 `/api/admin/unload`，
-将 Modal `scaledown_window` 收到 2 秒。正常运行期间的默认保温窗口为 600 秒，可通过
-`LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、`LTX25_MODAL_HF_SECRET`
-覆盖默认资源名。
+Studio 启动时会显式获取 90 秒 warm lease，并每 30 秒续租；active job 也会保持 worker。
+租约过期且没有 active job 时会自动将 Modal `scaledown_window` 收到 2 秒，页面正常离开
+也会通过 keepalive 调用 `/api/admin/unload` 立即释放。保温期间的 idle window 由
+`LTX25_MODAL_GPU_IDLE_SECONDS` 配置；模型/状态/kernel Volume 与 HF Secret 名称分别可通过
+`LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、
+`LTX25_MODAL_HF_SECRET` 覆盖。
 
 ### 独立前端
 
@@ -187,7 +189,7 @@ curl -X POST http://127.0.0.1:48125/api/jobs \
 - `OFFLOAD_MODE=sequential`: 最小VRAM、最も低速
 - `OFFLOAD_MODE=none`: 全モデルをGPUへ配置。大容量VRAM向け
 - `MODEL_REVISION`: 再現性のため初期値は確認済みコミットに固定
-- `MAX_QUEUE_SIZE`: 待機ジョブ数（既定4）
+- `MAX_QUEUE_SIZE`: Modal spawn 前允许的 queued+running 总容量（既定4）；超限返回 HTTP 429
 - `HISTORY_DB`: セッションと生成履歴のSQLiteファイル（既定`outputs/history.sqlite3`）
 - `LLM_BASE_URL`: プロンプト変換に使うOpenAI互換APIの`/v1`までのURL
 - `LLM_MODEL`: 外部LLMのモデル名

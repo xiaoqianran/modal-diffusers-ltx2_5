@@ -171,7 +171,7 @@ Use the returned `id` with `GET /api/jobs/{id}`. Once the job reaches `completed
 - `OFFLOAD_MODE=sequential`: lowest VRAM usage and slowest execution
 - `OFFLOAD_MODE=none`: keep every model on the GPU; intended for high-VRAM systems
 - `MODEL_REVISION`: pinned by default to a verified commit for reproducibility
-- `MAX_QUEUE_SIZE`: number of waiting jobs; default 4
+- `MAX_QUEUE_SIZE`: hard admission capacity for queued + running jobs before Modal spawn; default 4, overflow returns HTTP 429
 - `HISTORY_DB`: SQLite file for sessions and generation history; default `outputs/history.sqlite3`
 - `LLM_BASE_URL`: OpenAI-compatible `/v1` base URL used for prompt rewriting
 - `LLM_MODEL`: external LLM model name

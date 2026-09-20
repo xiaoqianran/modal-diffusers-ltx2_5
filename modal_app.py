@@ -29,15 +29,6 @@ MEDIA_FALLBACK_ID = os.environ.get("LTX25_MEDIA_FALLBACK_ID", "").strip()
 MEDIA_FALLBACK_BACKEND = os.environ.get("LTX25_MEDIA_FALLBACK_BACKEND", "s3").strip().lower()
 MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "media-storage")
 
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"", "0", "false", "no", "off"}
-
-
-GPU_SNAPSHOT = _env_flag("LTX25_MODAL_GPU_SNAPSHOT", False)
 GPU_IDLE_SECONDS = int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "600"))
 
 # IMPORTANT: keep container paths as POSIX strings. This module is evaluated by
@@ -209,6 +200,10 @@ GPU_ENV = {
     "LTX25_MEDIA_FALLBACK_S3_BUCKET": os.environ.get("LTX25_MEDIA_FALLBACK_S3_BUCKET", ""),
     "LTX25_MEDIA_FALLBACK_S3_ENDPOINT_URL": os.environ.get("LTX25_MEDIA_FALLBACK_S3_ENDPOINT_URL", ""),
     "LTX25_MEDIA_FALLBACK_S3_REGION": os.environ.get("LTX25_MEDIA_FALLBACK_S3_REGION", "auto"),
+    "LTX25_MEDIA_BREAKER_FAILURES": os.environ.get("LTX25_MEDIA_BREAKER_FAILURES", "3"),
+    "LTX25_MEDIA_BREAKER_COOLDOWN_SECONDS": os.environ.get("LTX25_MEDIA_BREAKER_COOLDOWN_SECONDS", "60"),
+    "LTX25_INPUT_PREFETCH_MB": os.environ.get("LTX25_INPUT_PREFETCH_MB", "32"),
+    "LTX25_INPUT_PREFETCH_WORKERS": os.environ.get("LTX25_INPUT_PREFETCH_WORKERS", "4"),
     "LTX25_MODAL_MEDIA_SECRET": MEDIA_SECRET_NAME,
     "QUANTIZED_MODEL_DIR": PIPELINE_DIR,
     "LTX25_TEXT_ENCODER_DIR": f"{PIPELINE_DIR}/text_encoder",
@@ -255,8 +250,6 @@ WORKER_SECRETS = [hf_secret] + ([media_secret] if media_secret is not None else 
     startup_timeout=30 * 60,
     max_containers=1,
     scaledown_window=GPU_IDLE_SECONDS,
-    enable_memory_snapshot=GPU_SNAPSHOT,
-    experimental_options={"enable_gpu_snapshot": True} if GPU_SNAPSHOT else {},
     retries=modal.Retries(
         max_retries=2,
         backoff_coefficient=1.5,
@@ -269,7 +262,7 @@ WORKER_SECRETS = [hf_secret] + ([media_secret] if media_secret is not None else 
 )
 @modal.concurrent(max_inputs=1)
 class LTX25Worker:
-    @modal.enter(snap=GPU_SNAPSHOT)
+    @modal.enter()
     def load(self):
         """Build the resident model once per GPU container."""
         import time
@@ -294,7 +287,6 @@ class LTX25Worker:
             "load_seconds": self.load_seconds,
             "gpu": torch.cuda.get_device_name(0),
             "allocated_gb": torch.cuda.memory_allocated() / 1024**3,
-            "snapshot_enabled": GPU_SNAPSHOT,
         }
 
     @modal.method()
@@ -316,17 +308,36 @@ class LTX25Worker:
 
         record_key = f"job:{job_id}"
         record = job_store.get(record_key) or {}
+        worker_started = time.monotonic()
+        try:
+            created_at = datetime.fromisoformat(str(record.get("created_at")))
+            queue_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - created_at).total_seconds(),
+            )
+        except Exception:
+            queue_seconds = 0.0
         if record.get("status") in {"completed", "interrupted"}:
             return record
         interrupted = _honor_interrupt(job_id, record)
         if interrupted is not None:
             return interrupted
+        reload_started = time.monotonic()
         state_volume.reload()
+        state_reload_seconds = time.monotonic() - reload_started
         interrupted = _honor_interrupt(job_id, record)
         if interrupted is not None:
             return interrupted
-        record.update({"status": "running", "progress": 0.0, "error": None,
-                       "updated_at": datetime.now(timezone.utc).isoformat()})
+        record.update({
+            "status": "running",
+            "progress": 0.0,
+            "error": None,
+            "timings": {
+                "queue_seconds": queue_seconds,
+                "state_reload_seconds": state_reload_seconds,
+            },
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
         job_store.put(record_key, record)
         interrupted = _honor_interrupt(job_id, record)
         if interrupted is not None:
@@ -337,24 +348,54 @@ class LTX25Worker:
         input_dir = workspace / "inputs"
         shutil.rmtree(workspace, ignore_errors=True)
         input_dir.mkdir(parents=True, exist_ok=True)
+        staging_started = time.monotonic()
+        mounted_inputs = 0
+        prefetched_inputs = 0
         try:
+            from concurrent.futures import ThreadPoolExecutor
+
             asset_ids = {item.asset_id for item in request.conditions}
             if request.audio_asset_id:
                 asset_ids.add(request.audio_asset_id)
+            downloads: list[tuple[MediaRef, Path]] = []
+            prefetch_limit = max(
+                1,
+                int(_os.environ.get("LTX25_INPUT_PREFETCH_MB", "32")),
+            ) * 1024 * 1024
             for asset_id in asset_ids:
                 asset_record = job_store.get(f"asset:{asset_id}")
                 if not isinstance(asset_record, dict):
                     raise FileNotFoundError(f"Input asset metadata not found: {asset_id}")
                 ref = MediaRef.from_value(asset_record, default_store_id=self.media_storage.primary_id)
                 target_input = input_dir / Path(ref.key).name
-                if media_mount is not None and ref.store_id == self.media_storage.primary_id:
+                size = int(asset_record.get("size") or 0)
+                if (
+                    media_mount is not None
+                    and ref.store_id == self.media_storage.primary_id
+                    and size > prefetch_limit
+                ):
                     mounted = Path("/media-primary") / ref.key
                     _os.symlink(mounted, target_input)
+                    mounted_inputs += 1
                 else:
-                    self.media_storage.download_to(ref, target_input)
+                    downloads.append((ref, target_input))
+            if downloads:
+                workers = min(
+                    len(downloads),
+                    max(1, int(_os.environ.get("LTX25_INPUT_PREFETCH_WORKERS", "4"))),
+                )
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ltx25-input") as pool:
+                    futures = [
+                        pool.submit(self.media_storage.download_to, ref, target)
+                        for ref, target in downloads
+                    ]
+                    for future in futures:
+                        future.result()
+                prefetched_inputs = len(downloads)
         except Exception:
             shutil.rmtree(workspace, ignore_errors=True)
             raise
+        input_staging_seconds = time.monotonic() - staging_started
         if request.mode in STILL_IMAGE_MODES:
             prefix = {"t2i": "t2i", "refine_image": "refine", "ref2i": "ref2i"}[request.mode]
             target = Path(settings.output_dir) / f"{prefix}_{job_id}.png"
@@ -363,7 +404,10 @@ class LTX25Worker:
         target.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            started = time.monotonic()
+            generation_started = time.monotonic()
+            generation_seconds = None
+            output_store_seconds = None
+            output_store_started = None
             last_bucket = -1
 
             def progress(value: float) -> None:
@@ -383,16 +427,19 @@ class LTX25Worker:
 
             try:
                 metrics = self.generator.generate(request, target, progress, input_dir=input_dir) or {}
+                generation_seconds = time.monotonic() - generation_started
                 interrupted = _honor_interrupt(job_id, record)
                 if interrupted is not None:
                     return interrupted
                 output_size = target.stat().st_size
+                output_store_started = time.monotonic()
                 if MEDIA_PRIMARY_BACKEND == "volume" and not MEDIA_FALLBACK_ID:
                     state_volume.commit()
                     output_ref = MediaRef(self.media_storage.primary_id, f"outputs/{target.name}")
                 else:
                     output_ref = self.media_storage.upload_local(target, f"outputs/{target.name}")
                     target.unlink(missing_ok=True)
+                output_store_seconds = time.monotonic() - output_store_started
                 job_store.put(
                     f"output:{target.name}",
                     {**output_ref.as_dict(), "size": output_size},
@@ -401,6 +448,8 @@ class LTX25Worker:
                 if interrupted is not None:
                     return interrupted
             except Exception as exc:  # ordinary generation failure: do not waste retries
+                if output_store_seconds is None and output_store_started is not None:
+                    output_store_seconds = time.monotonic() - output_store_started
                 interrupted = _honor_interrupt(job_id, record)
                 if interrupted is not None:
                     return interrupted
@@ -409,7 +458,18 @@ class LTX25Worker:
                     {
                         "status": "failed",
                         "error": f"{type(exc).__name__}: {exc}",
-                        "generation_seconds": time.monotonic() - started,
+                        "generation_seconds": (
+                            generation_seconds
+                            if generation_seconds is not None
+                            else time.monotonic() - generation_started
+                        ),
+                        "timings": {
+                            "queue_seconds": queue_seconds,
+                            "state_reload_seconds": state_reload_seconds,
+                            "input_staging_seconds": input_staging_seconds,
+                            "output_store_seconds": output_store_seconds or 0.0,
+                            "worker_seconds": time.monotonic() - worker_started,
+                        },
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -425,8 +485,19 @@ class LTX25Worker:
                     "status": "completed",
                     "progress": 1.0,
                     "error": None,
-                    "generation_seconds": time.monotonic() - started,
+                    "generation_seconds": generation_seconds,
                     "peak_vram_gb": metrics.get("peak_vram_gb"),
+                    "timings": {
+                        "queue_seconds": queue_seconds,
+                        "state_reload_seconds": state_reload_seconds,
+                        "input_staging_seconds": input_staging_seconds,
+                        "output_store_seconds": output_store_seconds or 0.0,
+                        "worker_seconds": time.monotonic() - worker_started,
+                    },
+                    "input_staging": {
+                        "prefetched": prefetched_inputs,
+                        "mounted": mounted_inputs,
+                    },
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "image_key": f"outputs/{target.name}" if request.mode in STILL_IMAGE_MODES else None,
                     "video_key": None if request.mode in STILL_IMAGE_MODES else f"outputs/{target.name}",

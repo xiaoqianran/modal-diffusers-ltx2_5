@@ -14,6 +14,7 @@ from ltx25.modal_client import (
     JobStateError,
     ModalClient,
     ModalOperationError,
+    QueueFullError,
     SubmissionError,
 )
 
@@ -88,6 +89,9 @@ def make_client(tmp_path: Path):
     control.model_id = "test"
     control.gpu_idle_seconds = 600
     control.keep_gpu_warm = False
+    control.warm_lease_seconds = 90
+    control.max_queue_size = 4
+    control._warm_lease_until = 0.0
     control.cache_root = tmp_path
     control.output_cache = tmp_path / "outputs"
     control.upload_cache = tmp_path / "uploads"
@@ -102,6 +106,8 @@ def make_client(tmp_path: Path):
     control._warm_lock = threading.Lock()
     control._output_lock = threading.Lock()
     control._session_lock = threading.Lock()
+    control._admission_lock = threading.RLock()
+    control.job_store.put(control._active_jobs_key(), [])
     return control
 
 
@@ -243,6 +249,52 @@ def test_keep_warm_dedupes_pending_call_and_unload_cancels_it(tmp_path):
     assert pending.cancelled is True
     assert idle_windows[-1] == 2
     assert control.start_warmup() is False
+
+
+def test_expired_warm_lease_scales_down_when_queue_is_idle(tmp_path):
+    control = make_client(tmp_path)
+    idle_windows = []
+    control.keep_gpu_warm = True
+    control._warm_lease_until = 0.0
+    control.worker = SimpleNamespace(
+        update_autoscaler=lambda **kwargs: idle_windows.append(kwargs["scaledown_window"])
+    )
+
+    assert control.maintain_keep_warm() is False
+    assert control.keep_gpu_warm is False
+    assert idle_windows[-1] == 2
+
+
+def test_active_job_keeps_gpu_warm_after_studio_lease_expires(tmp_path):
+    control = make_client(tmp_path)
+    idle_windows = []
+    control.worker = SimpleNamespace(
+        update_autoscaler=lambda **kwargs: idle_windows.append(kwargs["scaledown_window"])
+    )
+    control.create_job(GenerateRequest(prompt="queued"))
+    control._warm_lease_until = 0.0
+
+    # The queued generation call itself starts/keeps the worker; no redundant
+    # ready() call is spawned when only an active-job lease remains.
+    assert control.maintain_keep_warm() is False
+    assert control.keep_gpu_warm is True
+    assert idle_windows[-1] == control.gpu_idle_seconds
+
+
+def test_queue_capacity_is_enforced_before_spawn(tmp_path):
+    control = make_client(tmp_path)
+    control.max_queue_size = 2
+    first = control.create_job(GenerateRequest(prompt="first"))
+    control.create_job(GenerateRequest(prompt="second"))
+
+    with pytest.raises(QueueFullError, match="GPU queue is full"):
+        control.create_job(GenerateRequest(prompt="third"))
+
+    record = control.job_store.get(f"job:{first['id']}")
+    record["status"] = "completed"
+    control.job_store.put(f"job:{first['id']}", record)
+    third = control.create_job(GenerateRequest(prompt="third"))
+    assert third["status"] == "queued"
 
 
 def test_interrupt_without_id_prefers_running_job(tmp_path, monkeypatch):

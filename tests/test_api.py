@@ -9,12 +9,14 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import ltx25.api as api_module
+from ltx25.modal_client import QueueFullError
 from ltx25.schemas import ConcatRequest, GenerateRequest, STILL_IMAGE_MODES
 
 
 class FakeControl:
     model_id = "test/ltx25"
     gpu_idle_seconds = 600
+    warm_lease_seconds = 90
     keep_gpu_warm = False
 
     def __init__(self, root: Path):
@@ -39,6 +41,14 @@ class FakeControl:
 
     def media_info(self):
         return {"backend": "volume", "direct_upload": False, "direct_download": False}
+
+    def queue_stats(self):
+        queued = sum(job["status"] == "queued" for job in self.jobs.values())
+        running = sum(job["status"] == "running" for job in self.jobs.values())
+        return {"queued": queued, "running": running, "active": queued + running, "capacity": 4}
+
+    def maintain_keep_warm(self):
+        return False
 
     def set_idle_window(self, seconds):
         self.idle_windows.append(seconds)
@@ -222,6 +232,18 @@ def test_health_and_generation(client):
     assert reused.json()["kind"] == "video"
     assert test_client.delete(f"/api/jobs/{job['id']}").status_code == 204
     assert test_client.get(f"/api/jobs/{job['id']}").status_code == 404
+
+
+def test_queue_full_maps_to_http_429(client):
+    test_client, control = client
+    control.create_job = lambda request: (_ for _ in ()).throw(
+        QueueFullError("GPU queue is full (4/4)")
+    )
+
+    response = test_client.post("/api/jobs", json={"prompt": "queued"})
+
+    assert response.status_code == 429
+    assert "GPU queue is full" in response.json()["detail"]
 
 
 def test_validation():
