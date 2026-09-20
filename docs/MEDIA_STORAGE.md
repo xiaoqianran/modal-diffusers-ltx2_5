@@ -6,11 +6,11 @@ LTX-2.5 separates the control plane from the media data plane.
 Control plane
 Browser -> FastAPI -> Modal Dict / Modal RPC
 
-Media data plane (default)
+Media data plane (Volume fallback)
 Browser -> FastAPI proxy -> Modal Volume -> GPU worker
 
-Media data plane (R2/S3)
-Browser <--------------------> R2/S3
+Media data plane (S3-compatible)
+Browser <--------------------> S3 / MinIO / R2
                                 ^
                                 |
                        CloudBucketMount
@@ -21,11 +21,30 @@ Browser <--------------------> R2/S3
 Job records store stable object keys such as `outputs/<job>.mp4`. They never
 store presigned URLs, because those URLs expire.
 
+## Recommended hybrid layout
+
+Keep model/runtime state close to the GPU and move only user media to object
+storage:
+
+```text
+Modal Volume
+├─ models
+├─ kernel cache
+└─ runtime state / LoRA metadata
+
+S3-compatible object storage
+├─ inputs
+└─ outputs
+```
+
+This avoids routing large media through the local FastAPI process while keeping
+model loading and CUDA/NATTEN caches on Modal-managed storage.
+
 ## Backends
 
-### Volume (default)
+### Modal Volume
 
-```bash
+```text
 LTX25_MEDIA_BACKEND=volume
 ```
 
@@ -33,64 +52,78 @@ This preserves the zero-configuration development path. The browser sends a
 raw binary PUT to the local router and the router writes the asset to
 `ltx25-state`.
 
-### Cloudflare R2
+### S3-compatible storage
 
-The browser uploads directly to R2:
+Set `LTX25_MEDIA_BACKEND=s3` for MinIO, Backblaze B2, Tigris, AWS S3, or
+another compatible service. Cloudflare R2 may use either `s3` or the legacy
+`r2` alias.
+
+The browser uploads directly to object storage:
 
 - files below the multipart threshold use one presigned PUT;
-- larger files use parallel S3 multipart PUT;
+- larger files use parallel multipart PUTs;
 - Retake / Extend use server-side `CopyObject`;
-- `/outputs/<name>` returns a short-lived redirect to a signed R2 GET/HEAD;
+- `/outputs/<name>` returns a short-lived redirect to a signed GET/HEAD;
 - the GPU worker reads input objects through Modal `CloudBucketMount`.
 
 The worker does **not** mux MP4 directly on the bucket mount. MP4 finalization
-and faststart require seek-like file operations, while S3 mounts are optimized
-for sequential object writes. The worker therefore encodes to local
-`/tmp/ltx25-outputs` and then copies the finalized file sequentially to
-`/media/outputs`.
+and faststart require seek-like file operations, so the worker encodes to local
+`/tmp/ltx25-outputs` and then uploads the finalized object through the S3 API.
+`CloudBucketMount` is read-only and is used only for GPU access to source media.
 
-## R2 configuration
-
-Create an R2 bucket, for example `ltx25-media`, and create an R2 API token
-with object read/write permission for that bucket.
+## Generic S3 configuration
 
 The local router needs S3-compatible credentials:
 
 ```text
-LTX25_MEDIA_BACKEND=r2
-LTX25_R2_BUCKET=ltx25-media
-LTX25_R2_ENDPOINT_URL=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-LTX25_R2_ACCESS_KEY_ID=<R2 access key id>
-LTX25_R2_SECRET_ACCESS_KEY=<R2 secret access key>
+LTX25_MEDIA_BACKEND=s3
+LTX25_S3_BUCKET=ltx25-media
+LTX25_S3_ENDPOINT_URL=https://s3.example.com
+LTX25_S3_REGION=us-east-1
+AWS_ACCESS_KEY_ID=<access key>
+AWS_SECRET_ACCESS_KEY=<secret key>
 
+LTX25_MODAL_MEDIA_SECRET=s3-media
 LTX25_MEDIA_PRESIGN_SECONDS=3600
 LTX25_MEDIA_MULTIPART_THRESHOLD_MB=96
 LTX25_MEDIA_PART_SIZE_MB=16
 ```
 
-The Modal worker needs the same R2 credentials in a Modal Secret using the
-AWS-compatible key names expected by `CloudBucketMount`:
+The Modal worker needs the same credentials in a Modal Secret:
 
 ```bash
-modal secret create r2-media \
-  AWS_ACCESS_KEY_ID=<R2 access key id> \
-  AWS_SECRET_ACCESS_KEY=<R2 secret access key>
+modal secret create s3-media \
+  AWS_ACCESS_KEY_ID=<access key> \
+  AWS_SECRET_ACCESS_KEY=<secret key>
 ```
 
-Then set:
+The environment used for `modal deploy modal_app.py` must contain the media
+backend, bucket, endpoint, region, and secret name. The local router and
+deployed worker must select the same backend and bucket.
+
+## Current SG-JP MinIO deployment
+
+The current hybrid deployment uses:
 
 ```text
-LTX25_MODAL_MEDIA_SECRET=r2-media
+LTX25_MEDIA_BACKEND=s3
+LTX25_S3_BUCKET=ltx25-media
+LTX25_S3_ENDPOINT_URL=https://s3-sg-jp.202820.xyz
+LTX25_S3_REGION=us-east-1
+LTX25_MODAL_MEDIA_SECRET=s3-media
 ```
 
-The environment used for `modal deploy modal_app.py` must also contain
-`LTX25_MEDIA_BACKEND`, the bucket name, and endpoint URL. The local router
-and deployed worker must select the same media backend and bucket.
+Long-lived credentials are intentionally kept out of git. The local copy lives
+in the ignored `.env` file; the GPU worker receives them from the Modal
+`s3-media` Secret.
 
-## R2 CORS
+## Browser CORS
 
-Browser-to-R2 PUTs require bucket CORS. A development configuration for the
-default frontend origins is:
+Direct browser PUTs require CORS on the object store. At minimum the frontend
+origin must be allowed to use PUT and JavaScript must be able to read the
+multipart response `ETag`.
+
+Example policy shape:
 
 ```json
 [
@@ -107,13 +140,10 @@ default frontend origins is:
 ]
 ```
 
-Add the real production frontend origin before deploying publicly. Multipart
-completion requires the browser to be able to read each part response's
-`ETag`, so `ETag` must remain exposed.
+MinIO also supports its own API CORS configuration. Regardless of provider,
+multipart completion requires `ETag` to be browser-readable.
 
 ## Upload protocol
-
-The browser uses a two-phase control protocol around direct object transfer:
 
 ```text
 POST /api/assets/prepare
@@ -121,19 +151,18 @@ POST /api/assets/prepare
 
 PUT bytes
   -> local proxy URL (Volume), or
-  -> presigned R2 object/part URLs
+  -> presigned S3 object/part URLs
 
 POST /api/assets/{asset_id}/complete
+  -> completes multipart when needed
   -> verifies final object size
   -> records the durable asset key
 
 DELETE /api/assets/{asset_id}/upload
-  -> best-effort abort after a failed upload
+  -> best-effort abort after a failed multipart upload
 ```
 
-Multipart uploads default to four concurrent browser PUTs. The finalization
-request returns part ETags to the router, which completes the S3 multipart
-upload and checks the final object size.
+Multipart uploads default to four concurrent browser PUTs.
 
 ## Output delivery
 
@@ -143,10 +172,8 @@ Application state continues to expose stable URLs:
 /outputs/<filename>
 ```
 
-With Volume storage this is a local `FileResponse`. With R2/S3 it is a 307
-redirect to a freshly signed GET or HEAD URL. This keeps expiring credentials
-out of job history while allowing the browser to talk directly to object
-storage for the actual media bytes.
+With Volume storage this is a local `FileResponse`. With S3-compatible
+storage it is a 307 redirect to a freshly signed GET or HEAD URL.
 
 ## Metrics
 
@@ -167,18 +194,16 @@ router is no longer in the media byte path.
 
 ## Switching an existing deployment
 
-Do not switch a deployment with active jobs in flight. Existing objects in the
-old Modal Volume are not automatically copied into R2. Historical job metadata
-is retained, but media objects must be migrated if old outputs must remain
-available after the backend switch.
+Do not switch a deployment with active jobs in flight. Existing media objects
+in the old Modal Volume are not automatically copied to object storage.
 
 A safe rollout is:
 
-1. stop submitting new jobs;
-2. wait for active jobs to finish;
-3. copy any required `inputs/` and `outputs/` objects to the R2 bucket;
-4. configure R2 CORS and the Modal media secret;
-5. deploy the worker with the R2 environment;
-6. start the local router with the same R2 environment;
-7. verify `/api/health` reports `media.backend = r2`;
-8. submit a small image job, then a multipart-sized video upload.
+1. stop new jobs and let active jobs finish;
+2. copy any historical inputs/outputs that must remain available;
+3. configure S3 credentials and browser CORS;
+4. create/update the Modal media secret;
+5. deploy the worker with the S3 environment;
+6. start the local router with the same environment;
+7. verify `/api/health` reports `media.backend = s3`;
+8. submit a small image job and then a multipart-sized upload.

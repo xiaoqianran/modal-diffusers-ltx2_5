@@ -245,14 +245,20 @@ class S3MediaStore(MediaStore):
                 import boto3
             except ImportError as exc:
                 raise RuntimeError(
-                    "boto3 is required when LTX25_MEDIA_BACKEND=r2; install requirements-local.txt"
+                    "boto3 is required when LTX25_MEDIA_BACKEND uses S3-compatible storage; install requirements-local.txt"
                 ) from exc
+            from botocore.config import Config
+
             client = boto3.client(
                 "s3",
                 endpoint_url=self.endpoint_url,
                 aws_access_key_id=access_key_id,
                 aws_secret_access_key=secret_access_key,
                 region_name=region,
+                config=Config(
+                    signature_version="s3v4",
+                    s3={"addressing_style": "path"},
+                ),
             )
         self.client = client
 
@@ -362,7 +368,12 @@ class S3MediaStore(MediaStore):
         started = time.monotonic()
         byte_count = local_path.stat().st_size
         with local_path.open("rb") as source:
-            self.client.upload_fileobj(source, self.bucket, key)
+            self.client.upload_fileobj(
+                source,
+                self.bucket,
+                key,
+                ExtraArgs={"ContentType": media_content_type(key)},
+            )
         self._record("upload", elapsed=time.monotonic() - started, byte_count=byte_count)
 
     def copy(self, source_key: str, destination_key: str) -> int:

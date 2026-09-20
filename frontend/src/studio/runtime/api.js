@@ -88,7 +88,7 @@ async function uploadMultipart(file, plan, concurrency = 4) {
       const etag = response.headers.get('ETag') || response.headers.get('etag')
       if (!etag) {
         throw new ApiError(
-          '对象存储没有暴露 ETag；请检查 R2 CORS 的 ExposeHeaders',
+          '对象存储没有暴露 ETag；请检查 S3/MinIO CORS 的 ExposeHeaders',
           502
         )
       }

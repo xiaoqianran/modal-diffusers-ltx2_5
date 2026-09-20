@@ -22,7 +22,8 @@ HF_SECRET_NAME = os.environ.get("LTX25_MODAL_HF_SECRET", "huggingface")
 MEDIA_BACKEND = os.environ.get("LTX25_MEDIA_BACKEND", "volume").strip().lower()
 MEDIA_BUCKET = os.environ.get("LTX25_R2_BUCKET") or os.environ.get("LTX25_S3_BUCKET")
 MEDIA_ENDPOINT_URL = os.environ.get("LTX25_R2_ENDPOINT_URL") or os.environ.get("LTX25_S3_ENDPOINT_URL")
-MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "r2-media")
+MEDIA_REGION = os.environ.get("LTX25_S3_REGION", "auto")
+MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "s3-media")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -62,10 +63,16 @@ if MEDIA_BACKEND in {"r2", "s3"}:
     mount_kwargs = {
         "bucket_name": MEDIA_BUCKET,
         "secret": media_secret,
-        "read_only": False,
+        # The worker only reads source media through Mountpoint. Generated
+        # outputs are uploaded with the S3 API after local mux/finalization.
+        "read_only": True,
     }
     if MEDIA_ENDPOINT_URL:
         mount_kwargs["bucket_endpoint_url"] = MEDIA_ENDPOINT_URL
+        # Self-hosted S3 endpoints such as MinIO may not provide wildcard
+        # bucket DNS. Keep the bucket in the request path instead of resolving
+        # <bucket>.<endpoint>.
+        mount_kwargs["force_path_style"] = True
     media_mount = modal.CloudBucketMount(**mount_kwargs)
     MEDIA_ROOT = "/media"
 elif MEDIA_BACKEND != "volume":
@@ -188,6 +195,15 @@ def prepare_models() -> dict[str, str]:
 
 GPU_ENV = {
     "PYTHONPATH": "/app",
+    # Keep deployment-time and remote module evaluation on the same media
+    # branch. Modal re-evaluates this module inside the worker container; if
+    # these values are missing there, the code falls back to `volume` and the
+    # serialized CloudBucketMount dependency graph no longer matches.
+    "LTX25_MEDIA_BACKEND": MEDIA_BACKEND,
+    "LTX25_S3_BUCKET": MEDIA_BUCKET or "",
+    "LTX25_S3_ENDPOINT_URL": MEDIA_ENDPOINT_URL or "",
+    "LTX25_S3_REGION": MEDIA_REGION,
+    "LTX25_MODAL_MEDIA_SECRET": MEDIA_SECRET_NAME,
     "QUANTIZED_MODEL_DIR": PIPELINE_DIR,
     "LTX25_TEXT_ENCODER_DIR": f"{PIPELINE_DIR}/text_encoder",
     "LTX25_TRANSFORMER_CONFIG_DIR": f"{PIPELINE_DIR}/transformer",
@@ -198,9 +214,9 @@ GPU_ENV = {
     "OFFLOAD_MODE": "none",
     "LTX25_CUDA_GRAPH": "1",
     "LTX25_COMPILE_BLOCKS": "off",
-    # MP4 muxing performs seeks (notably for faststart), while S3 Mountpoint
-    # supports sequential writes. Object-store mode therefore encodes locally
-    # and copies the finalized file to the bucket afterwards.
+    # MP4 muxing performs seeks (notably for faststart), so object-store mode
+    # encodes locally first and uploads the finalized file through the S3 API.
+    # CloudBucketMount is kept read-only for source-media access.
     "OUTPUT_DIR": WORKER_OUTPUT_DIR,
     "INPUT_DIR": f"{MEDIA_ROOT}/inputs",
     "LORA_DIR": "/data/loras",
@@ -253,9 +269,11 @@ class LTX25Worker:
         import time
 
         from ltx25.config import settings
+        from ltx25.media_store import create_media_store
         from ltx25.runtime import LTXGenerator
 
         started = time.monotonic()
+        self.media_store = create_media_store(None) if MEDIA_BACKEND != "volume" else None
         self.generator = LTXGenerator(settings)
         self.generator.load()
         self.load_seconds = time.monotonic() - started
@@ -281,7 +299,6 @@ class LTX25Worker:
         while process-level failures such as GPU preemption escape this method and
         are retried by Modal with the same job id/output path.
         """
-        import shutil
         import time
         from pathlib import Path
 
@@ -340,10 +357,7 @@ class LTX25Worker:
             if MEDIA_BACKEND == "volume":
                 state_volume.commit()
             else:
-                remote_target = Path(MEDIA_ROOT) / "outputs" / target.name
-                if not remote_target.exists():
-                    with target.open("rb") as source, remote_target.open("wb") as destination:
-                        shutil.copyfileobj(source, destination, length=8 * 1024 * 1024)
+                self.media_store.upload_local(target, f"outputs/{target.name}")
                 target.unlink(missing_ok=True)
             interrupted = _honor_interrupt(job_id, record)
             if interrupted is not None:

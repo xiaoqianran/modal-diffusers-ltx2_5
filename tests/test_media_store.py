@@ -54,8 +54,9 @@ class FakeS3:
         if source in self.objects:
             self.objects[Key] = self.objects[source]
 
-    def upload_fileobj(self, source, bucket, key):
+    def upload_fileobj(self, source, bucket, key, ExtraArgs=None):
         data = source.read()
+        self.calls.append(("upload_fileobj", bucket, key, ExtraArgs or {}))
         self.objects[key] = data
         self.sizes[key] = len(data)
 
@@ -182,6 +183,8 @@ def test_s3_local_upload_and_download_support_concat_cache(tmp_path: Path):
     store.download_to("outputs/combined.mp4", target)
 
     assert target.read_bytes() == b"video-bytes"
+    upload = next(call for call in client.calls if call[0] == "upload_fileobj")
+    assert upload[3]["ContentType"] == "video/mp4"
     assert store.metrics()["upload"]["bytes"] == len(b"video-bytes")
     assert store.metrics()["download"]["bytes"] == len(b"video-bytes")
 
@@ -227,3 +230,5 @@ def test_create_media_store_maps_r2_environment(monkeypatch):
     assert store.part_size == 20 * MIB
     assert captured["service"] == "s3"
     assert captured["region_name"] == "auto"
+    assert captured["config"].signature_version == "s3v4"
+    assert captured["config"].s3["addressing_style"] == "path"

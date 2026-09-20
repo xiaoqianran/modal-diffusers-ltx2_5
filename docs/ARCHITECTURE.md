@@ -125,7 +125,7 @@ backend 与 upload/download/copy 指标；直传 WAN 时间由浏览器 finalize
 
 MP4 主编码路径写入 `+faststart`，将 `moov` 元数据前置，避免浏览器为了读取
 metadata 而等待整个文件尾部。R2 模式下 MP4 先在 GPU container 的本地 scratch
-完成 mux，再顺序复制到 CloudBucketMount，避免在 S3 mount 上做 seek/random write。
+完成 mux，再通过 S3 API 上传最终文件；CloudBucketMount 仅只读输入，避免依赖 S3 mount 的目录/POSIX 写入语义。
 
 ## 依赖规则
 

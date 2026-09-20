@@ -37,13 +37,13 @@ if not exist "%PYTHON%" (
 
 if /I "%LTX25_MEDIA_BACKEND%"=="r2" (
   "%PYTHON%" -c "import boto3" >nul 2>nul || (
-    echo [LTX-2.5] Installing R2/S3 client dependency...
+    echo [LTX-2.5] Installing S3-compatible client dependency...
     uv pip install --python "%PYTHON%" "boto3>=1.40,<2" || (pause & exit /b 1)
   )
 )
 if /I "%LTX25_MEDIA_BACKEND%"=="s3" (
   "%PYTHON%" -c "import boto3" >nul 2>nul || (
-    echo [LTX-2.5] Installing R2/S3 client dependency...
+    echo [LTX-2.5] Installing S3-compatible client dependency...
     uv pip install --python "%PYTHON%" "boto3>=1.40,<2" || (pause & exit /b 1)
   )
 )
