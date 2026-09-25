@@ -725,3 +725,501 @@
     min-width: 92px;
   }
 }
+
+/* 2026-09 visual hierarchy pass: media first, controls second */
+
+:root {
+  --workflow-sidebar-w: 196px;
+  --studio-inspector-w: 320px;
+}
+
+.workflow-sidebar-head {
+  padding: 20px 18px 12px;
+  display: grid;
+  gap: 5px;
+}
+
+.workflow-sidebar-head .eyebrow,
+.workflow-group h3,
+.workflow-advanced summary {
+  font-size: 10px;
+}
+
+.workflow-sidebar-head strong {
+  color: #f0f2f4;
+  font-size: 17px;
+  font-weight: 590;
+  letter-spacing: -.025em;
+}
+
+.stage-empty-kicker {
+  font-size: 10px;
+}
+
+.viewport-empty .stage-hint-title {
+  font-size: clamp(22px, 2.3vw, 34px);
+}
+
+.viewport-empty .stage-state small,
+.canvas-prompt {
+  font-size: 12px;
+}
+
+.resolved-model-badge {
+  font-size: 10px;
+}
+
+.prompt-dock-v3 {
+  margin: 2px 18px 14px;
+  padding: 10px 11px 9px;
+}
+
+.prompt-dock-v3 .prompt-row textarea {
+  height: 68px;
+  font-size: 14px;
+}
+
+.prompt-dock-v3 .generate-button {
+  min-width: 116px;
+  font-size: 12px;
+}
+
+.workflow-handoff {
+  min-height: 30px;
+  margin: 0 2px 8px;
+  padding: 6px 9px;
+  border: 1px solid rgba(200,241,105,.13);
+  border-radius: 9px;
+  background: linear-gradient(90deg, rgba(200,241,105,.05), rgba(255,255,255,.015));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #98a0aa;
+  font-size: 11px;
+}
+
+.handoff-source {
+  color: #c8d0d8;
+  font-weight: 590;
+}
+
+.handoff-arrow {
+  color: var(--accent);
+}
+
+.handoff-target {
+  color: #dce8c5;
+}
+
+.reference-placeholder {
+  font-size: 10px;
+}
+
+.reference-card-type {
+  font-size: 9px;
+}
+
+.reference-card-copy strong {
+  font-size: 11px;
+}
+
+.reference-card-copy small {
+  font-size: 9px;
+}
+
+.prompt-summary {
+  gap: 6px;
+  min-height: 26px;
+  font-size: 10px;
+}
+
+.composer-chip {
+  min-height: 24px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255,255,255,.055);
+  border-radius: 7px;
+  background: rgba(255,255,255,.025);
+  color: #8e97a2;
+  display: inline-flex;
+  align-items: center;
+}
+
+.prompt-workflow {
+  color: #a9b1bb;
+}
+
+.inspector-identity .eyebrow {
+  font-size: 10px;
+}
+
+.inspector-identity h2 {
+  font-size: 18px;
+}
+
+.inspector-heading {
+  font-size: 11px;
+}
+
+.inspector-heading small,
+.resolved-card span,
+.resolved-card small,
+.studio-inspector .switch-row small,
+.inspector-subheading {
+  font-size: 9px;
+}
+
+.studio-inspector .field > span,
+.ratio-choice {
+  font-size: 10px;
+}
+
+.studio-inspector .field input,
+.studio-inspector .field select,
+.studio-inspector .field textarea,
+.studio-inspector .switch-row strong,
+.inspector-advanced summary {
+  font-size: 11px;
+}
+
+.resolved-card strong {
+  font-size: 12px;
+}
+
+.inspector-subheading.first {
+  margin-top: 0;
+}
+
+.studio-status {
+  min-height: 34px;
+  padding-block: 4px;
+}
+
+.studio-status .status-copy {
+  display: grid;
+  gap: 1px;
+  text-align: left;
+  line-height: 1.05;
+}
+
+.studio-status .status-copy strong {
+  color: #d9dee4;
+  font-size: 10px;
+  font-weight: 610;
+}
+
+.studio-status .status-copy small {
+  color: #6f7882;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+@media (max-width: 1360px) {
+  :root {
+    --workflow-sidebar-w: 184px;
+    --studio-inspector-w: 300px;
+  }
+
+  .prompt-dock-v3 {
+    margin-inline: 12px;
+  }
+}
+
+@media (max-width: 1120px) {
+  :root {
+    --workflow-sidebar-w: 160px;
+    --studio-inspector-w: 276px;
+  }
+
+  .workflow-link {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 900px) {
+  .prompt-dock-v3 {
+    margin: 2px 8px 8px;
+  }
+
+  .workflow-handoff {
+    font-size: 10px;
+  }
+}
+
+.rail-sections {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.rail-section-link {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 11px;
+}
+
+.rail-section-link small {
+  color: #5f6873;
+  font-size: 9px;
+  font-weight: 520;
+}
+
+.rail-section-link.active small {
+  color: #87916f;
+}
+
+.workflow-chip {
+  padding: 0 7px;
+}
+
+.workflow-chip select {
+  min-height: 22px;
+  max-width: 168px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #a9b1bb;
+  font: inherit;
+  font-weight: 560;
+  cursor: pointer;
+}
+
+.workflow-chip select option,
+.workflow-chip select optgroup {
+  background: #13171c;
+  color: #d7dce2;
+}
+
+.stage-act,
+.run-status,
+.filmstrip-head,
+.canvas-meta {
+  font-size: 10px;
+}
+
+.stage-act {
+  min-height: 30px;
+  padding-inline: 10px;
+}
+
+.workflow-handoff {
+  animation: handoff-in .18s ease both;
+}
+
+@keyframes handoff-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* second polish pass: give the stage more room and compress peripheral chrome */
+
+:root {
+  --workflow-sidebar-w: 174px;
+  --studio-inspector-w: 304px;
+}
+
+.creation-space-v3 .canvas-shell {
+  padding: 10px 18px 3px;
+}
+
+.creation-space-v3 .canvas {
+  gap: 6px;
+}
+
+.creation-space-v3 .canvas-meta {
+  min-height: 19px;
+}
+
+.viewport {
+  width: min(100cqw, 1280px, calc(100cqh * 16 / 9));
+}
+
+.canvas-foot {
+  min-height: 29px;
+}
+
+.filmstrip-wrap {
+  padding: 0 18px 7px;
+}
+
+.filmstrip-head {
+  margin-bottom: 4px;
+  font-size: 9px;
+}
+
+.filmstrip {
+  gap: 6px;
+}
+
+.take {
+  flex-basis: 102px;
+  grid-template-rows: 50px auto;
+  border-radius: 8px;
+}
+
+.take-meta {
+  padding: 4px 5px;
+}
+
+.take-mode,
+.take-time {
+  font-size: 8px;
+}
+
+.prompt-dock-v3 {
+  margin: 1px 14px 11px;
+  padding: 9px 10px 7px;
+  border-radius: 14px;
+}
+
+.prompt-dock-v3 .prompt-row textarea {
+  height: 60px;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
+.prompt-dock-v3 .generate-button {
+  min-width: 108px;
+  border-radius: 10px;
+}
+
+.prompt-summary {
+  min-height: 24px;
+  padding-top: 4px;
+}
+
+.composer-chip {
+  min-height: 22px;
+  padding: 3px 7px;
+  border-radius: 7px;
+}
+
+.workflow-handoff {
+  min-height: 38px;
+  padding: 5px 8px;
+}
+
+.reference-tray {
+  margin-bottom: 6px;
+}
+
+.reference-card {
+  min-width: 142px;
+  min-height: 38px;
+  padding: 5px 26px 5px 8px;
+  border-radius: 9px;
+}
+
+.reference-card.has-preview {
+  min-width: 190px;
+}
+
+.reference-card-preview {
+  width: 42px;
+  height: 34px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #080a0d;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+}
+
+.reference-card-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.inspector-scroll {
+  padding: 9px 11px 14px;
+}
+
+.inspector-block {
+  padding: 11px 2px 12px;
+}
+
+.inspector-heading {
+  margin-bottom: 7px;
+}
+
+.studio-inspector .field {
+  gap: 3px;
+}
+
+.studio-inspector .field input,
+.studio-inspector .field select,
+.studio-inspector .field textarea {
+  min-height: 31px;
+}
+
+.ratio-grid {
+  gap: 4px;
+}
+
+.ratio-choice {
+  min-height: 39px;
+}
+
+.resolved-card {
+  margin-top: 7px;
+  padding: 8px 9px;
+}
+
+.rail-section-link {
+  min-height: 44px;
+}
+
+@media (max-width: 1360px) {
+  :root {
+    --workflow-sidebar-w: 164px;
+    --studio-inspector-w: 288px;
+  }
+}
+
+@media (max-width: 1120px) {
+  :root {
+    --workflow-sidebar-w: 148px;
+    --studio-inspector-w: 264px;
+  }
+}
+
+.workflow-sidebar-head {
+  padding: 18px 18px 10px;
+  gap: 0;
+}
+
+.rail-sections {
+  gap: 2px;
+}
+
+.rail-section-link {
+  min-height: 42px;
+  position: relative;
+  border-color: transparent;
+  background: transparent;
+}
+
+.rail-section-link:hover {
+  border-color: transparent;
+  background: rgba(255,255,255,.025);
+}
+
+.rail-section-link.active {
+  border-color: transparent;
+  background: linear-gradient(90deg, rgba(200,241,105,.07), rgba(255,255,255,.018));
+}
+
+.rail-section-link.active::before {
+  width: 3px;
+  height: 14px;
+  margin: 0;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  border-radius: 0 2px 2px 0;
+}

@@ -16,6 +16,7 @@ import { nextTick } from 'vue'
 import { createPoller, POLL_ACTIVE_MS, POLL_IDLE_MS } from './polling.js'
 import { guessKind, validateFile } from './uploads.js'
 import { ApiError } from './api.js'
+import { buildGenerationRequest, parseSize } from '../model/generationRequest.js'
 import { createDraft, useStudioRuntime } from './useStudioRuntime.js'
 
 let passed = 0
@@ -592,7 +593,7 @@ await test('deriveFromOutput routes a completed image into LTX image-to-video', 
       id: imageId,
       video_url: null,
       image_url: '/outputs/j.png',
-      request: { mode: 't2i', prompt: 'image', width: 1024, height: 1024, num_frames: 9, fps: 24, steps: 40, upscale: true },
+      request: { mode: 't2i', engine: 'qwen', prompt: 'image', width: 1024, height: 1024, num_frames: 9, fps: 24, steps: 40, upscale: true },
     })],
     reuseOutput: async id => {
       api.calls.push(['reuseOutput', id])
@@ -607,7 +608,23 @@ await test('deriveFromOutput routes a completed image into LTX image-to-video', 
   const result = await runtime.deriveFromOutput('i2v')
   assert.equal(result.ok, true)
   assert.equal(runtime.draft.mode, 'i2v')
+  assert.equal(runtime.draft.engine, 'ltx')
+  assert.equal(runtime.draft.size, '704x704')
   assert.equal(runtime.attachments.first.id, 'e'.repeat(32))
+
+  const size = parseSize(runtime.draft.size)
+  const body = buildGenerationRequest(
+    { ...runtime.draft, ...size },
+    runtime.attachments,
+    runtime.sessionNumber.value,
+  )
+  assert.equal(body.mode, 'i2v')
+  assert.equal(body.engine, 'ltx')
+  assert.equal(body.width, 704)
+  assert.equal(body.height, 704)
+  assert.equal(body.conditions.length, 1)
+  assert.equal(body.conditions[0].asset_id, 'e'.repeat(32))
+  assert.equal(body.conditions[0].kind, 'image')
 })
 
 await test('reuseJob copies parameters back into the draft', async () => {

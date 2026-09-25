@@ -1,48 +1,63 @@
 <script setup>
-import { modeLabel } from '../model/modes.js'
-import { WORKFLOW_GROUPS } from '../model/workflows.js'
+import { WORKFLOW_GROUPS, workflowGroupForMode } from '../model/workflows.js'
 
-defineProps({
+const props = defineProps({
   currentMode: { type: String, required: true },
   historyActive: { type: Boolean, default: false },
 })
 const emit = defineEmits(['select-mode', 'history'])
+
+const createModes = WORKFLOW_GROUPS
+  .filter(group => ['image', 'video'].includes(group.id))
+  .flatMap(group => group.modes)
+const editModes = WORKFLOW_GROUPS.find(group => group.id === 'edit').modes
+const controlModes = WORKFLOW_GROUPS.find(group => group.id === 'advanced').modes
+
+function sectionForMode(mode) {
+  const group = workflowGroupForMode(mode)
+  if (group === 'edit') return 'edit'
+  if (group === 'advanced') return 'control'
+  return 'create'
+}
+
+function chooseSection(section) {
+  if (section === sectionForMode(props.currentMode)) return
+  if (section === 'create') emit('select-mode', 't2i')
+  if (section === 'edit') emit('select-mode', 'retake')
+  if (section === 'control') emit('select-mode', 'keyframe_interpolation')
+}
 </script>
 
 <template>
   <nav class="workflow-sidebar" aria-label="Create workflows">
-    <div class="workflow-sidebar-head"><span class="eyebrow">CREATE</span></div>
-    <div class="workflow-groups">
-      <section v-for="group in WORKFLOW_GROUPS.filter(item => item.id !== 'advanced')" :key="group.id" class="workflow-group">
-        <h3>{{ group.label }}</h3>
-        <button
-          v-for="mode in group.modes"
-          :key="mode"
-          class="workflow-link"
-          :class="{ active: !historyActive && currentMode === mode }"
-          type="button"
-          @click="emit('select-mode', mode)"
-        >
-          <span>{{ modeLabel(mode) }}</span>
-        </button>
-      </section>
-
-      <details
-        class="workflow-group workflow-advanced"
-        :open="WORKFLOW_GROUPS.find(item => item.id === 'advanced')?.modes.includes(currentMode)"
+    <div class="workflow-sidebar-head">
+      <span class="eyebrow">WORKSPACE</span>
+    </div>
+    <div class="workflow-groups rail-sections">
+      <button
+        class="workflow-link rail-section-link"
+        :class="{ active: !historyActive && sectionForMode(currentMode) === 'create' }"
+        type="button"
+        @click="chooseSection('create')"
       >
-        <summary>Advanced</summary>
-        <button
-          v-for="mode in WORKFLOW_GROUPS.find(item => item.id === 'advanced').modes"
-          :key="mode"
-          class="workflow-link"
-          :class="{ active: !historyActive && currentMode === mode }"
-          type="button"
-          @click="emit('select-mode', mode)"
-        >
-          <span>{{ modeLabel(mode) }}</span>
-        </button>
-      </details>
+        <span>Create</span><small>{{ createModes.length }} workflows</small>
+      </button>
+      <button
+        class="workflow-link rail-section-link"
+        :class="{ active: !historyActive && sectionForMode(currentMode) === 'edit' }"
+        type="button"
+        @click="chooseSection('edit')"
+      >
+        <span>Edit</span><small>{{ editModes.length }} workflows</small>
+      </button>
+      <button
+        class="workflow-link rail-section-link"
+        :class="{ active: !historyActive && sectionForMode(currentMode) === 'control' }"
+        type="button"
+        @click="chooseSection('control')"
+      >
+        <span>Control</span><small>{{ controlModes.length }} workflows</small>
+      </button>
     </div>
     <div class="workflow-sidebar-foot">
       <button class="workflow-link history-link" :class="{ active: historyActive }" type="button" @click="emit('history')">

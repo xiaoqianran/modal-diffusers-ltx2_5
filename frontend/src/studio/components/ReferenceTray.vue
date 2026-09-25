@@ -35,9 +35,20 @@ function onChange(item, event) {
         v-for="item in slots"
         :key="item.slot"
         class="reference-card"
-        :class="{ ready: Boolean(attachments[item.slot]), primary: isPrimary(item) }"
+        :class="{
+          ready: Boolean(attachments[item.slot]),
+          primary: isPrimary(item),
+          'has-preview': attachments[item.slot]?.kind === 'image' && Boolean(attachments[item.slot]?.url),
+        }"
       >
         <input type="file" :accept="item.accept" hidden @change="onChange(item, $event)" />
+        <span
+          v-if="attachments[item.slot]?.kind === 'image' && attachments[item.slot]?.url"
+          class="reference-card-preview"
+          aria-hidden="true"
+        >
+          <img :src="attachments[item.slot].url" alt="" />
+        </span>
         <span class="reference-card-type">{{ isPrimary(item) ? 'PRIMARY' : item.icon }}</span>
         <span class="reference-card-copy">
           <strong>{{ titleFor(item, attachments) }}</strong>

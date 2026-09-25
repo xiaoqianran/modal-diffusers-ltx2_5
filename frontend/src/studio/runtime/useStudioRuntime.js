@@ -33,6 +33,29 @@ import {
 const SESSION_KEY = 'ltx25.session'
 const PENDING_TTL_MS = 30000
 const DEFAULT_FILTER = { status: 'all', mode: 'all', query: '' }
+const LTX_I2V_SIZES = Object.freeze([
+  '704x704',
+  '768x576',
+  '576x768',
+  '768x512',
+  '512x768',
+  '896x512',
+  '512x896',
+])
+
+function closestLtxI2vSize(job) {
+  const width = Number(job?.request?.width)
+  const height = Number(job?.request?.height)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return '768x512'
+  }
+  const target = width / height
+  return LTX_I2V_SIZES.reduce((best, candidate) => {
+    const [cw, ch] = candidate.split('x').map(Number)
+    const [bw, bh] = best.split('x').map(Number)
+    return Math.abs(cw / ch - target) < Math.abs(bw / bh - target) ? candidate : best
+  }, LTX_I2V_SIZES[0])
+}
 const DEFAULT_RANGE = {
   retakeStart: 0,
   retakeEnd: 3,
@@ -521,6 +544,17 @@ export function useStudioRuntime(options = {}) {
     }
     busy.preparing = true
     setMode(mode)
+    // A completed Qwen image handed to I2V must enter the LTX path explicitly.
+    // Do not leave this as `auto`: the handoff itself is a concrete workflow
+    // transition from still-image generation/editing to LTX video generation.
+    if (mode === 'i2v') {
+      draft.engine = 'ltx'
+      // Qwen still-image presets can be much larger than the LTX video base
+      // contract (for example 1024x1024 or 1536x1024). Do not carry that size
+      // across the workflow boundary: LTX I2V validates its own base render
+      // size and may apply a later 2x upscale. Start from the verified default.
+      draft.size = closestLtxI2vSize(job)
+    }
     try {
       setNotice('准备素材：云端复用输出')
       const asset = await client.reuseOutput(job.id)

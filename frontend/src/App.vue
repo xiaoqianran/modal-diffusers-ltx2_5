@@ -38,6 +38,7 @@ const {
   stageActions,
   activeCapability,
   canSubmit,
+  gpuState,
   gpuLabel,
   start,
   dispose,
@@ -75,10 +76,25 @@ const healthText = computed(() => {
   if (isMock.value) return 'Mock data'
   return health.value ? gpuLabel.value : 'Offline'
 })
+const activityText = computed(() => {
+  const job = stageJob.value
+  if (job?.status === 'running') return `Generating · ${Math.round((job.progress || 0) * 100)}%`
+  if (job?.status === 'queued') return 'Queued'
+  if (busy.preparing) return 'Preparing media'
+  if (gpuState.value === 'ready') return 'LTX ready · Qwen ready'
+  if (gpuState.value === 'warming') return 'Loading models'
+  return 'Models offline'
+})
 const sectionTitle = computed(() => view.value === 'library' ? 'History' : modeLabel(draft.mode))
 
 const LTX_RATIO_OPTIONS = Object.freeze([
+  { value: '704x704', label: '1:1', aspect: '1 / 1' },
+  { value: '768x576', label: '4:3', aspect: '4 / 3' },
+  { value: '576x768', label: '3:4', aspect: '3 / 4' },
   { value: '768x512', label: '3:2', aspect: '3 / 2' },
+  { value: '512x768', label: '2:3', aspect: '2 / 3' },
+  { value: '896x512', label: 'Wide', aspect: '7 / 4' },
+  { value: '512x896', label: 'Portrait', aspect: '4 / 7' },
   { value: '704x480', label: '22:15', aspect: '22 / 15' },
   { value: '640x384', label: '5:3', aspect: '5 / 3' },
   { value: '512x320', label: '8:5', aspect: '8 / 5' },
@@ -300,7 +316,10 @@ onBeforeUnmount(() => {
           <span class="status-dot" :class="{ live: queueCount > 0 }" />
           Jobs <b>{{ queueCount }}</b>
         </button>
-        <button class="topbar-pill health" type="button" :data-state="health ? 'online' : 'offline'" @click="warmGpu">{{ healthText }}</button>
+        <button class="topbar-pill health studio-status" type="button" :data-state="gpuState === 'ready' ? 'online' : 'offline'" @click="warmGpu">
+          <span class="status-dot" :class="{ live: gpuState === 'ready' }" />
+          <span class="status-copy"><strong>{{ healthText }}</strong><small>{{ activityText }}</small></span>
+        </button>
         <div class="menu-wrap topbar-menu" @click.stop>
           <button class="topbar-icon" type="button" title="More" aria-label="More" @click="moreOpen = !moreOpen">•••</button>
           <div v-if="moreOpen" class="popover topbar-popover">
@@ -366,6 +385,7 @@ onBeforeUnmount(() => {
             :can-submit="canSubmit"
             :notice="notice"
             @submit="submit"
+            @mode="chooseMode"
             @file="onAttachment"
             @remove="detach"
           />

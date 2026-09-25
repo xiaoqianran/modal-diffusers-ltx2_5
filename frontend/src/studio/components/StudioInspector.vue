@@ -129,8 +129,10 @@ function setOptionalNumber(key, raw) {
         </div>
       </section>
 
-      <section class="inspector-block">
-        <div class="inspector-heading"><span>Parameters</span></div>
+      <details class="inspector-block inspector-advanced">
+        <summary>Advanced</summary>
+
+        <div class="inspector-subheading first">Generation</div>
         <div class="drawer-fields two-col">
           <label class="field"><span>Steps</span><input v-model.number="draft.steps" type="number" min="1" max="100" :disabled="capability.fixedSchedule" /></label>
           <label class="field"><span>Guidance</span><input v-model.number="draft.guidanceScale" type="number" min="0" max="20" step="0.1" :disabled="qwenActive || capability.fixedSchedule" /></label>
@@ -154,11 +156,8 @@ function setOptionalNumber(key, raw) {
             <input v-model.number="draft.keyframeFrames[item.index]" type="number" min="0" :max="Math.max(0, Number(draft.numFrames || 1) - 1)" step="1" placeholder="Auto" />
           </label>
         </div>
-      </section>
 
-      <details class="inspector-block inspector-advanced">
-        <summary>Advanced</summary>
-
+        <div class="inspector-subheading">Processing</div>
         <label class="switch-row">
           <span><strong>2× spatial upscale</strong><small>Increase final spatial resolution.</small></span>
           <input v-model="draft.upscale" type="checkbox" :disabled="!capability.supportsUpscale" @change="emit('upscale-change')" />
