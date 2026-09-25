@@ -1,6 +1,10 @@
 param(
     [switch]$CheckOnly,
-    [switch]$SkipPrepare
+    [switch]$SkipPrepare,
+    [ValidateRange(1, 10)]
+    [int]$ReadyAttempts = 3,
+    [ValidateRange(1, 60)]
+    [int]$ReadyRetrySeconds = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -211,22 +215,60 @@ try {
     Write-Host 'Waiting for DirectorWorker to finish model startup...'
     $readyScript = Join-Path ([System.IO.Path]::GetTempPath()) ("ltx25-ready-" + [guid]::NewGuid().ToString("N") + ".py")
     $readyRc = 1
+    $env:LTX25_READY_ATTEMPTS = [string]$ReadyAttempts
+    $env:LTX25_READY_RETRY_SECONDS = [string]$ReadyRetrySeconds
     try {
         @'
 import json
 import os
+import sys
+import time
 import modal
 
 app_name = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
 worker_name = os.environ.get("LTX25_MODAL_WORKER_CLASS", "DirectorWorker")
 environment_name = os.environ.get("LTX25_MODAL_ENVIRONMENT", "main")
-worker = modal.Cls.from_name(
-    app_name,
-    worker_name,
-    environment_name=environment_name,
-)()
-result = worker.ready.remote()
-print("[READY] " + json.dumps(result, default=str))
+attempts = max(1, int(os.environ.get("LTX25_READY_ATTEMPTS", "3")))
+retry_seconds = max(1, int(os.environ.get("LTX25_READY_RETRY_SECONDS", "5")))
+last_error = None
+
+for attempt in range(1, attempts + 1):
+    try:
+        worker = modal.Cls.from_name(
+            app_name,
+            worker_name,
+            environment_name=environment_name,
+        )()
+        result = worker.ready.remote()
+    except (
+        modal.exception.ConflictError,
+        modal.exception.NotFoundError,
+        modal.exception.RemoteError,
+    ) as exc:
+        last_error = exc
+        detail = str(exc).strip()
+        suffix = f": {detail}" if detail else ""
+        print(
+            f"[READY-WAIT] attempt {attempt}/{attempts}: {type(exc).__name__}{suffix}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if attempt < attempts:
+            time.sleep(retry_seconds)
+        continue
+
+    print("[READY] " + json.dumps(result, default=str), flush=True)
+    raise SystemExit(0)
+
+detail = str(last_error).strip() if last_error is not None else "unknown readiness failure"
+print(
+    f"[READY-ERROR] DirectorWorker failed after {attempts} attempts: "
+    f"{type(last_error).__name__ if last_error is not None else 'Error'}"
+    + (f": {detail}" if detail else ""),
+    file=sys.stderr,
+    flush=True,
+)
+raise SystemExit(2)
 '@ | Set-Content -LiteralPath $readyScript -Encoding UTF8
         & $python $readyScript
         $readyRc = $LASTEXITCODE
@@ -235,6 +277,10 @@ print("[READY] " + json.dumps(result, default=str))
         Remove-Item $readyScript -Force -ErrorAction SilentlyContinue
     }
     if ($readyRc -ne 0) {
+        $appName = if ($rawEnv['LTX25_MODAL_APP']) { $rawEnv['LTX25_MODAL_APP'] } else { 'ltx25-nvfp4' }
+        Write-Host ''
+        Write-Host 'Recent Modal logs for diagnosis:'
+        & $python -m modal app logs $appName --env $modalEnvironment --tail 120 --timestamps
         Write-Error 'Modal deploy completed, but DirectorWorker did not become ready.'
         exit $readyRc
     }

@@ -103,6 +103,7 @@ def make_client(tmp_path: Path):
     control.generate_fn = SimpleNamespace(spawn=lambda *_: SimpleNamespace(object_id="fc-test"))
     control.ready_fn = SimpleNamespace(spawn=lambda: None)
     control._warm_call = None
+    control._warm_error = None
     control._warm_lock = threading.RLock()
     control._output_lock = threading.Lock()
     control._session_lock = threading.Lock()
@@ -367,6 +368,25 @@ def test_keep_warm_dedupes_pending_call_and_unload_cancels_it(tmp_path):
     assert pending.cancelled is True
     assert idle_windows[-1] == 2
     assert control.start_warmup() is False
+
+
+def test_warm_status_preserves_stopped_deployment_error(tmp_path):
+    control = make_client(tmp_path)
+    control.keep_gpu_warm = True
+
+    def stopped():
+        raise modal_client_module.modal.exception.ConflictError("app is stopped or disabled")
+
+    control.ready_fn = SimpleNamespace(spawn=stopped)
+    control._refresh_remote_handles = lambda: None
+
+    with pytest.raises(modal_client_module.modal.exception.ConflictError):
+        control.start_warmup()
+
+    status = control.warm_status()
+    assert status["state"] == "error"
+    assert "ConflictError" in status["error"]
+    assert "stopped or disabled" in status["error"]
 
 
 def test_expired_warm_lease_scales_down_when_queue_is_idle(tmp_path):

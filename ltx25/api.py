@@ -125,10 +125,13 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        if not initial_cleanup_task.done():
-            initial_cleanup_task.cancel()
-        if initial_warmup_task is not None and not initial_warmup_task.done():
-            initial_warmup_task.cancel()
+        for task in (initial_cleanup_task, initial_warmup_task):
+            if task is None:
+                continue
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         keep_warm_task.cancel()
         with suppress(asyncio.CancelledError):
             await keep_warm_task

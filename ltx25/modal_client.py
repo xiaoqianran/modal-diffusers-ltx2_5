@@ -88,6 +88,7 @@ class ModalClient:
         self._resolve_remote_handles()
 
         self._warm_call = None
+        self._warm_error: str | None = None
         self._warm_lock = threading.RLock()
         self._output_lock = threading.Lock()
         self._session_lock = threading.Lock()
@@ -379,17 +380,25 @@ class ModalClient:
                     self._warm_call.get(timeout=0)
                 except (TimeoutError, modal.exception.TimeoutError):
                     return False
-                except Exception:
+                except Exception as exc:
+                    self._warm_error = f"{type(exc).__name__}: {exc}"
                     self._warm_call = None
                 else:
+                    self._warm_error = None
                     return False
             try:
                 self._warm_call = self.ready_fn.spawn()
             except Exception as exc:
                 if not self._is_stale_deployment_error(exc):
+                    self._warm_error = f"{type(exc).__name__}: {exc}"
                     raise
                 self._refresh_remote_handles()
-                self._warm_call = self.ready_fn.spawn()
+                try:
+                    self._warm_call = self.ready_fn.spawn()
+                except Exception as retry_exc:
+                    self._warm_error = f"{type(retry_exc).__name__}: {retry_exc}"
+                    raise
+            self._warm_error = None
             return True
 
     def enable_keep_warm(self) -> bool:
@@ -435,12 +444,19 @@ class ModalClient:
     def warm_status(self) -> dict[str, Any]:
         lease_remaining = max(0.0, self._warm_lease_until - time.monotonic())
         if self._warm_call is None:
+            if self._warm_error:
+                return {
+                    "state": "error",
+                    "error": self._warm_error,
+                    "lease_remaining_seconds": round(lease_remaining, 1),
+                }
             return {
                 "state": "disabled" if not self.keep_gpu_warm else "idle",
                 "lease_remaining_seconds": round(lease_remaining, 1),
             }
         try:
             result = self._warm_call.get(timeout=0)
+            self._warm_error = None
             return {
                 "state": "ready",
                 "lease_remaining_seconds": round(lease_remaining, 1),
@@ -449,7 +465,12 @@ class ModalClient:
         except (TimeoutError, modal.exception.TimeoutError):
             return {"state": "warming", "lease_remaining_seconds": round(lease_remaining, 1)}
         except Exception as exc:
-            return {"state": "error", "error": f"{type(exc).__name__}: {exc}"}
+            self._warm_error = f"{type(exc).__name__}: {exc}"
+            return {
+                "state": "error",
+                "error": self._warm_error,
+                "lease_remaining_seconds": round(lease_remaining, 1),
+            }
 
     @staticmethod
     def create_session() -> int:
