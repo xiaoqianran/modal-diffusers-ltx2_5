@@ -398,22 +398,26 @@ test('clipDuration derives seconds from frames and fps', () => {
 
 test('selectJobActions gates retake on a finished video', () => {
   const done = selectJobActions(job())
-  assert.equal(done.canDerive, true)
+  assert.equal(done.canRetakeVideo, true)
+  assert.equal(done.canExtendVideo, true)
   assert.equal(done.canDownload, true)
   assert.equal(done.canInterrupt, false)
 
   const running = selectJobActions(job({ status: 'running', video_url: null }))
-  assert.equal(running.canDerive, false)
+  assert.equal(running.canRetakeVideo, false)
+  assert.equal(running.canExtendVideo, false)
   assert.equal(running.canInterrupt, true)
 
   const image = selectJobActions(job({ video_url: null, image_url: '/x.png', request: { mode: 't2i' } }))
-  assert.equal(image.canDerive, false)
+  assert.equal(image.canEditImage, true)
+  assert.equal(image.canAnimateImage, true)
+  assert.equal(image.canRetakeVideo, false)
   assert.equal(image.canDownload, true)
 })
 
 test('selectJobActions offers nothing for a placeholder', () => {
   const actions = selectJobActions(makePendingJob('pending-1', {}, 1, 0))
-  assert.deepEqual(Object.values(actions), [false, false, false, false, false, false])
+  assert.ok(Object.values(actions).every(value => value === false))
 })
 
 test('takeLabel prefers duration then status', () => {

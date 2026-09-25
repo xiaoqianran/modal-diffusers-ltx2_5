@@ -232,13 +232,15 @@ export const mockApi = {
 
   async reuseOutput(jobId) {
     const job = jobs.find(item => item.id === jobId)
-    if (!job?.video_url) throw new Error('Mock job has no reusable video output')
+    if (!job?.video_url && !job?.image_url && !job?.audio_url) throw new Error('Mock job has no reusable output')
+    const kind = job.video_url ? 'video' : job.image_url ? 'image' : 'audio'
+    const extension = kind === 'video' ? 'mp4' : kind === 'image' ? 'png' : 'wav'
     return {
       id: nextId(),
-      filename: `${jobId}.mp4`,
-      kind: 'video',
+      filename: `${jobId}.${extension}`,
+      kind,
       size: 0,
-      url: job.video_url,
+      url: job.video_url || job.image_url || job.audio_url,
     }
   },
 }

@@ -129,6 +129,7 @@ export function describeDirectorPlan(job) {
   const route = plan.requested_engine === 'auto' ? `Auto → ${engine}` : `Engine · ${engine}`
   const reasons = {
     'auto:pure_t2i': 'pure t2i',
+    'auto:qwen_image_edit': 'image edit',
     'auto:pure_t2i:qwen_unavailable': 'Qwen unavailable · fallback',
     'auto:pure_t2i:no_available_engine': 'no engine available',
     'auto:ltx_capability': 'capability route',
@@ -166,15 +167,32 @@ export function clipDuration(job) {
  */
 export function selectJobActions(job) {
   if (!job || isPending(job)) {
-    return { canInterrupt: false, canDelete: false, canDownload: false, canReuse: false, canDerive: false, canEmbed: false }
+    return {
+      canInterrupt: false,
+      canDelete: false,
+      canDownload: false,
+      canReuse: false,
+      canEditImage: false,
+      canAnimateImage: false,
+      canRetakeVideo: false,
+      canExtendVideo: false,
+      canEmbed: false,
+    }
   }
-  const canEmbed = getModeCapabilities(job.request?.mode).output === 'video'
+  const output = getModeCapabilities(job.request?.mode).output
+  const completed = job.status === JOB_STATUS.COMPLETED
+  const canEmbed = output === 'video'
+  const hasImageOutput = completed && output === 'image' && Boolean(job.image_url)
+  const hasVideoOutput = completed && output === 'video' && Boolean(job.video_url)
   return {
     canInterrupt: ACTIVE_STATUSES.includes(job.status),
     canDelete: [JOB_STATUS.COMPLETED, JOB_STATUS.FAILED, JOB_STATUS.INTERRUPTED].includes(job.status),
     canDownload: hasMedia(job),
     canReuse: true,
-    canDerive: canEmbed && job.status === JOB_STATUS.COMPLETED && Boolean(job.video_url),
+    canEditImage: hasImageOutput,
+    canAnimateImage: hasImageOutput,
+    canRetakeVideo: hasVideoOutput,
+    canExtendVideo: hasVideoOutput,
     canEmbed,
   }
 }

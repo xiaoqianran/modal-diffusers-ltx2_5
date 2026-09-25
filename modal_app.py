@@ -350,8 +350,10 @@ WORKER_SECRETS = [hf_secret] + ([media_secret] if media_secret is not None else 
     memory=65536,
     timeout=30 * 60,
     startup_timeout=30 * 60,
+    # Keep exactly one RTX PRO 6000 container resident even when there is no traffic.
+    min_containers=1,
     max_containers=1,
-    scaledown_window=GPU_IDLE_SECONDS,
+    # scaledown_window=GPU_IDLE_SECONDS,  # disabled: this worker must not scale to zero
     retries=modal.Retries(
         max_retries=2,
         backoff_coefficient=1.5,

@@ -55,21 +55,13 @@ if not exist "frontend\node_modules" (
   popd
 )
 
-echo [LTX-2.5] Starting cloud APP...
-echo [Frontend] %APP_URL%
-echo [Router  ] %LOCAL_API%  ^(local Modal SDK -^> RTX PRO 6000^)
+echo [LTX-2.5] Cleaning stale listeners on ports 48125 / 5187...
+powershell -NoProfile -Command "$ports=48125,5187; foreach($p in $ports){ Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }"
+timeout /t 1 /nobreak >nul
 
-start "LTX25 Local Router" /D "%~dp0" cmd /k ""%PYTHON%" -m uvicorn ltx25.api:app --host 127.0.0.1 --port 48125"
-
-powershell -NoProfile -Command "$u='%LOCAL_API%/api/health'; for($i=0;$i -lt 80;$i++){ try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 $u; if($r.StatusCode -lt 500){ exit 0 } } catch {}; Start-Sleep -Milliseconds 250 }; exit 1" >nul 2>nul || (
-  echo [LTX-2.5] Local Modal router did not start.
-  pause
-  exit /b 1
-)
-
-start "LTX25 Frontend" /D "%~dp0frontend" cmd /k "set VITE_API_TARGET=%LOCAL_API%&& npm run dev"
-
-powershell -NoProfile -Command "$u='%APP_URL%'; for($i=0;$i -lt 40;$i++){ try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 $u; if($r.StatusCode -lt 500){ exit 0 } } catch {}; Start-Sleep -Milliseconds 250 }; exit 1" >nul 2>nul
-start "" "%APP_URL%"
+echo [LTX-2.5] Starting local app supervisor...
+"%PYTHON%" "%~dp0tools\local_launcher.py"
+set "RC=%ERRORLEVEL%"
 
 endlocal
+exit /b %RC%

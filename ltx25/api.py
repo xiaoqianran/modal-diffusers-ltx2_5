@@ -410,11 +410,11 @@ def abort_asset_upload(asset_id: str):
 
 @app.post("/api/assets/from-job/{job_id}", response_model=AssetResponse, status_code=201)
 def asset_from_job(job_id: str):
-    """Reuse a completed video entirely inside Modal storage."""
+    """Reuse a completed image/video/audio artifact entirely inside Modal storage."""
     try:
         return AssetResponse(**modal_client.copy_output_to_input(job_id))
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Completed video output not found") from exc
+        raise HTTPException(status_code=404, detail="Completed media output not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
