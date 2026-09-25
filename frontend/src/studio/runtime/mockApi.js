@@ -150,6 +150,7 @@ export const mockApi = {
       warmup: {
         state: warm ? 'ready' : 'cold',
         gpu: warm ? 'MOCK' : null,
+        engines: warm ? ['ltx', 'qwen'] : [],
       },
     }
   },
@@ -177,6 +178,62 @@ export const mockApi = {
 
   async listJobs(sessionNumber) {
     return clone(jobs.filter(job => Number(job.session_number) === Number(sessionNumber)))
+  },
+
+  async listGeneratedAssets(sessionNumber, options = {}) {
+    const kind = options.kind || 'image'
+    const page = options.page || 1
+    const pageSize = options.pageSize || 24
+    const mediaKey = kind === 'video' ? 'video_url' : 'image_url'
+    let records = jobs.filter(job => (
+      Number(job.session_number) === Number(sessionNumber)
+      && job.status === 'completed'
+      && Boolean(job[mediaKey])
+    ))
+    const needle = String(options.query || '').trim().toLowerCase()
+    if (needle) {
+      records = records.filter(job => (
+        String(job.id).toLowerCase().includes(needle)
+        || String(job.request?.prompt || '').toLowerCase().includes(needle)
+      ))
+    }
+    const dims = job => {
+      const scale = job.request?.upscale ? 2 : 1
+      return [Number(job.request?.width || 0) * scale, Number(job.request?.height || 0) * scale]
+    }
+    if (options.aspect && options.aspect !== 'all') {
+      records = records.filter(job => {
+        const [w, h] = dims(job)
+        const ratio = h ? w / h : 0
+        if (options.aspect === 'square') return ratio >= .9 && ratio <= 1.1
+        if (options.aspect === 'landscape') return ratio > 1.1
+        return ratio > 0 && ratio < .9
+      })
+    }
+    if (options.size && options.size !== 'all') {
+      records = records.filter(job => {
+        const [w, h] = dims(job)
+        const mp = w * h / 1_000_000
+        if (options.size === 'small') return mp < 1
+        if (options.size === 'medium') return mp >= 1 && mp < 2
+        return mp >= 2
+      })
+    }
+    records = records.slice().sort((a, b) => {
+      const delta = String(a.created_at).localeCompare(String(b.created_at))
+      return options.sort === 'oldest' ? delta : -delta
+    })
+    const total = records.length
+    const pages = Math.max(1, Math.ceil(total / pageSize))
+    const safePage = Math.max(1, Math.min(page, pages))
+    const start = (safePage - 1) * pageSize
+    return clone({
+      items: records.slice(start, start + pageSize),
+      total,
+      page: safePage,
+      page_size: pageSize,
+      pages,
+    })
   },
 
   async getJob(id) {

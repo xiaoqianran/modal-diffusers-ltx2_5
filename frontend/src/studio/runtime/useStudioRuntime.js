@@ -21,6 +21,7 @@ import { createPoller, POLL_HEALTH_MS, POLL_HEALTH_WARMING_MS } from './polling.
 import { uploadFile } from './uploads.js'
 
 import { DEFAULT_MODE, STILL_MODES, getModeCapabilities } from '../model/modes.js'
+import { engineStateFromHealth } from '../model/composer.js'
 import { isActive, isPending, makePendingJob, mergePendingJobs } from '../model/jobs.js'
 import {
   selectStageJob, selectTakes, selectQueue, selectCounts, selectAvailableModes,
@@ -139,6 +140,19 @@ export function useStudioRuntime(options = {}) {
   const health = ref(null)
   const loras = shallowRef([])
   const pending = ref(new Map())
+  const assets = reactive({
+    kind: 'image',
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: 24,
+    pages: 1,
+    loading: false,
+    query: '',
+    sort: 'newest',
+    aspect: 'all',
+    size: 'all',
+  })
 
   // draft state
   const draft = reactive(createDraft())
@@ -183,6 +197,10 @@ export function useStudioRuntime(options = {}) {
   const canSubmit = computed(() => problems.value.length === 0 && !busy.submitting)
 
   const gpuState = computed(() => health.value?.warmup?.state || 'unknown')
+  const engineStates = computed(() => ({
+    ltx: engineStateFromHealth(health.value, 'ltx'),
+    qwen: engineStateFromHealth(health.value, 'qwen'),
+  }))
   const gpuLabel = computed(() => {
     if (!health.value) return '离线'
     const warm = health.value.warmup || {}
@@ -295,6 +313,54 @@ export function useStudioRuntime(options = {}) {
     }
   }
 
+  async function refreshAssets({ kind = assets.kind, page = assets.page } = {}) {
+    if (!sessionNumber.value || !client.listGeneratedAssets) {
+      assets.items = []
+      assets.total = 0
+      assets.page = 1
+      assets.pages = 1
+      return
+    }
+    assets.loading = true
+    try {
+      const result = await client.listGeneratedAssets(
+        sessionNumber.value,
+        {
+          kind,
+          page,
+          pageSize: assets.pageSize,
+          query: assets.query,
+          sort: assets.sort,
+          aspect: assets.aspect,
+          size: assets.size,
+        },
+      )
+      assets.kind = kind
+      assets.items = result.items || []
+      assets.total = Number(result.total || 0)
+      assets.page = Number(result.page || 1)
+      assets.pages = Number(result.pages || 1)
+    } catch (error) {
+      setNotice(`Assets 加载失败：${error.message}`, 'error')
+    } finally {
+      assets.loading = false
+    }
+  }
+
+  async function setAssetKind(kind) {
+    if (!['image', 'video'].includes(kind)) return
+    await refreshAssets({ kind, page: 1 })
+  }
+
+  async function setAssetPage(page) {
+    await refreshAssets({ kind: assets.kind, page })
+  }
+
+  async function setAssetFilter(patch) {
+    Object.assign(assets, patch)
+    await refreshAssets({ kind: assets.kind, page: 1 })
+  }
+
   async function warmGpu() {
     if (disposed) return false
     try {
@@ -322,8 +388,11 @@ export function useStudioRuntime(options = {}) {
   function setMode(mode) {
     const capability = getModeCapabilities(mode)
     draft.mode = mode
-    if (capability.qwenOnly) draft.engine = 'qwen'
-    else if (!['t2i', 'image_edit'].includes(mode) && draft.engine === 'qwen') draft.engine = 'auto'
+    if (!capability.allowedEngines.includes(draft.engine)) {
+      draft.engine = capability.allowedEngines.includes('auto')
+        ? 'auto'
+        : capability.allowedEngines[0]
+    }
     // Mirror the backend's normalisation so the controls reflect what is sent.
     if (!capability.supportsUpscale) {
       draft.upscale = false
@@ -334,6 +403,23 @@ export function useStudioRuntime(options = {}) {
     if (capability.forcesDecoder) draft.decoder = capability.forcesDecoder
     if (capability.fixedFrames) draft.numFrames = capability.fixedFrames
     if (!capability.supportsPixelUpscale) draft.upscaleMethod = 'latent'
+  }
+
+  function setEngine(engine) {
+    const capability = activeCapability.value
+    if (!capability.allowedEngines.includes(engine)) return false
+    draft.engine = engine
+    if (engine === 'qwen') {
+      draft.steps = 40
+      draft.guidanceScale = 1
+      draft.numFrames = 9
+      draft.fps = 24
+      draft.decoder = 'vae'
+      draft.loraId = null
+      draft.qwenTrueCfgScale = draft.qwenTrueCfgScale ?? 1
+      draft.qwenUseKvCache = true
+    }
+    return true
   }
 
   function updateDraft(patch) {
@@ -665,19 +751,20 @@ export function useStudioRuntime(options = {}) {
 
   return {
     // state
-    sessionNumber, jobs, health, loras, pending,
+    sessionNumber, jobs, health, loras, pending, assets,
     draft, attachments,
     selectedJobId, view, queueCollapsed, filter, sortOrder, busy, notice,
 
     // derived
     allJobs, stageJob, takes, queue, counts, availableModes, libraryJobs,
     stageActions, hasActiveWork, activeCapability, isStillMode,
-    problems, canSubmit, gpuState, gpuLabel,
+    problems, canSubmit, gpuState, gpuLabel, engineStates,
 
     // actions
     start, dispose, warmGpu, releaseGpu,
-    refreshJobs, refreshHealth, refreshLoras, ensureSession,
-    setMode, updateDraft, updateRange, resetDraftInputs, clearAttachments,
+    refreshJobs, refreshHealth, refreshLoras, refreshAssets, ensureSession,
+    setAssetKind, setAssetPage, setAssetFilter,
+    setMode, setEngine, updateDraft, updateRange, resetDraftInputs, clearAttachments,
     attach, detach,
     selectJob, clearSelection,
     showView, setFilter, setSortOrder, toggleQueue,

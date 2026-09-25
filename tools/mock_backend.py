@@ -419,6 +419,69 @@ def list_jobs(session_number: int | None, limit: int) -> list[dict]:
     return [public_job(r) for r in records[: max(1, min(limit, 200))]]
 
 
+def list_generated_assets(
+    session_number: int,
+    media_kind: str,
+    page: int,
+    page_size: int,
+    query: str = "",
+    sort: str = "newest",
+    aspect: str = "all",
+    size: str = "all",
+) -> dict:
+    with STATE_LOCK:
+        records = [
+            r for r in JOBS.values()
+            if r.get("session_number") == session_number
+            and r.get("status") == "completed"
+            and r.get("image_url" if media_kind == "image" else "video_url")
+        ]
+    needle = query.strip().casefold()
+    if needle:
+        records = [
+            r for r in records
+            if needle in str(r.get("id") or "").casefold()
+            or needle in str((r.get("request") or {}).get("prompt") or "").casefold()
+        ]
+    def dimensions(record: dict) -> tuple[int, int]:
+        request = record.get("request") or {}
+        scale = 2 if request.get("upscale") else 1
+        return int(request.get("width") or 0) * scale, int(request.get("height") or 0) * scale
+    if aspect != "all":
+        def aspect_matches(record: dict) -> bool:
+            width, height = dimensions(record)
+            ratio = width / height if height else 0
+            if aspect == "square":
+                return 0.9 <= ratio <= 1.1
+            if aspect == "landscape":
+                return ratio > 1.1
+            return 0 < ratio < 0.9
+        records = [record for record in records if aspect_matches(record)]
+    if size != "all":
+        def size_matches(record: dict) -> bool:
+            width, height = dimensions(record)
+            megapixels = width * height / 1_000_000
+            if size == "small":
+                return megapixels < 1
+            if size == "medium":
+                return 1 <= megapixels < 2
+            return megapixels >= 2
+        records = [record for record in records if size_matches(record)]
+    records.sort(key=lambda r: r.get("created_at", ""), reverse=sort != "oldest")
+    safe_size = max(1, min(page_size, 60))
+    total = len(records)
+    pages = max(1, (total + safe_size - 1) // safe_size)
+    safe_page = max(1, min(page, pages))
+    start = (safe_page - 1) * safe_size
+    return {
+        "items": [public_job(r) for r in records[start:start + safe_size]],
+        "total": total,
+        "page": safe_page,
+        "page_size": safe_size,
+        "pages": pages,
+    }
+
+
 def interrupt(job_id: str | None) -> dict:
     with STATE_LOCK:
         target = JOBS.get(job_id) if job_id else None
@@ -534,7 +597,12 @@ class Handler(BaseHTTPRequestHandler):
                 "keep_gpu_warm": keep_gpu_warm,
                 "gpu_idle_seconds": 600,
                 "warmup": (
-                    {"state": "ready", "gpu": "MOCK RTX PRO 6000", "allocated_gb": 19.4}
+                    {
+                        "state": "ready",
+                        "gpu": "MOCK RTX PRO 6000",
+                        "allocated_gb": 19.4,
+                        "engines": ["ltx", "qwen"],
+                    }
                     if keep_gpu_warm else {"state": "disabled"}
                 ),
             })
@@ -546,6 +614,21 @@ class Handler(BaseHTTPRequestHandler):
             session = query.get("session_number")
             limit = int((query.get("limit") or ["50"])[0])
             return self.send_json(list_jobs(int(session[0]) if session else None, limit))
+
+        if path == "/api/assets/generated":
+            session = int((query.get("session_number") or ["0"])[0])
+            media_kind = (query.get("media_kind") or ["image"])[0]
+            page = int((query.get("page") or ["1"])[0])
+            page_size = int((query.get("page_size") or ["24"])[0])
+            search = (query.get("query") or [""])[0]
+            sort = (query.get("sort") or ["newest"])[0]
+            aspect = (query.get("aspect") or ["all"])[0]
+            size = (query.get("size") or ["all"])[0]
+            if media_kind not in {"image", "video"}:
+                return self.send_error_json(422, "media_kind must be image or video")
+            return self.send_json(list_generated_assets(
+                session, media_kind, page, page_size, search, sort, aspect, size
+            ))
 
         match = re.fullmatch(r"/api/jobs/([0-9a-fA-F]+)", path)
         if match:

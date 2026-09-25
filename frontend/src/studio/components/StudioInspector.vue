@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
-import { modeLabel, modeTag } from '../model/modes.js'
+import { usesQwen } from '../model/composer.js'
+import { modeIntentLabel, modeTag } from '../model/modes.js'
 import { engineLabel, expectedEngine } from '../model/workflows.js'
 
 const props = defineProps({
@@ -13,11 +14,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['engine-change', 'upscale-change'])
 
-const qwenActive = computed(() => (
-  props.capability.qwenOnly
-  || props.draft.engine === 'qwen'
-  || (props.draft.mode === 't2i' && props.draft.engine === 'auto' && !props.draft.loraId)
-))
+const qwenActive = computed(() => usesQwen(props.draft, props.capability))
 const expected = computed(() => engineLabel(expectedEngine(props.draft)))
 const isImageOutput = computed(() => props.capability.output === 'image')
 const selectedRatio = computed(() => (
@@ -42,30 +39,7 @@ function setOptionalNumber(key, raw) {
     <div class="inspector-scroll">
       <section class="inspector-block inspector-identity">
         <span class="eyebrow">{{ modeTag(draft.mode) }}</span>
-        <h2>{{ modeLabel(draft.mode) }}</h2>
-      </section>
-
-      <section class="inspector-block">
-        <div class="inspector-heading">
-          <span>Routing</span>
-          <small>Director</small>
-        </div>
-        <label class="field">
-          <span>Strategy</span>
-          <select v-model="draft.engine" @change="emit('engine-change')">
-            <option value="auto">Auto · Director</option>
-            <option value="ltx" :disabled="capability.qwenOnly">Manual · LTX-2.5 NVFP4</option>
-            <option value="qwen" :disabled="!['t2i', 'image_edit'].includes(draft.mode)">Manual · Qwen-Image 2.1 BF16</option>
-          </select>
-        </label>
-        <div class="resolved-card">
-          <div class="resolved-card-head">
-            <span>{{ draft.engine === 'auto' ? 'Expected engine' : 'Engine' }}</span>
-            <i class="resolved-live-dot" aria-hidden="true" />
-          </div>
-          <strong>{{ expected }}</strong>
-          <small v-if="draft.engine === 'auto'">Director chooses the execution engine before the job starts.</small>
-        </div>
+        <h2>{{ modeIntentLabel(draft.mode) }}</h2>
       </section>
 
       <section class="inspector-block">
@@ -226,7 +200,24 @@ function setOptionalNumber(key, raw) {
         </section>
 
         <section class="advanced-section">
-          <div class="inspector-subheading">Model controls</div>
+          <div class="inspector-subheading">Engine & model</div>
+          <label class="field">
+            <span>Execution</span>
+            <select :value="draft.engine" @change="emit('engine-change', $event.target.value)">
+              <option v-if="capability.allowedEngines.includes('auto')" value="auto">Auto · Director</option>
+              <option v-if="capability.allowedEngines.includes('ltx')" value="ltx">LTX-2.5 NVFP4</option>
+              <option v-if="capability.allowedEngines.includes('qwen')" value="qwen">Qwen-Image 2.1 BF16</option>
+            </select>
+          </label>
+          <div class="resolved-card">
+            <div class="resolved-card-head">
+              <span>{{ draft.engine === 'auto' ? 'Expected engine' : 'Engine' }}</span>
+              <i class="resolved-live-dot" aria-hidden="true" />
+            </div>
+            <strong>{{ expected }}</strong>
+            <small v-if="draft.engine === 'auto'">Director resolves the execution engine before the job starts.</small>
+          </div>
+
           <template v-if="qwenActive">
           <div class="drawer-fields two-col">
             <label class="field"><span>Qwen True CFG</span><input v-model.number="draft.qwenTrueCfgScale" type="number" min="0" max="20" step="0.1" /></label>

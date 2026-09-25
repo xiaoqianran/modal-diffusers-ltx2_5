@@ -177,6 +177,20 @@ export const api = {
     `/api/jobs/status?session_number=${encodeURIComponent(sessionNumber)}&limit=${limit}`
   ),
 
+  listGeneratedAssets: (sessionNumber, options = {}) => {
+    const params = new URLSearchParams({
+      session_number: String(sessionNumber),
+      media_kind: options.kind || 'image',
+      page: String(options.page || 1),
+      page_size: String(options.pageSize || 24),
+      query: options.query || '',
+      sort: options.sort || 'newest',
+      aspect: options.aspect || 'all',
+      size: options.size || 'all',
+    })
+    return send(`/api/assets/generated?${params.toString()}`)
+  },
+
   getJob: id => send(`/api/jobs/${id}`),
 
   submitJob: body => send('/api/jobs', { method: 'POST', body }),

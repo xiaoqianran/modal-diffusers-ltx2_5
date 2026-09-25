@@ -28,6 +28,7 @@ from .schemas import (
     AssetUploadPrepareResponse,
     ConcatRequest,
     GenerateRequest,
+    GeneratedAssetsResponse,
     JobResponse,
     JobSummaryResponse,
     LoraResponse,
@@ -221,6 +222,37 @@ def get_job(job_id: str):
 @app.get("/api/jobs", response_model=list[JobResponse])
 def list_jobs(session_number: int | None = None, limit: int = 50):
     return modal_client.list_jobs(session_number, limit)
+
+
+@app.get("/api/assets/generated", response_model=GeneratedAssetsResponse)
+def list_generated_assets(
+    session_number: int,
+    media_kind: str = "image",
+    page: int = 1,
+    page_size: int = 24,
+    query: str = "",
+    sort: str = "newest",
+    aspect: str = "all",
+    size: str = "all",
+):
+    if media_kind not in {"image", "video"}:
+        raise HTTPException(status_code=422, detail="media_kind must be image or video")
+    if sort not in {"newest", "oldest"}:
+        raise HTTPException(status_code=422, detail="sort must be newest or oldest")
+    if aspect not in {"all", "landscape", "portrait", "square"}:
+        raise HTTPException(status_code=422, detail="invalid aspect filter")
+    if size not in {"all", "small", "medium", "large"}:
+        raise HTTPException(status_code=422, detail="invalid size filter")
+    return modal_client.list_generated_assets(
+        session_number=session_number,
+        media_kind=media_kind,
+        page=page,
+        page_size=page_size,
+        query=query,
+        sort=sort,
+        aspect=aspect,
+        size=size,
+    )
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)

@@ -2,14 +2,21 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import PromptDock from './studio/components/PromptDock.vue'
+import StudioAssets from './studio/components/StudioAssets.vue'
 import StudioInspector from './studio/components/StudioInspector.vue'
 import StudioLibrary from './studio/components/StudioLibrary.vue'
 import StudioQueue from './studio/components/StudioQueue.vue'
 import StudioSidebar from './studio/components/StudioSidebar.vue'
 import StudioStage from './studio/components/StudioStage.vue'
 import StudioTakes from './studio/components/StudioTakes.vue'
+import {
+  attachmentSlotsForDraft,
+  frameOptionsForCapability,
+  keyframeSlotsForDraft,
+  ratioOptionsForDraft,
+} from './studio/model/composer.js'
 import { buildQueueIndex } from './studio/model/jobs.js'
-import { modeLabel } from './studio/model/modes.js'
+import { modeIntentLabel } from './studio/model/modes.js'
 import { mockApi } from './studio/runtime/mockApi.js'
 import { useStudioRuntime } from './studio/runtime/useStudioRuntime.js'
 
@@ -28,6 +35,7 @@ const {
   sortOrder,
   busy,
   notice,
+  assets,
   allJobs,
   stageJob,
   takes,
@@ -40,6 +48,7 @@ const {
   canSubmit,
   gpuState,
   gpuLabel,
+  engineStates,
   start,
   dispose,
   warmGpu,
@@ -47,9 +56,14 @@ const {
   refreshJobs,
   refreshHealth,
   refreshLoras,
+  refreshAssets,
   setMode,
+  setEngine,
   setFilter,
   setSortOrder,
+  setAssetKind,
+  setAssetPage,
+  setAssetFilter,
   attach,
   detach,
   selectJob,
@@ -63,6 +77,7 @@ const {
 
 const jobsOpen = ref(false)
 const moreOpen = ref(false)
+const runtimeOpen = ref(false)
 
 const queueIndex = computed(() => buildQueueIndex(allJobs.value))
 const stageQueuePosition = computed(() => (
@@ -100,99 +115,19 @@ const runtimePrimary = computed(() => {
   if (runtimeState.value === 'ready') return gpuLabel.value
   return 'Offline'
 })
-const modelState = computed(() => runtimeState.value === 'ready' || runtimeState.value === 'generating')
-const sectionTitle = computed(() => view.value === 'library' ? 'History' : modeLabel(draft.mode))
-
-const LTX_RATIO_OPTIONS = Object.freeze([
-  { value: '704x704', label: '1:1', aspect: '1 / 1' },
-  { value: '768x576', label: '4:3', aspect: '4 / 3' },
-  { value: '576x768', label: '3:4', aspect: '3 / 4' },
-  { value: '768x512', label: '3:2', aspect: '3 / 2' },
-  { value: '512x768', label: '2:3', aspect: '2 / 3' },
-  { value: '896x512', label: 'Wide', aspect: '7 / 4' },
-  { value: '512x896', label: 'Portrait', aspect: '4 / 7' },
-  { value: '704x480', label: '22:15', aspect: '22 / 15' },
-  { value: '640x384', label: '5:3', aspect: '5 / 3' },
-  { value: '512x320', label: '8:5', aspect: '8 / 5' },
-])
-const QWEN_RATIO_OPTIONS = Object.freeze([
-  { value: '1024x1024', label: '1:1 · 2K', aspect: '1 / 1' },
-  { value: '1200x896', label: '4:3 · 2K', aspect: '4 / 3' },
-  { value: '896x1200', label: '3:4 · 2K', aspect: '3 / 4' },
-  { value: '1264x848', label: '3:2 · 2K', aspect: '3 / 2' },
-  { value: '848x1264', label: '2:3 · 2K', aspect: '2 / 3' },
-  { value: '1376x768', label: '16:9 · 2K', aspect: '16 / 9' },
-  { value: '768x1376', label: '9:16 · 2K', aspect: '9 / 16' },
-])
-const qwenActive = computed(() => (
-  activeCapability.value.qwenOnly
-  || draft.engine === 'qwen'
-  || (draft.mode === 't2i' && draft.engine === 'auto' && !draft.loraId)
+const sectionTitle = computed(() => {
+  if (view.value === 'library') return 'History'
+  if (view.value === 'assets') return 'Assets'
+  return modeIntentLabel(draft.mode)
+})
+const ratioOptions = computed(() => ratioOptionsForDraft(draft, activeCapability.value))
+const frameOptions = computed(() => frameOptionsForCapability(activeCapability.value))
+const attachmentSlots = computed(() => (
+  attachmentSlotsForDraft(activeCapability.value, draft, attachments)
 ))
-const ratioOptions = computed(() => qwenActive.value ? QWEN_RATIO_OPTIONS : LTX_RATIO_OPTIONS)
-const frameOptions = computed(() => {
-  const fixed = activeCapability.value.validFrames
-  if (Array.isArray(fixed) && fixed.length) {
-    return fixed.map(value => ({ value, label: String(value), detail: 'frames' }))
-  }
-  return [
-    { value: 49, label: '2s', detail: '49f' },
-    { value: 121, label: '5s', detail: '121f' },
-    { value: 241, label: '10s', detail: '241f' },
-    { value: 481, label: '20s', detail: '481f' },
-  ]
-})
-
-const attachmentSlots = computed(() => {
-  const capability = activeCapability.value
-  const result = []
-
-  if (capability.multiReference) {
-    const imageAccept = capability.supportsHdr ? 'image/*,.exr' : 'image/*'
-    const used = []
-    for (let index = 0; index < 10; index += 1) {
-      if (attachments[`reference${index}`]) used.push(index)
-    }
-    const next = Array.from({ length: 10 }, (_, index) => index)
-      .find(index => !attachments[`reference${index}`])
-    for (const index of used) {
-      result.push({ slot: `reference${index}`, icon: 'IMAGE', title: index === 0 && draft.mode === 'image_edit' ? 'Primary / reference 1' : `Reference ${index + 1}`, accept: imageAccept })
-    }
-    if (next !== undefined) {
-      result.push({ slot: `reference${next}`, icon: 'IMAGE', title: `Add reference ${used.length + 1}/10`, accept: imageAccept })
-    }
-    return result
-  }
-
-  if (capability.input === 'image') {
-    result.push({
-      slot: 'first',
-      icon: 'IMAGE',
-      title: capability.needsLast ? 'First frame' : 'Source image',
-      accept: 'image/*',
-    })
-  }
-  if (capability.needsLast) result.push({ slot: 'last', icon: 'IMAGE', title: 'Last frame', accept: 'image/*' })
-  if (capability.needsAudio) result.push({ slot: 'audio', icon: 'AUDIO', title: 'Audio', accept: 'audio/*' })
-  if (capability.needsSource) {
-    result.push({
-      slot: 'source',
-      icon: 'MEDIA',
-      title: 'Source',
-      accept: capability.sourceIsVideo ? 'video/*' : 'image/*,video/*',
-    })
-  }
-  return result
-})
-
-const keyframeSlots = computed(() => {
-  if (!['keyframe_interpolation', 'dfr'].includes(draft.mode)) return []
-  const result = []
-  for (let index = 0; index < 10; index += 1) {
-    if (attachments[`reference${index}`]) result.push({ index, label: `Keyframe ${index + 1}` })
-  }
-  return result
-})
+const keyframeSlots = computed(() => (
+  keyframeSlotsForDraft(activeCapability.value, attachments)
+))
 
 function chooseMode(mode) {
   setMode(mode)
@@ -202,6 +137,12 @@ function chooseMode(mode) {
 function openHistory() {
   jobsOpen.value = false
   showView('library')
+}
+
+async function openAssets() {
+  jobsOpen.value = false
+  showView('assets')
+  await refreshAssets({ kind: assets.kind, page: assets.page })
 }
 
 function backToGenerate() {
@@ -240,25 +181,19 @@ function focus(id) {
   showView('generate')
 }
 
+async function removeAsset(id) {
+  await deleteJob(id)
+  await refreshAssets({ kind: assets.kind, page: assets.page })
+}
+
 function onUpscaleChange() {
   setMode(draft.mode)
   if (!draft.upscale) draft.upscaleMethod = 'latent'
 }
 
-function onEngineChange() {
-  if (draft.engine !== 'qwen') return
-  draft.steps = 40
-  draft.guidanceScale = 1
-  draft.numFrames = 9
-  draft.fps = 24
-  draft.decoder = 'vae'
-  draft.loraId = null
-  draft.qwenTrueCfgScale = draft.qwenTrueCfgScale ?? 1
-  draft.qwenUseKvCache = true
-}
-
 async function refreshAll() {
   moreOpen.value = false
+  runtimeOpen.value = false
   await Promise.all([refreshJobs(), refreshHealth(), refreshLoras()])
 }
 
@@ -274,14 +209,16 @@ async function copySession() {
 
 function closeMenus() {
   moreOpen.value = false
+  runtimeOpen.value = false
 }
 
 function handleKeydown(event) {
   if (event.key !== 'Escape') return
-  if (!jobsOpen.value && !moreOpen.value) return
+  if (!jobsOpen.value && !moreOpen.value && !runtimeOpen.value) return
   event.preventDefault()
   jobsOpen.value = false
   moreOpen.value = false
+  runtimeOpen.value = false
 }
 
 function handleOnline() {
@@ -333,22 +270,40 @@ onBeforeUnmount(() => {
           <span class="jobs-copy"><span>Jobs</span><small v-if="queueCount">{{ queueCount }}/{{ queueCapacity }}</small></span>
           <b>{{ queueCount }}</b>
         </button>
-        <button class="topbar-pill health studio-status runtime-strip" type="button" :data-state="runtimeState" @click="warmGpu">
-          <span class="runtime-segment runtime-gpu">
-            <i class="runtime-dot" />
-            <span><small>GPU</small><strong>{{ runtimePrimary }}</strong></span>
-          </span>
-          <span class="runtime-divider" />
-          <span class="runtime-segment" :class="{ ready: modelState }">
-            <i class="runtime-dot" />
-            <span><small>LTX</small><strong>{{ modelState ? 'Ready' : runtimeState === 'warming' ? 'Loading' : 'Idle' }}</strong></span>
-          </span>
-          <span class="runtime-divider" />
-          <span class="runtime-segment" :class="{ ready: modelState }">
-            <i class="runtime-dot" />
-            <span><small>Qwen</small><strong>{{ modelState ? 'Ready' : runtimeState === 'warming' ? 'Loading' : 'Idle' }}</strong></span>
-          </span>
-        </button>
+        <div class="menu-wrap runtime-menu" @click.stop>
+          <button
+            class="topbar-pill health studio-status runtime-pill"
+            type="button"
+            :data-state="runtimeState"
+            :aria-expanded="runtimeOpen"
+            @click="runtimeOpen = !runtimeOpen"
+          >
+            <span class="runtime-dot" />
+            <span>Runtime</span>
+            <strong>{{ runtimeState === 'ready' ? 'Ready' : runtimePrimary }}</strong>
+          </button>
+          <div v-if="runtimeOpen" class="popover runtime-popover">
+            <div class="runtime-popover-head">
+              <div>
+                <span class="eyebrow">RUNTIME</span>
+                <strong>{{ runtimeState === 'ready' ? 'Ready' : runtimePrimary }}</strong>
+              </div>
+              <button class="runtime-refresh" type="button" @click="warmGpu">Refresh</button>
+            </div>
+            <div class="runtime-detail-row">
+              <span><i class="runtime-state-dot" :data-state="gpuState" />GPU</span>
+              <strong>{{ gpuLabel }}</strong>
+            </div>
+            <div class="runtime-detail-row">
+              <span><i class="runtime-state-dot" :data-state="engineStates.ltx.state" />LTX-2.5</span>
+              <strong>{{ engineStates.ltx.label }}</strong>
+            </div>
+            <div class="runtime-detail-row">
+              <span><i class="runtime-state-dot" :data-state="engineStates.qwen.state" />Qwen Image 2.1</span>
+              <strong>{{ engineStates.qwen.label }}</strong>
+            </div>
+          </div>
+        </div>
         <div class="menu-wrap topbar-menu" @click.stop>
           <button class="topbar-icon" type="button" title="More" aria-label="More" @click="moreOpen = !moreOpen">•••</button>
           <div v-if="moreOpen" class="popover topbar-popover">
@@ -360,17 +315,31 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <section class="studio-shell studio-shell-v3" :class="{ 'history-mode': view === 'library' }">
+    <section class="studio-shell studio-shell-v3" :class="{ 'history-mode': view !== 'generate' }">
       <StudioSidebar
         :current-mode="draft.mode"
         :history-active="view === 'library'"
+        :assets-active="view === 'assets'"
         @select-mode="chooseMode"
+        @assets="openAssets"
         @history="openHistory"
       />
 
       <main class="studio-workspace studio-workspace-v3">
+        <StudioAssets
+          v-if="view === 'assets'"
+          :assets="assets"
+          @back="backToGenerate"
+          @kind="setAssetKind"
+          @page="setAssetPage"
+          @filter="setAssetFilter"
+          @select="focus"
+          @reuse="reuse"
+          @remove="removeAsset"
+        />
+
         <StudioLibrary
-          v-if="view === 'library'"
+          v-else-if="view === 'library'"
           :jobs="libraryJobs"
           :counts="counts"
           :available-modes="availableModes"
@@ -422,14 +391,14 @@ onBeforeUnmount(() => {
       </main>
 
       <StudioInspector
-        v-if="view !== 'library'"
+        v-if="view === 'generate'"
         :draft="draft"
         :capability="activeCapability"
         :loras="loras"
         :ratio-options="ratioOptions"
         :frame-options="frameOptions"
         :keyframe-slots="keyframeSlots"
-        @engine-change="onEngineChange"
+        @engine-change="setEngine"
         @upscale-change="onUpscaleChange"
       />
     </section>

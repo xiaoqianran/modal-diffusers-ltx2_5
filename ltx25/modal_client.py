@@ -630,6 +630,98 @@ class ModalClient:
     def list_job_summaries(self, session_number: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return [self._job_summary(item) for item in self.list_jobs(session_number, limit)]
 
+    def list_generated_assets(
+        self,
+        *,
+        session_number: int,
+        media_kind: str,
+        page: int = 1,
+        page_size: int = 24,
+        query: str = "",
+        sort: str = "newest",
+        aspect: str = "all",
+        size: str = "all",
+    ) -> dict[str, Any]:
+        job_ids = self.job_store.get(self._session_key(session_number))
+        records: list[dict[str, Any]] = []
+        if isinstance(job_ids, list):
+            records = [record for job_id in job_ids if (record := self._get_record(job_id))]
+        else:
+            for item_key, item in self.job_store.items():
+                if (
+                    isinstance(item_key, str)
+                    and item_key.startswith("job:")
+                    and isinstance(item, dict)
+                    and item.get("session_number") == session_number
+                ):
+                    records.append(item)
+
+        media_key = "image_url" if media_kind == "image" else "video_url"
+        records = [
+            self._refresh(item)
+            for item in records
+            if item.get("status") == "completed" and item.get(media_key)
+        ]
+
+        def output_size(item: dict[str, Any]) -> tuple[int, int]:
+            request = item.get("request") or {}
+            scale = 2 if request.get("upscale") else 1
+            return (
+                int(request.get("width") or 0) * scale,
+                int(request.get("height") or 0) * scale,
+            )
+
+        needle = query.strip().casefold()
+        if needle:
+            records = [
+                item for item in records
+                if needle in str(item.get("id") or "").casefold()
+                or needle in str((item.get("request") or {}).get("prompt") or "").casefold()
+            ]
+
+        if aspect != "all":
+            def aspect_matches(item: dict[str, Any]) -> bool:
+                width, height = output_size(item)
+                if not width or not height:
+                    return False
+                ratio = width / height
+                if aspect == "square":
+                    return 0.9 <= ratio <= 1.1
+                if aspect == "landscape":
+                    return ratio > 1.1
+                return ratio < 0.9
+            records = [item for item in records if aspect_matches(item)]
+
+        if size != "all":
+            def size_matches(item: dict[str, Any]) -> bool:
+                width, height = output_size(item)
+                megapixels = width * height / 1_000_000
+                if size == "small":
+                    return megapixels < 1
+                if size == "medium":
+                    return 1 <= megapixels < 2
+                return megapixels >= 2
+            records = [item for item in records if size_matches(item)]
+
+        records.sort(
+            key=lambda item: item.get("created_at", ""),
+            reverse=sort != "oldest",
+        )
+
+        safe_size = min(max(int(page_size), 1), 60)
+        total = len(records)
+        pages = max(1, (total + safe_size - 1) // safe_size)
+        safe_page = min(max(int(page), 1), pages)
+        start = (safe_page - 1) * safe_size
+        items = records[start:start + safe_size]
+        return {
+            "items": [self._job_summary(item) for item in items],
+            "total": total,
+            "page": safe_page,
+            "page_size": safe_size,
+            "pages": pages,
+        }
+
     def delete_job(self, job_id: str) -> bool:
         record = self._get_record(job_id)
         if not record:

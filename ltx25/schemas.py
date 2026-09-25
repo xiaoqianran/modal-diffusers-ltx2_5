@@ -466,6 +466,14 @@ class JobSummaryResponse(BaseModel):
     timings: dict[str, float] | None = None
 
 
+class GeneratedAssetsResponse(BaseModel):
+    items: list[JobSummaryResponse]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
 class SessionResponse(BaseModel):
     session_number: int
 

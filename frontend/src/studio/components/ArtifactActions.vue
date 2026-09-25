@@ -10,7 +10,8 @@ const emit = defineEmits(['derive', 'reuse', 'remove'])
 <template>
   <div class="artifact-actions">
     <button v-if="actions.canEditImage" class="stage-act primary" type="button" :disabled="preparing" @click="emit('derive', 'image_edit')">Edit</button>
-    <button v-if="actions.canAnimateImage" class="stage-act primary" type="button" :disabled="preparing" @click="emit('derive', 'i2v')">Send to LTX</button>
+    <button v-if="actions.canAnimateImage" class="stage-act primary" type="button" :disabled="preparing" @click="emit('derive', 'i2v')">Animate</button>
+    <button v-if="actions.canRefineImage" class="stage-act" type="button" :disabled="preparing" @click="emit('derive', 'refine_image')">Refine</button>
     <button v-if="actions.canRetakeVideo" class="stage-act" type="button" :disabled="preparing" @click="emit('derive', 'retake')">{{ preparing ? 'Preparing…' : 'Retake' }}</button>
     <button v-if="actions.canExtendVideo" class="stage-act" type="button" :disabled="preparing" @click="emit('derive', 'extend')">Extend</button>
     <a v-if="actions.canDownload" class="stage-act" :href="job.download_url || job.video_url || job.image_url || job.audio_url" download>Download</a>

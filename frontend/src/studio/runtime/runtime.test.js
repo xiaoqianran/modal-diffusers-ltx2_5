@@ -92,12 +92,19 @@ function fakeApi(overrides = {}) {
   const record = (name, value) => { calls.push([name, value]) }
 
   const base = {
-    health: async () => ({ warmup: { state: 'ready', gpu: 'MOCK GPU' } }),
+    health: async () => ({ warmup: { state: 'ready', gpu: 'MOCK GPU', engines: ['ltx', 'qwen'] } }),
     warm: async () => { record('warm', true); return { status: 'warming' } },
     unload: async options => { record('unload', options); return { result: 'ok' } },
     loras: async () => [],
     createSession: async () => ({ session_number: 555 }),
     listJobs: async () => [],
+    listGeneratedAssets: async (_session, options = {}) => ({
+      items: [],
+      total: 0,
+      page: options.page || 1,
+      page_size: options.pageSize || 24,
+      pages: 1,
+    }),
     getJob: async id => JOB({ id }),
     submitJob: async body => {
       record('submitJob', body)
@@ -234,6 +241,62 @@ await test('setMode normalises controls the backend would override', () => {
   runtime.setMode('ref2i')
   assert.equal(runtime.draft.upscale, false, 'ref2i is single-stage')
   assert.equal(runtime.draft.numFrames, 49, 'ref2i pins its frame count')
+})
+
+await test('engine selection follows the active capability', () => {
+  const runtime = makeRuntime()
+  runtime.setMode('t2i')
+  assert.equal(runtime.setEngine('qwen'), true)
+  assert.equal(runtime.draft.engine, 'qwen')
+  assert.equal(runtime.draft.steps, 40)
+  assert.equal(runtime.draft.guidanceScale, 1)
+
+  runtime.setMode('i2v')
+  assert.equal(runtime.draft.engine, 'auto', 'unsupported Qwen selection should fall back')
+  assert.equal(runtime.setEngine('qwen'), false)
+  assert.equal(runtime.setEngine('ltx'), true)
+  assert.equal(runtime.draft.engine, 'ltx')
+})
+
+await test('engine health is projected independently', async () => {
+  const runtime = makeRuntime(fakeApi({
+    health: async () => ({ warmup: { state: 'ready', gpu: 'ONE GPU', engines: ['ltx'] } }),
+  }))
+  await runtime.refreshHealth()
+  assert.equal(runtime.engineStates.value.ltx.state, 'ready')
+  assert.equal(runtime.engineStates.value.qwen.state, 'unavailable')
+})
+
+await test('assets are paged independently from job history', async () => {
+  const runtime = makeRuntime(fakeApi({
+    listGeneratedAssets: async (_session, options = {}) => ({
+      items: [JOB({
+        id: `${options.kind}-asset`,
+        status: 'completed',
+        image_url: options.kind === 'image' ? '/asset.png' : null,
+        video_url: options.kind === 'video' ? '/asset.mp4' : null,
+      })],
+      total: 49,
+      page: options.page,
+      page_size: options.pageSize,
+      pages: 3,
+    }),
+  }))
+  runtime.sessionNumber.value = 1
+  await runtime.refreshAssets({ kind: 'image', page: 2 })
+  assert.equal(runtime.assets.kind, 'image')
+  assert.equal(runtime.assets.page, 2)
+  assert.equal(runtime.assets.pages, 3)
+  assert.equal(runtime.assets.total, 49)
+  assert.equal(runtime.assets.items[0].id, 'image-asset')
+  await runtime.setAssetKind('video')
+  assert.equal(runtime.assets.kind, 'video')
+  assert.equal(runtime.assets.page, 1)
+  await runtime.setAssetFilter({ query: 'garden', aspect: 'landscape', size: 'large' })
+  assert.equal(runtime.assets.query, 'garden')
+  assert.equal(runtime.assets.aspect, 'landscape')
+  assert.equal(runtime.assets.size, 'large')
+  assert.equal(runtime.assets.page, 1)
 })
 
 await test('stage, takes and queue are projections of one list', async () => {
