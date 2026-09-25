@@ -25,6 +25,12 @@ const selectedRatio = computed(() => (
   || props.ratioOptions[0]
   || { label: props.draft.size, aspect: '16 / 9' }
 ))
+const advancedSummary = computed(() => {
+  const parts = [String(props.draft.steps) + ' steps', 'seed ' + String(props.draft.seed)]
+  if (props.draft.upscale) parts.push('2× upscale')
+  if (props.draft.loraId) parts.push('LoRA')
+  return parts.join(' · ')
+})
 
 function setOptionalNumber(key, raw) {
   props.draft[key] = raw === '' ? null : Number(raw)
@@ -148,10 +154,15 @@ function setOptionalNumber(key, raw) {
       </section>
 
       <details class="inspector-block inspector-advanced">
-        <summary>Advanced</summary>
+        <summary>
+          <span>Advanced</span>
+          <small>{{ advancedSummary }}</small>
+          <i class="advanced-chevron" aria-hidden="true">⌄</i>
+        </summary>
 
-        <div class="inspector-subheading first">Generation</div>
-        <div class="drawer-fields two-col">
+        <section class="advanced-section">
+          <div class="inspector-subheading first">Generation</div>
+          <div class="drawer-fields two-col">
           <label class="field"><span>Steps</span><input v-model.number="draft.steps" type="number" min="1" max="100" :disabled="capability.fixedSchedule" /></label>
           <label class="field"><span>Guidance</span><input v-model.number="draft.guidanceScale" type="number" min="0" max="20" step="0.1" :disabled="qwenActive || capability.fixedSchedule" /></label>
           <label class="field"><span>Seed</span><input v-model.number="draft.seed" type="number" min="0" /></label>
@@ -175,7 +186,10 @@ function setOptionalNumber(key, raw) {
           </label>
         </div>
 
-        <div class="inspector-subheading">Processing</div>
+        </section>
+
+        <section class="advanced-section">
+          <div class="inspector-subheading">Processing</div>
         <label class="switch-row">
           <span><strong>2× spatial upscale</strong><small>Increase final spatial resolution.</small></span>
           <input v-model="draft.upscale" type="checkbox" :disabled="!capability.supportsUpscale" @change="emit('upscale-change')" />
@@ -209,7 +223,11 @@ function setOptionalNumber(key, raw) {
           <label class="field"><span>Audio skip step</span><input :value="draft.audioSkipStep ?? ''" type="number" min="0" max="100" step="1" placeholder="Default" @input="setOptionalNumber('audioSkipStep', $event.target.value)" /></label>
         </div>
 
-        <template v-if="qwenActive">
+        </section>
+
+        <section class="advanced-section">
+          <div class="inspector-subheading">Model controls</div>
+          <template v-if="qwenActive">
           <div class="drawer-fields two-col">
             <label class="field"><span>Qwen True CFG</span><input v-model.number="draft.qwenTrueCfgScale" type="number" min="0" max="20" step="0.1" /></label>
             <label class="switch-row compact-switch"><span><strong>KV cache</strong><small>Reuse attention KV during denoising.</small></span><input v-model="draft.qwenUseKvCache" type="checkbox" /></label>
@@ -232,7 +250,8 @@ function setOptionalNumber(key, raw) {
             <option v-for="item in loras" :key="item.id" :value="item.id">{{ item.name || item.id }}</option>
           </select>
         </label>
-        <label class="field"><span>Strength</span><input v-model.number="draft.loraStrength" type="number" min="-2" max="2" step="0.1" :disabled="draft.engine === 'qwen'" /></label>
+          <label class="field"><span>Strength</span><input v-model.number="draft.loraStrength" type="number" min="-2" max="2" step="0.1" :disabled="draft.engine === 'qwen'" /></label>
+        </section>
       </details>
     </div>
   </aside>

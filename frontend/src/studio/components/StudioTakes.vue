@@ -13,8 +13,8 @@ const emit = defineEmits(['select'])
 <template>
   <section v-if="props.takes.length" class="filmstrip-wrap">
     <div class="filmstrip-head">
-      <span>TAKES</span>
-      <small>{{ props.takes.length }}</small>
+      <div><span>TAKES</span><small>Recent outputs</small></div>
+      <b>{{ props.takes.length }}</b>
     </div>
     <div class="filmstrip">
       <button
@@ -33,7 +33,7 @@ const emit = defineEmits(['select'])
           <span v-else class="thumb-blank">{{ modeLabel(job.request?.mode) }}</span>
         </span>
         <span class="take-meta">
-          <span class="take-mode">{{ modeLabel(job.request?.mode) }}</span>
+          <span class="take-mode"><i aria-hidden="true" />{{ modeLabel(job.request?.mode) }}</span>
           <span class="take-time">{{ takeLabel(job) }}</span>
         </span>
       </button>

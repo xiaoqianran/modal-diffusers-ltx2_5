@@ -1,4 +1,5 @@
 <script setup>
+import { modeLabel } from '../model/modes.js'
 import { WORKFLOW_GROUPS, workflowGroupForMode } from '../model/workflows.js'
 
 const props = defineProps({
@@ -20,6 +21,12 @@ function sectionForMode(mode) {
   return 'create'
 }
 
+function modesForSection(section) {
+  if (section === 'create') return createModes
+  if (section === 'edit') return editModes
+  return controlModes
+}
+
 function chooseSection(section) {
   if (section === sectionForMode(props.currentMode)) return
   if (section === 'create') emit('select-mode', 't2i')
@@ -34,30 +41,41 @@ function chooseSection(section) {
       <span class="eyebrow">WORKSPACE</span>
     </div>
     <div class="workflow-groups rail-sections">
-      <button
-        class="workflow-link rail-section-link"
-        :class="{ active: !historyActive && sectionForMode(currentMode) === 'create' }"
-        type="button"
-        @click="chooseSection('create')"
+      <div
+        v-for="section in [
+          { id: 'create', label: 'Create', count: createModes.length },
+          { id: 'edit', label: 'Edit', count: editModes.length },
+          { id: 'control', label: 'Control', count: controlModes.length },
+        ]"
+        :key="section.id"
+        class="rail-section"
+        :class="{ expanded: !historyActive && sectionForMode(currentMode) === section.id }"
       >
-        <span>Create</span><small>{{ createModes.length }} workflows</small>
-      </button>
-      <button
-        class="workflow-link rail-section-link"
-        :class="{ active: !historyActive && sectionForMode(currentMode) === 'edit' }"
-        type="button"
-        @click="chooseSection('edit')"
-      >
-        <span>Edit</span><small>{{ editModes.length }} workflows</small>
-      </button>
-      <button
-        class="workflow-link rail-section-link"
-        :class="{ active: !historyActive && sectionForMode(currentMode) === 'control' }"
-        type="button"
-        @click="chooseSection('control')"
-      >
-        <span>Control</span><small>{{ controlModes.length }} workflows</small>
-      </button>
+        <button
+          class="workflow-link rail-section-link"
+          :class="{ active: !historyActive && sectionForMode(currentMode) === section.id }"
+          type="button"
+          @click="chooseSection(section.id)"
+        >
+          <span>{{ section.label }}</span><small>{{ section.count }} workflows</small>
+        </button>
+        <div
+          v-if="!historyActive && sectionForMode(currentMode) === section.id"
+          class="rail-workflows"
+        >
+          <button
+            v-for="mode in modesForSection(section.id)"
+            :key="mode"
+            class="rail-workflow"
+            :class="{ active: currentMode === mode }"
+            type="button"
+            @click="emit('select-mode', mode)"
+          >
+            <span>{{ modeLabel(mode) }}</span>
+            <i aria-hidden="true">›</i>
+          </button>
+        </div>
+      </div>
     </div>
     <div class="workflow-sidebar-foot">
       <button class="workflow-link history-link" :class="{ active: historyActive }" type="button" @click="emit('history')">

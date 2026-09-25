@@ -3,7 +3,7 @@ import { computed } from 'vue'
 
 import { isPending, statusLabel } from '../model/jobs.js'
 import { modeLabel } from '../model/modes.js'
-import { clipDuration, describePerformance, selectJobActions } from '../model/selectors.js'
+import { clipDuration, describeDirectorPlan, describeJob, describePerformance, selectJobActions } from '../model/selectors.js'
 
 const props = defineProps({
   jobs: { type: Array, default: () => [] },
@@ -19,13 +19,21 @@ const visibleJobs = computed(() => props.jobs.filter(job => !isPending(job)))
 function meta(job) {
   return [...describePerformance(job), clipDuration(job)].filter(Boolean).join(' · ') || job.id.slice(0, 8)
 }
+
+function shortPrompt(job) {
+  return String(job.request?.prompt || '').trim() || 'Untitled generation'
+}
 </script>
 
 <template>
   <div class="library-view">
     <div class="library-head">
-      <span>HISTORY</span>
-      <button class="ghost" type="button" @click="emit('back')">Back to Generate</button>
+      <div class="library-title">
+        <span class="eyebrow">LIBRARY</span>
+        <h1>Generation history</h1>
+        <small>{{ props.counts.all }} jobs · {{ props.counts.completed }} completed</small>
+      </div>
+      <button class="ghost library-back" type="button" @click="emit('back')">← Generate</button>
     </div>
 
     <div class="library-filters">
@@ -85,18 +93,23 @@ function meta(job) {
         class="tile"
         :class="'tile-' + job.status"
       >
-        <div class="tile-media">
+        <button class="tile-media tile-media-button" type="button" @click="emit('select', job.id)">
           <video v-if="job.video_url" :src="job.video_url" preload="metadata" muted playsinline />
           <img v-else-if="job.image_url" :src="job.image_url" alt="" loading="lazy" />
-          <audio v-else-if="job.audio_url" :src="job.audio_url" controls preload="metadata" />
-          <div v-else class="thumb-blank">{{ modeLabel(job.request?.mode) }}</div>
-        </div>
+          <span v-else-if="job.audio_url" class="thumb-blank">AUDIO</span>
+          <span v-else class="thumb-blank">{{ modeLabel(job.request?.mode) }}</span>
+          <span class="tile-overlay">
+            <span class="tile-open">Open</span>
+          </span>
+        </button>
         <figcaption>
           <div class="tile-head">
             <span class="mode-chip">{{ modeLabel(job.request?.mode) }}</span>
-            <small class="tile-status">{{ statusLabel(job) }}</small>
+            <small class="tile-status" :data-status="job.status">{{ statusLabel(job) }}</small>
           </div>
-          <p>{{ job.request?.prompt || '' }}</p>
+          <p :title="shortPrompt(job)">{{ shortPrompt(job) }}</p>
+          <small class="tile-spec">{{ describeJob(job) }}</small>
+          <small v-if="describeDirectorPlan(job)" class="tile-route">{{ describeDirectorPlan(job) }}</small>
           <small class="tile-meta">{{ meta(job) }}</small>
         </figcaption>
         <div class="tile-actions">
