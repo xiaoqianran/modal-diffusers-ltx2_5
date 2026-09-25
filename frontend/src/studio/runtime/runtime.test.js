@@ -98,13 +98,12 @@ function fakeApi(overrides = {}) {
     loras: async () => [],
     createSession: async () => ({ session_number: 555 }),
     listJobs: async () => [],
-    listGeneratedAssets: async (_session, kind, page, pageSize) => ({
+    listGeneratedAssets: async (_session, options = {}) => ({
       items: [],
       total: 0,
-      page,
-      page_size: pageSize,
+      page: options.page || 1,
+      page_size: options.pageSize || 24,
       pages: 1,
-      kind,
     }),
     getJob: async id => JOB({ id }),
     submitJob: async body => {
@@ -270,16 +269,16 @@ await test('engine health is projected independently', async () => {
 
 await test('assets are paged independently from job history', async () => {
   const runtime = makeRuntime(fakeApi({
-    listGeneratedAssets: async (_session, kind, page, pageSize) => ({
+    listGeneratedAssets: async (_session, options = {}) => ({
       items: [JOB({
-        id: `${kind}-asset`,
+        id: `${options.kind}-asset`,
         status: 'completed',
-        image_url: kind === 'image' ? '/asset.png' : null,
-        video_url: kind === 'video' ? '/asset.mp4' : null,
+        image_url: options.kind === 'image' ? '/asset.png' : null,
+        video_url: options.kind === 'video' ? '/asset.mp4' : null,
       })],
       total: 49,
-      page,
-      page_size: pageSize,
+      page: options.page,
+      page_size: options.pageSize,
       pages: 3,
     }),
   }))
@@ -292,6 +291,11 @@ await test('assets are paged independently from job history', async () => {
   assert.equal(runtime.assets.items[0].id, 'image-asset')
   await runtime.setAssetKind('video')
   assert.equal(runtime.assets.kind, 'video')
+  assert.equal(runtime.assets.page, 1)
+  await runtime.setAssetFilter({ query: 'garden', aspect: 'landscape', size: 'large' })
+  assert.equal(runtime.assets.query, 'garden')
+  assert.equal(runtime.assets.aspect, 'landscape')
+  assert.equal(runtime.assets.size, 'large')
   assert.equal(runtime.assets.page, 1)
 })
 

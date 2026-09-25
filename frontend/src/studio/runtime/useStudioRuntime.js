@@ -148,6 +148,10 @@ export function useStudioRuntime(options = {}) {
     pageSize: 24,
     pages: 1,
     loading: false,
+    query: '',
+    sort: 'newest',
+    aspect: 'all',
+    size: 'all',
   })
 
   // draft state
@@ -321,9 +325,15 @@ export function useStudioRuntime(options = {}) {
     try {
       const result = await client.listGeneratedAssets(
         sessionNumber.value,
-        kind,
-        page,
-        assets.pageSize,
+        {
+          kind,
+          page,
+          pageSize: assets.pageSize,
+          query: assets.query,
+          sort: assets.sort,
+          aspect: assets.aspect,
+          size: assets.size,
+        },
       )
       assets.kind = kind
       assets.items = result.items || []
@@ -344,6 +354,11 @@ export function useStudioRuntime(options = {}) {
 
   async function setAssetPage(page) {
     await refreshAssets({ kind: assets.kind, page })
+  }
+
+  async function setAssetFilter(patch) {
+    Object.assign(assets, patch)
+    await refreshAssets({ kind: assets.kind, page: 1 })
   }
 
   async function warmGpu() {
@@ -748,7 +763,7 @@ export function useStudioRuntime(options = {}) {
     // actions
     start, dispose, warmGpu, releaseGpu,
     refreshJobs, refreshHealth, refreshLoras, refreshAssets, ensureSession,
-    setAssetKind, setAssetPage,
+    setAssetKind, setAssetPage, setAssetFilter,
     setMode, setEngine, updateDraft, updateRange, resetDraftInputs, clearAttachments,
     attach, detach,
     selectJob, clearSelection,

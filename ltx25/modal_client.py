@@ -637,6 +637,10 @@ class ModalClient:
         media_kind: str,
         page: int = 1,
         page_size: int = 24,
+        query: str = "",
+        sort: str = "newest",
+        aspect: str = "all",
+        size: str = "all",
     ) -> dict[str, Any]:
         job_ids = self.job_store.get(self._session_key(session_number))
         records: list[dict[str, Any]] = []
@@ -658,7 +662,51 @@ class ModalClient:
             for item in records
             if item.get("status") == "completed" and item.get(media_key)
         ]
-        records.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+
+        def output_size(item: dict[str, Any]) -> tuple[int, int]:
+            request = item.get("request") or {}
+            scale = 2 if request.get("upscale") else 1
+            return (
+                int(request.get("width") or 0) * scale,
+                int(request.get("height") or 0) * scale,
+            )
+
+        needle = query.strip().casefold()
+        if needle:
+            records = [
+                item for item in records
+                if needle in str(item.get("id") or "").casefold()
+                or needle in str((item.get("request") or {}).get("prompt") or "").casefold()
+            ]
+
+        if aspect != "all":
+            def aspect_matches(item: dict[str, Any]) -> bool:
+                width, height = output_size(item)
+                if not width or not height:
+                    return False
+                ratio = width / height
+                if aspect == "square":
+                    return 0.9 <= ratio <= 1.1
+                if aspect == "landscape":
+                    return ratio > 1.1
+                return ratio < 0.9
+            records = [item for item in records if aspect_matches(item)]
+
+        if size != "all":
+            def size_matches(item: dict[str, Any]) -> bool:
+                width, height = output_size(item)
+                megapixels = width * height / 1_000_000
+                if size == "small":
+                    return megapixels < 1
+                if size == "medium":
+                    return 1 <= megapixels < 2
+                return megapixels >= 2
+            records = [item for item in records if size_matches(item)]
+
+        records.sort(
+            key=lambda item: item.get("created_at", ""),
+            reverse=sort != "oldest",
+        )
 
         safe_size = min(max(int(page_size), 1), 60)
         total = len(records)

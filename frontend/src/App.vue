@@ -63,6 +63,7 @@ const {
   setSortOrder,
   setAssetKind,
   setAssetPage,
+  setAssetFilter,
   attach,
   detach,
   selectJob,
@@ -331,6 +332,7 @@ onBeforeUnmount(() => {
           @back="backToGenerate"
           @kind="setAssetKind"
           @page="setAssetPage"
+          @filter="setAssetFilter"
           @select="focus"
           @reuse="reuse"
           @remove="removeAsset"

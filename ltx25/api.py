@@ -230,14 +230,28 @@ def list_generated_assets(
     media_kind: str = "image",
     page: int = 1,
     page_size: int = 24,
+    query: str = "",
+    sort: str = "newest",
+    aspect: str = "all",
+    size: str = "all",
 ):
     if media_kind not in {"image", "video"}:
         raise HTTPException(status_code=422, detail="media_kind must be image or video")
+    if sort not in {"newest", "oldest"}:
+        raise HTTPException(status_code=422, detail="sort must be newest or oldest")
+    if aspect not in {"all", "landscape", "portrait", "square"}:
+        raise HTTPException(status_code=422, detail="invalid aspect filter")
+    if size not in {"all", "small", "medium", "large"}:
+        raise HTTPException(status_code=422, detail="invalid size filter")
     return modal_client.list_generated_assets(
         session_number=session_number,
         media_kind=media_kind,
         page=page,
         page_size=page_size,
+        query=query,
+        sort=sort,
+        aspect=aspect,
+        size=size,
     )
 
 
