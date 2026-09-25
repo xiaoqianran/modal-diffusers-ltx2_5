@@ -2,6 +2,8 @@ import pytest
 from pydantic import ValidationError
 
 from ltx25.director import (
+    DirectorRuntime,
+    ExecutionPlan,
     LTX_ENGINE,
     QWEN_ENGINE,
     RuntimeSnapshot,
@@ -161,3 +163,58 @@ def test_qwen_rejects_ltx_lora_routing():
             prompt="cinematic city",
             loras=[{"id": "style.safetensors", "strength": 1.0}],
         )
+
+
+def test_failed_ltx_execution_resets_graph_cache(monkeypatch, tmp_path):
+    class Runner:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def stats(self):
+            return {
+                "enabled": True,
+                "captures": 1,
+                "eager_shapes": 0,
+                "replays": 0,
+                "replacements": 0,
+                "overflow_misses": 0,
+                "max_captures": 1,
+            }
+
+        def reset(self):
+            self.reset_calls += 1
+
+    class LTX:
+        def __init__(self):
+            self._graph_runner = Runner()
+
+        def generate(self, *_args, **_kwargs):
+            raise RuntimeError("synthetic OOM")
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    import torch
+
+    monkeypatch.setattr(torch, "cuda", FakeCuda())
+    runtime_obj = object.__new__(DirectorRuntime)
+    runtime_obj.ltx = LTX()
+    runtime_obj.qwen = None
+
+    request = GenerateRequest(mode="t2av", prompt="test")
+    plan = ExecutionPlan(
+        requested_engine="ltx",
+        engine="ltx",
+        fallback_engine=None,
+        fallback_applied=False,
+        reason="explicit:ltx",
+        resource_class="ltx_default",
+        acceleration="ltx_cuda_graph_eligible",
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic OOM"):
+        runtime_obj.execute(plan, request, tmp_path / "out.mp4")
+
+    assert runtime_obj.ltx._graph_runner.reset_calls == 1

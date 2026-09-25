@@ -49,6 +49,10 @@ class ForwardGraphRunner:
         self._captures: dict[tuple, Any] = {}
         self.enabled = True
         self.replays = 0
+        self.replacements = 0
+        self.overflow_misses = 0
+        self._last_overflow_key = None
+        self._overflow_streak = 0
         self._warned_args = False
         self._warned_keynone = False
 
@@ -64,6 +68,8 @@ class ForwardGraphRunner:
         """capture 済み graph を全て破棄する(LoRA ジョブ後の防御的リセット)。"""
         n = sum(1 for v in self._captures.values() if v is not _EAGER)
         self._captures.clear()
+        self._last_overflow_key = None
+        self._overflow_streak = 0
         if n:
             torch.cuda.synchronize()
             print(f"[ltx25] cudagraph: reset ({n} captures dropped)", flush=True)
@@ -75,6 +81,8 @@ class ForwardGraphRunner:
             "captures": sum(1 for v in self._captures.values() if v is not _EAGER),
             "eager_shapes": sum(1 for v in self._captures.values() if v is _EAGER),
             "replays": self.replays,
+            "replacements": self.replacements,
+            "overflow_misses": self.overflow_misses,
             "max_captures": self._max_captures,
         }
 
@@ -120,11 +128,35 @@ class ForwardGraphRunner:
         if cap is None:
             n_live = sum(1 for v in self._captures.values() if v is not _EAGER)
             if n_live >= self._max_captures:
-                if _EAGER not in self._captures.values():
-                    print(f"[ltx25] cudagraph: max_captures={self._max_captures} reached; "
-                          "new shapes fall back to eager", flush=True)
-                self._captures[key] = _EAGER
-                return self._orig_forward(**kwargs)
+                self.overflow_misses += 1
+                if key == self._last_overflow_key:
+                    self._overflow_streak += 1
+                else:
+                    self._last_overflow_key = key
+                    self._overflow_streak = 1
+
+                # Dual-resident production deliberately keeps max_captures very
+                # small for Qwen headroom.  A pure "first shape wins forever"
+                # policy is pathological, though: one unusual/failed request can
+                # pin the only slot and make a subsequent repeated workload eager
+                # forever.  Replace only after the *same* overflow key is seen
+                # twice consecutively. Alternating shapes therefore stay eager
+                # rather than thrashing the graph pool.
+                if self._overflow_streak < 2:
+                    print(
+                        f"[ltx25] cudagraph: max_captures={self._max_captures} reached; "
+                        "new shape eager once (repeat to promote)",
+                        flush=True,
+                    )
+                    return self._orig_forward(**kwargs)
+
+                print(
+                    "[ltx25] cudagraph: repeated overflow shape; replacing stale capture",
+                    flush=True,
+                )
+                self.reset()
+                self.replacements += 1
+                cap = None
             try:
                 cap = self._capture(kwargs)
             except Exception as exc:
@@ -133,6 +165,8 @@ class ForwardGraphRunner:
                 self._captures[key] = _EAGER
                 return self._orig_forward(**kwargs)
             self._captures[key] = cap
+            self._last_overflow_key = None
+            self._overflow_streak = 0
         else:
             for k, static in cap["inputs"].items():
                 static.copy_(kwargs[k])

@@ -307,9 +307,33 @@ class DirectorRuntime:
                 "captures": 0,
                 "eager_shapes": 0,
                 "replays": 0,
+                "replacements": 0,
+                "overflow_misses": 0,
                 "max_captures": 0,
             }
         return runner.stats()
+
+    def _reset_ltx_graphs_after_failure(self) -> None:
+        """Drop captures created by a failed LTX request.
+
+        A request can successfully capture a graph and then fail later (for
+        example during an upscale/decode OOM). With a one-slot production cache,
+        keeping that capture poisons the worker: every subsequent shape is forced
+        to eager. Failure recovery must therefore invalidate the graph cache.
+        """
+        runner = getattr(self.ltx, "_graph_runner", None)
+        if runner is None:
+            return
+        try:
+            runner.reset()
+            # Return allocator cache to the shared dual-resident headroom after
+            # an OOM. This is best-effort and intentionally not on the hot path.
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            print(f"[ltx25] cudagraph: failure reset failed: {exc!r}", flush=True)
 
     def execute(
         self,
@@ -333,7 +357,11 @@ class DirectorRuntime:
             raise RuntimeError(f"Execution plan selected unknown engine: {plan.engine}")
 
         before = self._ltx_graph_stats()
-        metrics = self.ltx.generate(request, target, progress, input_dir=input_dir) or {}
+        try:
+            metrics = self.ltx.generate(request, target, progress, input_dir=input_dir) or {}
+        except Exception:
+            self._reset_ltx_graphs_after_failure()
+            raise
         after = self._ltx_graph_stats()
         metrics["engine"] = LTX_ENGINE
         metrics["plan"] = plan.as_dict()
@@ -343,6 +371,8 @@ class DirectorRuntime:
             "capture_delta": int(after["captures"]) - int(before["captures"]),
             "replay_delta": int(after["replays"]) - int(before["replays"]),
             "eager_shape_delta": int(after["eager_shapes"]) - int(before["eager_shapes"]),
+            "replacement_delta": int(after["replacements"]) - int(before["replacements"]),
+            "overflow_miss_delta": int(after["overflow_misses"]) - int(before["overflow_misses"]),
             "max_captures": after["max_captures"],
         }
         return metrics
