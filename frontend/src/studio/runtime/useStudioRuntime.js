@@ -140,6 +140,15 @@ export function useStudioRuntime(options = {}) {
   const health = ref(null)
   const loras = shallowRef([])
   const pending = ref(new Map())
+  const assets = reactive({
+    kind: 'image',
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: 24,
+    pages: 1,
+    loading: false,
+  })
 
   // draft state
   const draft = reactive(createDraft())
@@ -298,6 +307,43 @@ export function useStudioRuntime(options = {}) {
     } catch {
       loras.value = []
     }
+  }
+
+  async function refreshAssets({ kind = assets.kind, page = assets.page } = {}) {
+    if (!sessionNumber.value || !client.listGeneratedAssets) {
+      assets.items = []
+      assets.total = 0
+      assets.page = 1
+      assets.pages = 1
+      return
+    }
+    assets.loading = true
+    try {
+      const result = await client.listGeneratedAssets(
+        sessionNumber.value,
+        kind,
+        page,
+        assets.pageSize,
+      )
+      assets.kind = kind
+      assets.items = result.items || []
+      assets.total = Number(result.total || 0)
+      assets.page = Number(result.page || 1)
+      assets.pages = Number(result.pages || 1)
+    } catch (error) {
+      setNotice(`Assets 加载失败：${error.message}`, 'error')
+    } finally {
+      assets.loading = false
+    }
+  }
+
+  async function setAssetKind(kind) {
+    if (!['image', 'video'].includes(kind)) return
+    await refreshAssets({ kind, page: 1 })
+  }
+
+  async function setAssetPage(page) {
+    await refreshAssets({ kind: assets.kind, page })
   }
 
   async function warmGpu() {
@@ -690,7 +736,7 @@ export function useStudioRuntime(options = {}) {
 
   return {
     // state
-    sessionNumber, jobs, health, loras, pending,
+    sessionNumber, jobs, health, loras, pending, assets,
     draft, attachments,
     selectedJobId, view, queueCollapsed, filter, sortOrder, busy, notice,
 
@@ -701,7 +747,8 @@ export function useStudioRuntime(options = {}) {
 
     // actions
     start, dispose, warmGpu, releaseGpu,
-    refreshJobs, refreshHealth, refreshLoras, ensureSession,
+    refreshJobs, refreshHealth, refreshLoras, refreshAssets, ensureSession,
+    setAssetKind, setAssetPage,
     setMode, setEngine, updateDraft, updateRange, resetDraftInputs, clearAttachments,
     attach, detach,
     selectJob, clearSelection,

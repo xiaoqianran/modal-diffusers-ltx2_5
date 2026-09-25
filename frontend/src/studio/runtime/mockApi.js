@@ -180,6 +180,26 @@ export const mockApi = {
     return clone(jobs.filter(job => Number(job.session_number) === Number(sessionNumber)))
   },
 
+  async listGeneratedAssets(sessionNumber, mediaKind = 'image', page = 1, pageSize = 24) {
+    const mediaKey = mediaKind === 'video' ? 'video_url' : 'image_url'
+    const records = jobs.filter(job => (
+      Number(job.session_number) === Number(sessionNumber)
+      && job.status === 'completed'
+      && Boolean(job[mediaKey])
+    ))
+    const total = records.length
+    const pages = Math.max(1, Math.ceil(total / pageSize))
+    const safePage = Math.max(1, Math.min(page, pages))
+    const start = (safePage - 1) * pageSize
+    return clone({
+      items: records.slice(start, start + pageSize),
+      total,
+      page: safePage,
+      page_size: pageSize,
+      pages,
+    })
+  },
+
   async getJob(id) {
     const job = jobs.find(item => item.id === id)
     if (!job) throw new Error('Mock job not found')

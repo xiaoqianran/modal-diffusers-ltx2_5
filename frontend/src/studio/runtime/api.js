@@ -177,6 +177,10 @@ export const api = {
     `/api/jobs/status?session_number=${encodeURIComponent(sessionNumber)}&limit=${limit}`
   ),
 
+  listGeneratedAssets: (sessionNumber, mediaKind = 'image', page = 1, pageSize = 24) => send(
+    `/api/assets/generated?session_number=${encodeURIComponent(sessionNumber)}&media_kind=${encodeURIComponent(mediaKind)}&page=${page}&page_size=${pageSize}`
+  ),
+
   getJob: id => send(`/api/jobs/${id}`),
 
   submitJob: body => send('/api/jobs', { method: 'POST', body }),

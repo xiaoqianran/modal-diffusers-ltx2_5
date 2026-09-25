@@ -12,8 +12,9 @@ import {
 const props = defineProps({
   currentMode: { type: String, required: true },
   historyActive: { type: Boolean, default: false },
+  assetsActive: { type: Boolean, default: false },
 })
-const emit = defineEmits(['select-mode', 'history'])
+const emit = defineEmits(['select-mode', 'assets', 'history'])
 
 const activeSurface = computed(() => creationSurfaceForMode(props.currentMode))
 const advancedActive = computed(() => (
@@ -36,7 +37,7 @@ function chooseSurface(surfaceId) {
         v-for="surface in CREATION_SURFACES"
         :key="surface.id"
         class="creation-surface"
-        :class="{ active: !historyActive && !advancedActive && activeSurface === surface.id }"
+        :class="{ active: !historyActive && !assetsActive && !advancedActive && activeSurface === surface.id }"
         type="button"
         @click="chooseSurface(surface.id)"
       >
@@ -56,7 +57,7 @@ function chooseSurface(surfaceId) {
         v-for="item in ADVANCED_WORKFLOWS"
         :key="item.mode"
         class="rail-tool"
-        :class="{ active: !historyActive && currentMode === item.mode }"
+        :class="{ active: !historyActive && !assetsActive && currentMode === item.mode }"
         type="button"
         @click="emit('select-mode', item.mode)"
       >
@@ -66,6 +67,14 @@ function chooseSurface(surfaceId) {
     </div>
 
     <div class="workflow-sidebar-foot">
+      <button
+        class="workflow-link history-link"
+        :class="{ active: assetsActive }"
+        type="button"
+        @click="emit('assets')"
+      >
+        <span>Assets</span>
+      </button>
       <button
         class="workflow-link history-link"
         :class="{ active: historyActive }"

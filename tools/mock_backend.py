@@ -419,6 +419,29 @@ def list_jobs(session_number: int | None, limit: int) -> list[dict]:
     return [public_job(r) for r in records[: max(1, min(limit, 200))]]
 
 
+def list_generated_assets(session_number: int, media_kind: str, page: int, page_size: int) -> dict:
+    with STATE_LOCK:
+        records = [
+            r for r in JOBS.values()
+            if r.get("session_number") == session_number
+            and r.get("status") == "completed"
+            and r.get("image_url" if media_kind == "image" else "video_url")
+        ]
+    records.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    safe_size = max(1, min(page_size, 60))
+    total = len(records)
+    pages = max(1, (total + safe_size - 1) // safe_size)
+    safe_page = max(1, min(page, pages))
+    start = (safe_page - 1) * safe_size
+    return {
+        "items": [public_job(r) for r in records[start:start + safe_size]],
+        "total": total,
+        "page": safe_page,
+        "page_size": safe_size,
+        "pages": pages,
+    }
+
+
 def interrupt(job_id: str | None) -> dict:
     with STATE_LOCK:
         target = JOBS.get(job_id) if job_id else None
@@ -551,6 +574,15 @@ class Handler(BaseHTTPRequestHandler):
             session = query.get("session_number")
             limit = int((query.get("limit") or ["50"])[0])
             return self.send_json(list_jobs(int(session[0]) if session else None, limit))
+
+        if path == "/api/assets/generated":
+            session = int((query.get("session_number") or ["0"])[0])
+            media_kind = (query.get("media_kind") or ["image"])[0]
+            page = int((query.get("page") or ["1"])[0])
+            page_size = int((query.get("page_size") or ["24"])[0])
+            if media_kind not in {"image", "video"}:
+                return self.send_error_json(422, "media_kind must be image or video")
+            return self.send_json(list_generated_assets(session, media_kind, page, page_size))
 
         match = re.fullmatch(r"/api/jobs/([0-9a-fA-F]+)", path)
         if match:

@@ -630,6 +630,50 @@ class ModalClient:
     def list_job_summaries(self, session_number: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return [self._job_summary(item) for item in self.list_jobs(session_number, limit)]
 
+    def list_generated_assets(
+        self,
+        *,
+        session_number: int,
+        media_kind: str,
+        page: int = 1,
+        page_size: int = 24,
+    ) -> dict[str, Any]:
+        job_ids = self.job_store.get(self._session_key(session_number))
+        records: list[dict[str, Any]] = []
+        if isinstance(job_ids, list):
+            records = [record for job_id in job_ids if (record := self._get_record(job_id))]
+        else:
+            for item_key, item in self.job_store.items():
+                if (
+                    isinstance(item_key, str)
+                    and item_key.startswith("job:")
+                    and isinstance(item, dict)
+                    and item.get("session_number") == session_number
+                ):
+                    records.append(item)
+
+        media_key = "image_url" if media_kind == "image" else "video_url"
+        records = [
+            self._refresh(item)
+            for item in records
+            if item.get("status") == "completed" and item.get(media_key)
+        ]
+        records.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+
+        safe_size = min(max(int(page_size), 1), 60)
+        total = len(records)
+        pages = max(1, (total + safe_size - 1) // safe_size)
+        safe_page = min(max(int(page), 1), pages)
+        start = (safe_page - 1) * safe_size
+        items = records[start:start + safe_size]
+        return {
+            "items": [self._job_summary(item) for item in items],
+            "total": total,
+            "page": safe_page,
+            "page_size": safe_size,
+            "pages": pages,
+        }
+
     def delete_job(self, job_id: str) -> bool:
         record = self._get_record(job_id)
         if not record:

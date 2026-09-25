@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import PromptDock from './studio/components/PromptDock.vue'
+import StudioAssets from './studio/components/StudioAssets.vue'
 import StudioInspector from './studio/components/StudioInspector.vue'
 import StudioLibrary from './studio/components/StudioLibrary.vue'
 import StudioQueue from './studio/components/StudioQueue.vue'
@@ -34,6 +35,7 @@ const {
   sortOrder,
   busy,
   notice,
+  assets,
   allJobs,
   stageJob,
   takes,
@@ -54,10 +56,13 @@ const {
   refreshJobs,
   refreshHealth,
   refreshLoras,
+  refreshAssets,
   setMode,
   setEngine,
   setFilter,
   setSortOrder,
+  setAssetKind,
+  setAssetPage,
   attach,
   detach,
   selectJob,
@@ -109,7 +114,11 @@ const runtimePrimary = computed(() => {
   if (runtimeState.value === 'ready') return gpuLabel.value
   return 'Offline'
 })
-const sectionTitle = computed(() => view.value === 'library' ? 'History' : modeIntentLabel(draft.mode))
+const sectionTitle = computed(() => {
+  if (view.value === 'library') return 'History'
+  if (view.value === 'assets') return 'Assets'
+  return modeIntentLabel(draft.mode)
+})
 const ratioOptions = computed(() => ratioOptionsForDraft(draft, activeCapability.value))
 const frameOptions = computed(() => frameOptionsForCapability(activeCapability.value))
 const attachmentSlots = computed(() => (
@@ -127,6 +136,12 @@ function chooseMode(mode) {
 function openHistory() {
   jobsOpen.value = false
   showView('library')
+}
+
+async function openAssets() {
+  jobsOpen.value = false
+  showView('assets')
+  await refreshAssets({ kind: assets.kind, page: assets.page })
 }
 
 function backToGenerate() {
@@ -163,6 +178,11 @@ function reuse(id) {
 function focus(id) {
   selectJob(id)
   showView('generate')
+}
+
+async function removeAsset(id) {
+  await deleteJob(id)
+  await refreshAssets({ kind: assets.kind, page: assets.page })
 }
 
 function onUpscaleChange() {
@@ -294,17 +314,30 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <section class="studio-shell studio-shell-v3" :class="{ 'history-mode': view === 'library' }">
+    <section class="studio-shell studio-shell-v3" :class="{ 'history-mode': view !== 'generate' }">
       <StudioSidebar
         :current-mode="draft.mode"
         :history-active="view === 'library'"
+        :assets-active="view === 'assets'"
         @select-mode="chooseMode"
+        @assets="openAssets"
         @history="openHistory"
       />
 
       <main class="studio-workspace studio-workspace-v3">
+        <StudioAssets
+          v-if="view === 'assets'"
+          :assets="assets"
+          @back="backToGenerate"
+          @kind="setAssetKind"
+          @page="setAssetPage"
+          @select="focus"
+          @reuse="reuse"
+          @remove="removeAsset"
+        />
+
         <StudioLibrary
-          v-if="view === 'library'"
+          v-else-if="view === 'library'"
           :jobs="libraryJobs"
           :counts="counts"
           :available-modes="availableModes"
@@ -356,7 +389,7 @@ onBeforeUnmount(() => {
       </main>
 
       <StudioInspector
-        v-if="view !== 'library'"
+        v-if="view === 'generate'"
         :draft="draft"
         :capability="activeCapability"
         :loras="loras"

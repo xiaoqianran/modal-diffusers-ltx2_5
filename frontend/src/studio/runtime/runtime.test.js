@@ -98,6 +98,14 @@ function fakeApi(overrides = {}) {
     loras: async () => [],
     createSession: async () => ({ session_number: 555 }),
     listJobs: async () => [],
+    listGeneratedAssets: async (_session, kind, page, pageSize) => ({
+      items: [],
+      total: 0,
+      page,
+      page_size: pageSize,
+      pages: 1,
+      kind,
+    }),
     getJob: async id => JOB({ id }),
     submitJob: async body => {
       record('submitJob', body)
@@ -258,6 +266,33 @@ await test('engine health is projected independently', async () => {
   await runtime.refreshHealth()
   assert.equal(runtime.engineStates.value.ltx.state, 'ready')
   assert.equal(runtime.engineStates.value.qwen.state, 'unavailable')
+})
+
+await test('assets are paged independently from job history', async () => {
+  const runtime = makeRuntime(fakeApi({
+    listGeneratedAssets: async (_session, kind, page, pageSize) => ({
+      items: [JOB({
+        id: `${kind}-asset`,
+        status: 'completed',
+        image_url: kind === 'image' ? '/asset.png' : null,
+        video_url: kind === 'video' ? '/asset.mp4' : null,
+      })],
+      total: 49,
+      page,
+      page_size: pageSize,
+      pages: 3,
+    }),
+  }))
+  runtime.sessionNumber.value = 1
+  await runtime.refreshAssets({ kind: 'image', page: 2 })
+  assert.equal(runtime.assets.kind, 'image')
+  assert.equal(runtime.assets.page, 2)
+  assert.equal(runtime.assets.pages, 3)
+  assert.equal(runtime.assets.total, 49)
+  assert.equal(runtime.assets.items[0].id, 'image-asset')
+  await runtime.setAssetKind('video')
+  assert.equal(runtime.assets.kind, 'video')
+  assert.equal(runtime.assets.page, 1)
 })
 
 await test('stage, takes and queue are projections of one list', async () => {
