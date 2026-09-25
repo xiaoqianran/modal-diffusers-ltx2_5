@@ -65,6 +65,29 @@ def test_high_resolution_diffusion_decoder_uses_tiling(monkeypatch):
     assert calls[0]["tile_sample_min_num_frames"] == 121
 
 
+def test_low_vram_diffusion_decoder_uses_smallest_custom_tiles(monkeypatch):
+    calls = []
+
+    class Decoder:
+        def enable_tiling(self, **kwargs):
+            calls.append(kwargs)
+
+    lifecycle = ModelLifecycle.__new__(ModelLifecycle)
+    lifecycle.config = SimpleNamespace(ltx25_decode_single_tile="auto")
+    lifecycle._diffusion_decode_pipe = SimpleNamespace(diffusion_decoder=Decoder())
+
+    # Simulate the long 2x-refine decode path after Stage 2, where only a few
+    # hundred MiB may be reported free. We must not fall back to Diffusers'
+    # larger default tiles.
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (512 * 1024**2, 96 * 1024**3))
+    lifecycle._configure_decode_tiling(num_frames=241, height=1024, width=1536)
+
+    assert len(calls) == 1
+    assert calls[0]["tile_sample_min_width"] < 768
+    assert calls[0]["tile_sample_min_height"] < 768
+    assert calls[0]["tile_sample_min_num_frames"] < 80
+
+
 def test_natten_kernel_trust_is_scoped_to_exact_repo(monkeypatch):
     calls = []
 

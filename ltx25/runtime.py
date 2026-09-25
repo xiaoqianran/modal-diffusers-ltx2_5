@@ -314,14 +314,25 @@ class LTXGenerator(ModelLifecycle):
         adapter_names = []
         lora_root = self.config.lora_dir.resolve()
         nvfp4_lora = self.config.ltx25_transformer_precision == "nvfp4"
-        # LoRA を載せるジョブ(job loras / pixel upscale の IC-LoRA)は CUDA graph 不可:
-        # capture は重みテンソルのアドレスを焼き込むため、adapter の付け外しをまたぐ
-        # replay は stale な重みを黙って使う。eager に落とし、ジョブ後に capture を捨てる。
-        _graph_lora_guard = self._graph_runner is not None and (
-            bool(request.loras) or request.upscale_method == "pixel"
+        # Jobs that mutate adapters or enter the high-memory refine/decode path
+        # must not retain a CUDA Graph private pool. On the shared 96 GB worker,
+        # a captured graph can hold ~8 GiB and starve the diffusion decoder.
+        _graph_memory_guard = self._graph_runner is not None and (
+            bool(request.loras)
+            or request.upscale_method == "pixel"
+            or request.upscale
+            or request.temporal_upscale
         )
-        if _graph_lora_guard:
+        if _graph_memory_guard:
+            self._graph_runner.reset()
             self._graph_runner.enabled = False
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
         try:
             for index, item in enumerate(request.loras):
                 path = (lora_root / item.id).resolve()
@@ -362,9 +373,8 @@ class LTXGenerator(ModelLifecycle):
                         pipe.unload_lora_weights()
                 except Exception as exc:
                     print(f"[ltx25] LoRA cleanup failed: {exc}", flush=True)
-            if _graph_lora_guard:
-                # unload_lora_weights 後の構造復元を信用せず、防御的に capture を捨てる
-                # (次の非 LoRA ジョブが ~1s で再 capture する)。
+            if _graph_memory_guard:
+                # Re-enable graph capture for the next ordinary video job.
                 self._graph_runner.reset()
                 self._graph_runner.enabled = True
 

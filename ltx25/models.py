@@ -405,8 +405,19 @@ class ModelLifecycle:
             return tw, th, tf
 
         # 幅→高さ→フレームの順で分割を増やし、予算に収まる最初の構成を採用
-        candidates = [(1, 1, 1), (2, 1, 1), (2, 2, 1), (3, 2, 1), (2, 2, 2),
-                      (3, 2, 2), (3, 3, 2), (4, 3, 2)]
+        candidates = [
+            (1, 1, 1),
+            (2, 1, 1),
+            (2, 2, 1),
+            (3, 2, 1),
+            (2, 2, 2),
+            (3, 2, 2),
+            (3, 3, 2),
+            (4, 3, 2),
+            (4, 4, 2),
+            (4, 4, 3),
+            (4, 4, 4),
+        ]
         chosen = None
         for nw, nh, nf in candidates:
             tw, th, tf = tile_dims(nw, nh, nf)
@@ -414,13 +425,19 @@ class ModelLifecycle:
                 chosen = (nw, nh, nf, tw, th, tf)
                 break
         if chosen is None:
-            decoder.enable_tiling()
+            # The stock Diffusers tiles are comparatively large. Under very
+            # low free VRAM that fallback is exactly the wrong direction: it
+            # can OOM even though a smaller custom tile would survive. Use the
+            # smallest validated candidate instead.
+            nw, nh, nf = candidates[-1]
+            tw, th, tf = tile_dims(nw, nh, nf)
+            chosen = (nw, nh, nf, tw, th, tf)
             print(
-                f"[ltx25] decode tiling: default tiles (budget {budget_mpx/1e6:.0f}Mpx "
-                f"too small for {width}x{height}x{num_frames}f)",
+                f"[ltx25] decode tiling: minimum tiles forced "
+                f"(budget {budget_mpx/1e6:.0f}Mpx too small for "
+                f"{width}x{height}x{num_frames}f)",
                 flush=True,
             )
-            return
         nw, nh, nf, tw, th, tf = chosen
         # stride は「各次元の刻み = ceil(dim/n)」。オーバーラップは tile_min 側にだけ
         # 足してあるため、分割数1の次元では引かない(引くと2タイル化してしまう)。
