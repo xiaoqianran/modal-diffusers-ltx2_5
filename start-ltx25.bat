@@ -57,7 +57,7 @@ if not exist "frontend\node_modules" (
 
 echo [LTX-2.5] Cleaning stale listeners on ports 48125 / 5187...
 powershell -NoProfile -Command "$ports=48125,5187; foreach($p in $ports){ Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }"
-timeout /t 1 /nobreak >nul
+powershell -NoProfile -Command "Start-Sleep -Milliseconds 800"
 
 echo [LTX-2.5] Starting local app supervisor...
 "%PYTHON%" "%~dp0tools\local_launcher.py"

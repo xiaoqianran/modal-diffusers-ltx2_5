@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from datetime import datetime, timezone
 from io import BytesIO
@@ -418,6 +419,9 @@ def test_app_shutdown_uses_two_second_idle_window(tmp_path, monkeypatch):
     monkeypatch.setattr(api_module, "UPLOAD_CACHE", tmp_path / "cache" / "uploads")
 
     with TestClient(api_module.app):
+        deadline = time.time() + 1.0
+        while not control.idle_windows and time.time() < deadline:
+            time.sleep(0.01)
         assert control.idle_windows[-1] == control.gpu_idle_seconds
 
     assert control.idle_windows[-1] == 2

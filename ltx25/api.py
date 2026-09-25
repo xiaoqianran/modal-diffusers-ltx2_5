@@ -90,25 +90,45 @@ async def lifespan(_: FastAPI):
     OUTPUT_CACHE.mkdir(parents=True, exist_ok=True)
     UPLOAD_CACHE.mkdir(parents=True, exist_ok=True)
     _prune_local_upload_cache()
-    try:
-        await asyncio.to_thread(modal_client.cleanup_assets)
-    except Exception:
-        pass
+
+    async def _initial_cleanup() -> None:
+        try:
+            await asyncio.to_thread(modal_client.cleanup_assets)
+        except Exception:
+            logger.warning("initial asset cleanup failed", exc_info=True)
+
+    # Remote Dict/media maintenance must not delay the local Router from
+    # binding its port. Cleanup is best-effort background housekeeping.
+    initial_cleanup_task = asyncio.create_task(_initial_cleanup())
 
     keep_warm_task = asyncio.create_task(_keep_warm_loop())
+    initial_warmup_task = None
     if modal_client.keep_gpu_warm:
-        try:
-            await asyncio.to_thread(modal_client.enable_keep_warm)
-        except Exception:
-            # The local Studio must remain usable while the Modal app is
-            # stopped, redeploying, or still starting. Health/UI can report the
-            # remote worker as unavailable; remote readiness is not a
-            # prerequisite for the local Router process itself.
-            logger.warning("initial GPU warmup failed; local Router remains available", exc_info=True)
+        async def _initial_warmup() -> None:
+            try:
+                await asyncio.to_thread(modal_client.enable_keep_warm)
+            except Exception:
+                # The local Studio must remain usable while the Modal app is
+                # stopped, redeploying, or still starting. Health/UI can report
+                # the remote worker as unavailable; remote readiness is not a
+                # prerequisite for the local Router process itself.
+                logger.warning(
+                    "initial GPU warmup failed; local Router remains available",
+                    exc_info=True,
+                )
+
+        # Do not block FastAPI startup on a remote Modal control-plane call.
+        # A redeploying/stopped/warming GPU worker must never prevent the local
+        # Router from binding port 48125 and serving health/UI requests.
+        initial_warmup_task = asyncio.create_task(_initial_warmup())
 
     try:
         yield
     finally:
+        if not initial_cleanup_task.done():
+            initial_cleanup_task.cancel()
+        if initial_warmup_task is not None and not initial_warmup_task.done():
+            initial_warmup_task.cancel()
         keep_warm_task.cancel()
         with suppress(asyncio.CancelledError):
             await keep_warm_task
