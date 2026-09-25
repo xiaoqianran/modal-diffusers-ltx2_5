@@ -2586,3 +2586,279 @@
     grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   }
 }
+
+
+/* 2026-09-26 typography normalization
+   Functional UI text stays >= 10px. The scale mirrors modern creative tools:
+   metadata 10-11, controls 12-13, body/prompt 13-14, section titles 16-24. */
+:root {
+  --text-micro: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-ui: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+}
+
+.studio-v3 small,
+.studio-v3 .eyebrow {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .brand-mark {
+  font-size: var(--text-lg);
+}
+
+.studio-v3 .brand-sub,
+.studio-v3 .project-button {
+  font-size: var(--text-ui);
+}
+
+.studio-v3 .workspace-title {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .topbar-pill {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .jobs-copy > span {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .jobs-copy small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .runtime-segment small,
+.studio-v3 .runtime-segment strong {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .workflow-sidebar-head .eyebrow {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .rail-section-link span {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .rail-section-link small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .rail-workflow span,
+.studio-v3 .history-link {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .stage-empty-kicker {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .stage-hint-title {
+  font-size: var(--text-2xl) !important;
+}
+
+.studio-v3 .canvas-meta,
+.studio-v3 .resolved-model-badge {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .canvas-prompt {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .stage-act,
+.studio-v3 .artifact-actions .stage-act {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .stage-state p,
+.studio-v3 .generation-hud p {
+  font-size: var(--text-ui);
+}
+
+.studio-v3 .stage-state small,
+.studio-v3 .generation-hud small {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .run-status,
+.studio-v3 .run-percent-small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .prompt-dock-v3 .prompt-row textarea,
+.studio-v3 .prompt-dock-v3:not(.has-input-slot) .prompt-row textarea {
+  font-size: var(--text-base);
+}
+
+.studio-v3 .prompt-dock-v3 .generate-button {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .composer-chip,
+.studio-v3 .prompt-route strong,
+.studio-v3 .prompt-workflow select,
+.studio-v3 .prompt-shortcut {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .prompt-route small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .reference-placeholder,
+.studio-v3 .reference-chip small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .reference-chip strong,
+.studio-v3 .workflow-handoff {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .inspector-identity .eyebrow {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .inspector-identity h2 {
+  font-size: var(--text-xl);
+}
+
+.studio-v3 .inspector-heading,
+.studio-v3 .inspector-heading > span {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .inspector-heading small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .studio-inspector .field > span,
+.studio-v3 .ratio-picker-label small,
+.studio-v3 .ratio-picker-size {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .studio-inspector .field input,
+.studio-v3 .studio-inspector .field select,
+.studio-v3 .studio-inspector .field textarea,
+.studio-v3 .ratio-picker-label strong,
+.studio-v3 .ratio-choice {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .resolved-card span,
+.studio-v3 .resolved-card small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .resolved-card strong {
+  font-size: var(--text-ui);
+}
+
+.studio-v3 .studio-inspector .switch-row strong,
+.studio-v3 .inspector-advanced > summary > span {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .studio-inspector .switch-row small,
+.studio-v3 .inspector-advanced > summary > small,
+.studio-v3 .advanced-section .inspector-subheading {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .filmstrip-head > div > span,
+.studio-v3 .filmstrip-head > div > small,
+.studio-v3 .filmstrip-head > b {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .take-mode,
+.studio-v3 .take-time,
+.studio-v3 .thumb-blank {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .queue-heading-copy > span,
+.studio-v3 .queue-heading-copy small,
+.studio-v3 .queue-runtime-label,
+.studio-v3 .queue-capacity-copy small,
+.studio-v3 .queue-subhead > span,
+.studio-v3 .queue-subhead small,
+.studio-v3 .qcard-spec,
+.studio-v3 .qrow small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .queue-runtime-card strong,
+.studio-v3 .queue-capacity-copy span,
+.studio-v3 .qcard-head,
+.studio-v3 .qrow-title,
+.studio-v3 .mode-chip,
+.studio-v3 .qrow-cancel {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .qcard-title {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .library-title .eyebrow,
+.studio-v3 .library-title small {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .library-title h1 {
+  font-size: var(--text-2xl);
+}
+
+.studio-v3 .library-back,
+.studio-v3 .seg,
+.studio-v3 .library-controls input,
+.studio-v3 .library-controls select {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .tile-status,
+.studio-v3 .tile-spec,
+.studio-v3 .tile-route,
+.studio-v3 .tile-meta {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .tile figcaption p {
+  font-size: var(--text-sm);
+}
+
+.studio-v3 .tile-open,
+.studio-v3 .tile-actions .job-action {
+  font-size: var(--text-xs);
+}
+
+.studio-v3 .drawer-heading .eyebrow,
+.studio-v3 .popover-note {
+  font-size: var(--text-micro);
+}
+
+.studio-v3 .drawer-heading h2 {
+  font-size: var(--text-xl);
+}
+
+.studio-v3 .popover-item {
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 1180px) {
+  .studio-v3 .rail-workflow span {
+    font-size: var(--text-micro);
+  }
+
+  .studio-v3 .rail-section-link span {
+    font-size: var(--text-xs);
+  }
+}
