@@ -68,6 +68,8 @@ $secretName = $config['LTX25_MODAL_MEDIA_SECRET']
 if (-not $secretName) { $secretName = 'media-storage' }
 
 $env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $profile = & $python -m modal profile current 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) {
     Write-Host 'No active Modal profile. Starting Modal setup...'
@@ -146,6 +148,11 @@ Write-Host "Media primary : $($config['LTX25_MEDIA_PRIMARY_ID'])"
 Write-Host "Media fallback: $($config['LTX25_MEDIA_FALLBACK_ID'])"
 Write-Host "Media secret  : $secretName"
 
+if (-not $CheckOnly) {
+    Write-Host "Ensuring Modal Dict 'ltx25-jobs' exists..."
+    & $python -m modal dict create ltx25-jobs 2>$null
+}
+
 if ($CheckOnly) {
     Write-Host 'Local configuration check passed.'
     exit 0
@@ -155,12 +162,43 @@ Push-Location $repo
 try {
     if (-not $SkipPrepare) {
         Write-Host 'Preparing model/cache Volumes (existing files are reused)...'
+        $previousMinContainers = $env:LTX25_MODAL_GPU_MIN_CONTAINERS
+        $env:LTX25_MODAL_GPU_MIN_CONTAINERS = '0'
         & $python -m modal run modal_app.py::prepare
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $prepareRc = $LASTEXITCODE
+        if ($null -eq $previousMinContainers) {
+            Remove-Item Env:LTX25_MODAL_GPU_MIN_CONTAINERS -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:LTX25_MODAL_GPU_MIN_CONTAINERS = $previousMinContainers
+        }
+        if ($prepareRc -ne 0) { exit $prepareRc }
     }
+    # The deployed service is intentionally persistent: exactly one resident
+    # RTX PRO 6000 until delete-modal.bat stops the App.
+    $env:LTX25_MODAL_GPU_MIN_CONTAINERS = '1'
     Write-Host 'Deploying Modal app...'
     & $python -m modal deploy modal_app.py
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host 'Waiting for DirectorWorker to finish model startup...'
+    & $python -c @'
+import json
+import os
+import modal
+
+app_name = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
+worker_name = os.environ.get("LTX25_MODAL_WORKER_CLASS", "DirectorWorker")
+worker = modal.Cls.from_name(app_name, worker_name)()
+call = worker.ready.spawn()
+result = call.get(timeout=900)
+print("[READY] " + json.dumps(result, default=str))
+'@
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'Modal deploy completed, but DirectorWorker did not become ready.'
+        exit $LASTEXITCODE
+    }
+    Write-Host 'DirectorWorker is ready.'
 }
 finally {
     Pop-Location

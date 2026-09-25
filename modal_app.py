@@ -31,6 +31,7 @@ MEDIA_FALLBACK_BACKEND = os.environ.get("LTX25_MEDIA_FALLBACK_BACKEND", "s3").st
 MEDIA_SECRET_NAME = os.environ.get("LTX25_MODAL_MEDIA_SECRET", "media-storage")
 
 GPU_IDLE_SECONDS = int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "600"))
+GPU_MIN_CONTAINERS = int(os.environ.get("LTX25_MODAL_GPU_MIN_CONTAINERS", "1"))
 DIRECTOR_QWEN_ENABLED = os.environ.get("DIRECTOR_QWEN_ENABLED", "1").strip().lower() not in {
     "", "0", "false", "no", "off"
 }
@@ -178,6 +179,19 @@ native_base_image = (
         "git clone --filter=blob:none https://github.com/Lightricks/LTX-2.git /opt/ltx2",
         f"cd /opt/ltx2 && git checkout {LTX_NATIVE_COMMIT}",
         "cd /opt/ltx2 && uv sync --package ltx-pipelines --no-dev",
+        # DiffVAE's production neighborhood-attention backend is an optional
+        # ltx-core extra. ltx-pipelines depends on bare ltx-core, so syncing the
+        # pipeline package alone intentionally does not install NATTEN. Use the
+        # exact upstream command from the pinned LTX commit; its pyproject pins
+        # torch 2.13 / cu132 and natten 0.21.7 from https://whl.natten.org.
+        "cd /opt/ltx2 && uv sync --package ltx-core --extra natten --no-dev",
+        "cd /opt/ltx2 && .venv/bin/python -c "
+        "\"import torch, natten; "
+        "assert torch.__version__.startswith('2.13.0'), torch.__version__; "
+        "assert torch.version.cuda == '13.2', torch.version.cuda; "
+        "assert natten.__version__.startswith('0.21.7'), natten.__version__; "
+        "print('native runtime:', torch.__version__, 'cuda', torch.version.cuda, "
+        "'natten', natten.__version__)\"",
     )
 )
 native_runtime_image = native_base_image.add_local_dir(
@@ -190,7 +204,7 @@ native_runtime_image = native_base_image.add_local_dir(
 
 @app.function(
     image=prep_image,
-    cpu=8,
+    cpu=4,
     memory=32768,
     timeout=6 * 60 * 60,
     env={"HF_XET_HIGH_PERFORMANCE": "1"},
@@ -198,17 +212,44 @@ native_runtime_image = native_base_image.add_local_dir(
     secrets=[hf_secret],
 )
 def prepare_models() -> dict[str, str]:
-    """Download every artifact needed by the production NVFP4 preset on CPU."""
+    """Prepare resident and native LTX assets concurrently in one Volume writer."""
+    native_root = f"{MODEL_ROOT}/native"
+    resident_cmd = [
+        sys.executable,
+        "/app/scripts/download_quantize_ltx25.py",
+        "--output-dir",
+        PIPELINE_DIR,
+        "--component",
+        "modal_nvfp4",
+        "--min-free-gib",
+        "0",
+    ]
+    native_cmd = [
+        sys.executable,
+        "/app/scripts/download_native_ltx25.py",
+        "--output-dir",
+        native_root,
+        "--skip-detailing",
+    ]
+    print("[prepare] starting resident + native LTX downloads in parallel", flush=True)
+    resident_proc = subprocess.Popen(resident_cmd)
+    native_proc = subprocess.Popen(native_cmd)
+    resident_rc = resident_proc.wait()
+    native_rc = native_proc.wait()
+    if resident_rc != 0:
+        raise subprocess.CalledProcessError(resident_rc, resident_cmd)
+    if native_rc != 0:
+        raise subprocess.CalledProcessError(native_rc, native_cmd)
+
+    # Both downloads are complete now, so native detailing can reuse the
+    # resident Pixel IC-LoRA instead of fetching the same artifact again.
     subprocess.run(
         [
             sys.executable,
-            "/app/scripts/download_quantize_ltx25.py",
+            "/app/scripts/download_native_ltx25.py",
             "--output-dir",
-            PIPELINE_DIR,
-            "--component",
-            "modal_nvfp4",
-            "--min-free-gib",
-            "0",
+            native_root,
+            "--detail-only",
         ],
         check=True,
     )
@@ -216,6 +257,7 @@ def prepare_models() -> dict[str, str]:
     return {
         "pipeline": PIPELINE_DIR,
         "nvfp4_checkpoint": NVFP4_CKPT,
+        "native": native_root,
         "qwen_image21_cache": QWEN_CACHE_VOLUME_NAME if DIRECTOR_QWEN_ENABLED else "disabled",
         "status": "ready",
     }
@@ -223,7 +265,7 @@ def prepare_models() -> dict[str, str]:
 
 @app.function(
     image=prep_image,
-    cpu=8,
+    cpu=4,
     memory=32768,
     timeout=6 * 60 * 60,
     env={"HF_XET_HIGH_PERFORMANCE": "1"},
@@ -247,31 +289,6 @@ def prepare_qwen_image21() -> dict[str, str]:
         "cache": QWEN_CACHE_VOLUME_NAME,
         "status": "ready",
     }
-
-
-@app.function(
-    image=prep_image,
-    cpu=8,
-    memory=32768,
-    timeout=6 * 60 * 60,
-    env={"HF_XET_HIGH_PERFORMANCE": "1"},
-    volumes={"/models": model_volume},
-    secrets=[hf_secret],
-)
-def prepare_native_models() -> dict[str, str]:
-    """Download the BF16 split pack needed by exact upstream native pipelines."""
-    native_root = f"{MODEL_ROOT}/native"
-    subprocess.run(
-        [
-            sys.executable,
-            "/app/scripts/download_native_ltx25.py",
-            "--output-dir",
-            native_root,
-        ],
-        check=True,
-    )
-    model_volume.commit()
-    return {"native_root": native_root, "status": "ready"}
 
 
 GPU_ENV = {
@@ -350,8 +367,10 @@ WORKER_SECRETS = [hf_secret] + ([media_secret] if media_secret is not None else 
     memory=65536,
     timeout=30 * 60,
     startup_timeout=30 * 60,
-    # Keep exactly one RTX PRO 6000 container resident even when there is no traffic.
-    min_containers=1,
+    # Production deploy keeps one RTX PRO 6000 resident. Model preparation sets
+    # LTX25_MODAL_GPU_MIN_CONTAINERS=0 so the ephemeral `modal run ::prepare`
+    # cannot race the still-populating model Volumes and allocate a GPU early.
+    min_containers=GPU_MIN_CONTAINERS,
     max_containers=1,
     # scaledown_window=GPU_IDLE_SECONDS,  # disabled: this worker must not scale to zero
     retries=modal.Retries(
@@ -833,8 +852,16 @@ def native_generate(job_id: str, request_payload: dict) -> dict:
 @app.local_entrypoint()
 def prepare() -> None:
     """Run once (or rerun safely) before deploy: modal run modal_app.py::prepare."""
+    # Qwen writes to its own Volume, so it can safely download in parallel with
+    # the resident LTX preparation. Resident and native LTX both write to the
+    # shared model Volume and therefore remain serialized to avoid commit races.
+    qwen_call = prepare_qwen_image21.spawn() if DIRECTOR_QWEN_ENABLED else None
+
+    resident = prepare_models.remote()
+    qwen = qwen_call.get() if qwen_call is not None else {"status": "disabled"}
+
     print({
-        "resident": prepare_models.remote(),
-        "qwen": prepare_qwen_image21.remote() if DIRECTOR_QWEN_ENABLED else {"status": "disabled"},
-        "native": prepare_native_models.remote(),
+        "resident": resident,
+        "qwen": qwen,
+        "native": {"status": "ready", "path": resident["native"]},
     })

@@ -97,7 +97,14 @@ async def lifespan(_: FastAPI):
 
     keep_warm_task = asyncio.create_task(_keep_warm_loop())
     if modal_client.keep_gpu_warm:
-        await asyncio.to_thread(modal_client.enable_keep_warm)
+        try:
+            await asyncio.to_thread(modal_client.enable_keep_warm)
+        except Exception:
+            # The local Studio must remain usable while the Modal app is
+            # stopped, redeploying, or still starting. Health/UI can report the
+            # remote worker as unavailable; remote readiness is not a
+            # prerequisite for the local Router process itself.
+            logger.warning("initial GPU warmup failed; local Router remains available", exc_info=True)
 
     try:
         yield
@@ -133,7 +140,7 @@ def health():
         "keep_gpu_warm": modal_client.keep_gpu_warm,
         "gpu_idle_seconds": modal_client.gpu_idle_seconds,
         "warmup": modal_client.warm_status(),
-        "queue": modal_client.queue_stats(),
+        "queue": modal_client.queue_snapshot(),
         "media": modal_client.media_info(),
         "transfer_metrics": modal_client.transfer_metrics(),
     }
@@ -141,14 +148,22 @@ def health():
 
 @app.post("/api/admin/warm")
 def admin_warm():
-    modal_client.enable_keep_warm()
+    try:
+        modal_client.enable_keep_warm()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="GPU worker is not available yet") from exc
     return {"status": "warming"}
 
 
 @app.post("/api/admin/unload")
 def admin_unload():
     modal_client.disable_keep_warm()
-    return {"result": "GPU worker will scale to zero after its current input becomes idle"}
+    return {
+        "result": (
+            "Warm lease disabled. This deployment keeps one GPU worker resident; "
+            "use delete-modal.bat to stop the Modal app and release the GPU."
+        )
+    }
 
 
 @app.post("/api/sessions", response_model=SessionResponse, status_code=201)

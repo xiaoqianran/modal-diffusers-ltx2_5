@@ -13,6 +13,7 @@ official NVFP4 checkpoint without constructing or quantizing a CUDA model.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import gc
 import json
 import os
@@ -26,9 +27,11 @@ REVISION = "69009ff070135c693ad1ad1ef2cc149c227963da"
 TEMPORAL_REVISION = "871165de037793df7d75c23a02dd7f45fd364c97"
 PIXEL_UPSCALER_REPO_ID = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
 PIXEL_UPSCALER_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
+PIXEL_UPSCALER_REVISION = "380e63e764cad353c47a8e7c9c7ad6095d25e814"
 NVFP4_REPO_ID = "Lightricks/LTX-2.5"
 NVFP4_FILENAME = "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors"
 NVFP4_LOCAL_FILENAME = "ltx-2.5-22b-distilled-transformer-nvfp4.safetensors"
+NVFP4_REVISION = "5e6e71018ee1756ed329b697a7b4aedc934dfce9"
 DEFAULT_OUTPUT = Path("LTX-2.5-Diffusers-bnb-4bit")
 DEFAULT_MIN_FREE_GIB = 80
 GIB = 1024**3
@@ -287,6 +290,7 @@ def download_pixel_upscaler(output_dir: Path, cache_root: Path, token: str, mini
     downloaded = Path(hf_hub_download(
         repo_id=PIXEL_UPSCALER_REPO_ID,
         filename=PIXEL_UPSCALER_FILENAME,
+        revision=PIXEL_UPSCALER_REVISION,
         token=token,
         cache_dir=cache_dir,
     ))
@@ -390,6 +394,7 @@ def download_modal_nvfp4(output_dir: Path, cache_root: Path, token: str, minimum
         hf_hub_download(
             repo_id=NVFP4_REPO_ID,
             filename=NVFP4_FILENAME,
+            revision=NVFP4_REVISION,
             token=token,
             cache_dir=cache_dir,
         )
@@ -521,6 +526,52 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def run_modal_nvfp4_parallel(
+    output_dir: Path,
+    cache_root: Path,
+    token: str,
+    minimum_gib: int,
+) -> None:
+    """Prepare the production resident profile with three safe download lanes.
+
+    Lane A owns the shared ``output_dir/.cache/huggingface`` metadata and stays
+    serialized. Lanes B/C use dedicated caches and write disjoint destinations,
+    so they can run concurrently without racing the shared Hub local-dir cache.
+    """
+
+    def shared_pipeline_lane() -> None:
+        download_base(output_dir, token, minimum_gib)
+        download_quality_components(output_dir, token, minimum_gib)
+        download_temporal_component(output_dir, token, minimum_gib)
+        download_modal_text_encoder(output_dir, token, minimum_gib)
+        download_modal_transformer_config(output_dir, token)
+        download_modal_diffusion_decoder(output_dir, token, minimum_gib)
+
+    log("[modal_nvfp4] starting 3-lane preparation")
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ltx25-prep") as pool:
+        futures = {
+            "pipeline": pool.submit(shared_pipeline_lane),
+            "pixel_upscaler": pool.submit(
+                download_pixel_upscaler,
+                output_dir,
+                cache_root,
+                token,
+                minimum_gib,
+            ),
+            "nvfp4": pool.submit(
+                download_modal_nvfp4,
+                output_dir,
+                cache_root,
+                token,
+                minimum_gib,
+            ),
+        }
+        for name, future in futures.items():
+            future.result()
+            log(f"[modal_nvfp4] lane complete: {name}")
+    log("[modal_nvfp4] all 3 lanes complete")
+
+
 def main() -> int:
     args = parse_args()
     output_dir = args.output_dir.resolve()
@@ -546,6 +597,16 @@ def main() -> int:
     else:
         stages = (args.component,)
     try:
+        if args.component == "modal_nvfp4":
+            run_modal_nvfp4_parallel(
+                output_dir,
+                cache_root,
+                token,
+                args.min_free_gib,
+            )
+            log(f"All requested stages completed. Free space: {free_gib(output_dir.parent):.1f} GiB")
+            return 0
+
         if "base" in stages:
             download_base(output_dir, token, args.min_free_gib)
         if "quality" in stages:

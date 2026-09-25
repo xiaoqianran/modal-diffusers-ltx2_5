@@ -103,10 +103,17 @@ def make_client(tmp_path: Path):
     control.generate_fn = SimpleNamespace(spawn=lambda *_: SimpleNamespace(object_id="fc-test"))
     control.ready_fn = SimpleNamespace(spawn=lambda: None)
     control._warm_call = None
-    control._warm_lock = threading.Lock()
+    control._warm_lock = threading.RLock()
     control._output_lock = threading.Lock()
     control._session_lock = threading.Lock()
     control._admission_lock = threading.RLock()
+    control._queue_snapshot = {
+        "queued": 0,
+        "running": 0,
+        "active": 0,
+        "capacity": control.max_queue_size,
+        "available": False,
+    }
     control._active_index_initialized = False
     control.job_store.put(control._active_jobs_key(), [])
     return control
@@ -148,7 +155,13 @@ def test_constructor_does_not_hydrate_modal_state(monkeypatch, tmp_path):
 
     monkeypatch.setenv("LTX25_LOCAL_CACHE", str(tmp_path))
     monkeypatch.setattr(modal_client_module.modal.Volume, "from_name", lambda *_a, **_k: volume)
-    monkeypatch.setattr(modal_client_module.modal.Dict, "from_name", lambda *_a, **_k: store)
+    dict_calls = []
+
+    def dict_from_name(*args, **kwargs):
+        dict_calls.append((args, kwargs))
+        return store
+
+    monkeypatch.setattr(modal_client_module.modal.Dict, "from_name", dict_from_name)
     monkeypatch.setattr(modal_client_module.modal.Cls, "from_name", lambda *_a, **_k: lambda: worker)
     monkeypatch.setattr(modal_client_module, "create_media_storage", lambda _volume: media)
 
@@ -156,6 +169,7 @@ def test_constructor_does_not_hydrate_modal_state(monkeypatch, tmp_path):
 
     assert control.job_store is store
     assert control._active_index_initialized is False
+    assert dict_calls == [((modal_client_module.JOB_DICT_NAME,), {"create_if_missing": True})]
 
 
 def test_active_index_is_lazy_backfilled_once_and_repairs_shape(tmp_path):
@@ -544,3 +558,45 @@ def test_submission_failure_is_persisted(tmp_path):
     assert len(jobs) == 1
     assert jobs[0]["status"] == "failed"
     assert "submit failed" in jobs[0]["error"]
+
+
+def test_submission_refreshes_stale_deployment_handle_once(tmp_path):
+    control = make_client(tmp_path)
+    attempts = []
+
+    def stale_spawn(*_args):
+        attempts.append("stale")
+        raise modal_client_module.modal.exception.ConflictError("old deployment")
+
+    control.generate_fn = SimpleNamespace(spawn=stale_spawn)
+
+    def refresh():
+        attempts.append("refresh")
+        control.generate_fn = SimpleNamespace(
+            spawn=lambda *_args: SimpleNamespace(object_id="fc-new")
+        )
+
+    control._refresh_remote_handles = refresh
+    job = control.create_job(GenerateRequest(prompt="redeploy boundary"))
+
+    assert job["status"] == "queued"
+    assert attempts == ["stale", "refresh"]
+    assert control.job_store.get(f"call:{job['id']}") == "fc-new"
+
+
+def test_queue_snapshot_updates_without_health_remote_scan(tmp_path):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="snapshot"))
+
+    snapshot = control.queue_snapshot()
+    assert snapshot["available"] is True
+    assert snapshot["active"] == 1
+    assert snapshot["queued"] == 1
+
+    record = control.job_store.get(f"job:{job['id']}")
+    record["status"] = "completed"
+    control.job_store.put(f"job:{job['id']}", record)
+    control._remove_active_job(job["id"])
+
+    snapshot = control.queue_snapshot()
+    assert snapshot["active"] == 0

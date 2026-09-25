@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import shutil
+import time
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download, snapshot_download
-
 REPO_ID = "Lightricks/LTX-2.5"
-REVISION = os.environ.get("LTX25_NATIVE_REVISION", "main")
+REVISION = os.environ.get(
+    "LTX25_NATIVE_REVISION",
+    "5e6e71018ee1756ed329b697a7b4aedc934dfce9",
+)
 ALLOW_PATTERNS = [
     "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors",
     "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
@@ -25,20 +28,49 @@ ALLOW_PATTERNS = [
 ]
 DETAILING_REPO_ID = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
 DETAILING_FILENAME = "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
+DETAILING_REVISION = "380e63e764cad353c47a8e7c9c7ad6095d25e814"
+
+
+def download_native_files(output_dir: Path, token: str | None) -> None:
+    """Download the pinned native split pack with bounded file-level concurrency."""
+    from huggingface_hub import hf_hub_download
+
+    def fetch(filename: str) -> tuple[str, float, float]:
+        print(f"[native] START {filename}", flush=True)
+        started = time.monotonic()
+        path = Path(
+            hf_hub_download(
+                repo_id=REPO_ID,
+                filename=filename,
+                revision=REVISION,
+                token=token,
+                local_dir=output_dir,
+            )
+        )
+        elapsed = time.monotonic() - started
+        size_gib = path.stat().st_size / (1024**3)
+        print(
+            f"[native] DONE  {filename} ({size_gib:.2f} GiB, {elapsed:.1f}s)",
+            flush=True,
+        )
+        return filename, elapsed, size_gib
+
+    print(f"[native] pinned revision: {REVISION}", flush=True)
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ltx25-native") as pool:
+        futures = [pool.submit(fetch, filename) for filename in ALLOW_PATTERNS]
+        for future in as_completed(futures):
+            future.result()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--skip-detailing", action="store_true")
+    parser.add_argument("--detail-only", action="store_true")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=REPO_ID,
-        revision=REVISION,
-        token=os.environ.get("HF_TOKEN"),
-        local_dir=args.output_dir,
-        allow_patterns=ALLOW_PATTERNS,
-    )
+    if not args.detail_only:
+        download_native_files(args.output_dir, os.environ.get("HF_TOKEN"))
     lora_dir = args.output_dir / "loras"
     lora_dir.mkdir(parents=True, exist_ok=True)
     detailing = lora_dir / DETAILING_FILENAME
@@ -48,18 +80,24 @@ def main() -> int:
         / "pixel_spatial_upscaler"
         / DETAILING_FILENAME
     )
-    if not detailing.is_file() and existing_detailing.is_file():
-        shutil.copy2(existing_detailing, detailing)
-        print(f"Reused existing detailing IC-LoRA: {existing_detailing}")
-    if not detailing.is_file():
-        hf_hub_download(
-            repo_id=DETAILING_REPO_ID,
-            filename=DETAILING_FILENAME,
-            token=os.environ.get("HF_TOKEN"),
-            local_dir=lora_dir,
-        )
-    missing = [name for name in ALLOW_PATTERNS if not (args.output_dir / name).is_file()]
-    if not detailing.is_file():
+    if not args.skip_detailing:
+        if not detailing.is_file() and existing_detailing.is_file():
+            shutil.copy2(existing_detailing, detailing)
+            print(f"Reused existing detailing IC-LoRA: {existing_detailing}")
+        if not detailing.is_file():
+            from huggingface_hub import hf_hub_download
+
+            hf_hub_download(
+                repo_id=DETAILING_REPO_ID,
+                filename=DETAILING_FILENAME,
+                revision=DETAILING_REVISION,
+                token=os.environ.get("HF_TOKEN"),
+                local_dir=lora_dir,
+            )
+    missing = [] if args.detail_only else [
+        name for name in ALLOW_PATTERNS if not (args.output_dir / name).is_file()
+    ]
+    if not args.skip_detailing and not detailing.is_file():
         missing.append(str(detailing.relative_to(args.output_dir)))
     if missing:
         raise RuntimeError("Native LTX-2.5 download incomplete: " + ", ".join(missing))

@@ -48,6 +48,9 @@ class FakeControl:
         running = sum(job["status"] == "running" for job in self.jobs.values())
         return {"queued": queued, "running": running, "active": queued + running, "capacity": 4}
 
+    def queue_snapshot(self):
+        return {"queued": 0, "running": 0, "active": 0, "capacity": 4, "available": True}
+
     def maintain_keep_warm(self):
         return False
 
@@ -233,6 +236,31 @@ def test_health_and_generation(client):
     assert reused.json()["kind"] == "video"
     assert test_client.delete(f"/api/jobs/{job['id']}").status_code == 204
     assert test_client.get(f"/api/jobs/{job['id']}").status_code == 404
+
+
+def test_health_does_not_touch_remote_queue_backend(client):
+    test_client, control = client
+
+    def fail_queue():
+        raise AssertionError("health must not call remote queue_stats")
+
+    control.queue_stats = fail_queue
+    health = test_client.get("/api/health")
+    assert health.status_code == 200
+    assert health.json()["queue"]["available"] is True
+
+
+def test_admin_warm_reports_remote_unavailable(client):
+    test_client, control = client
+
+    def fail_warm():
+        raise RuntimeError("remote app unavailable")
+
+    control.enable_keep_warm = fail_warm
+    response = test_client.post("/api/admin/warm")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "GPU worker is not available yet"
 
 
 def test_keep_warm_loop_survives_transient_failure(monkeypatch, tmp_path):

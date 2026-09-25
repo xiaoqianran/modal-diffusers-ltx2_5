@@ -52,7 +52,7 @@ def test_modal_nvfp4_profile_is_cpu_staging_only(monkeypatch, tmp_path):
     )
 
     assert module.main() == 0
-    assert calls == [
+    assert set(calls) == {
         "download_base",
         "download_quality_components",
         "download_temporal_component",
@@ -61,6 +61,18 @@ def test_modal_nvfp4_profile_is_cpu_staging_only(monkeypatch, tmp_path):
         "download_modal_transformer_config",
         "download_modal_diffusion_decoder",
         "download_modal_nvfp4",
+    }
+    pipeline_calls = [
+        name for name in calls
+        if name not in {"download_pixel_upscaler", "download_modal_nvfp4"}
+    ]
+    assert pipeline_calls == [
+        "download_base",
+        "download_quality_components",
+        "download_temporal_component",
+        "download_modal_text_encoder",
+        "download_modal_transformer_config",
+        "download_modal_diffusion_decoder",
     ]
     assert "quantize_text_encoder" not in calls
     assert "quantize_transformer" not in calls

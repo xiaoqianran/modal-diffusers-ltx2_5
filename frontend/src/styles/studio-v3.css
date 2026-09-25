@@ -1435,10 +1435,6 @@
   align-items: center;
 }
 
-.composer-input-slot.empty {
-  pointer-events: none;
-}
-
 .composer-input-slot .reference-tray {
   width: 100%;
   margin-bottom: 0;
@@ -1447,6 +1443,10 @@
 .composer-input-slot .workflow-handoff {
   width: 100%;
   margin-bottom: 0;
+}
+
+.prompt-dock-v3:not(.has-input-slot) .prompt-row textarea {
+  height: 111px;
 }
 
 .studio-v3 .viewport,

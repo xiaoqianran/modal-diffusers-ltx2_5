@@ -68,25 +68,48 @@ class ModalClient:
         self.upload_cache = self.cache_root / "uploads"
 
         self.state_volume = modal.Volume.from_name(STATE_VOLUME_NAME)
-        self.job_store = modal.Dict.from_name(JOB_DICT_NAME)
+        # The local Router may start before the first Modal deploy on a fresh
+        # workspace/account. Hydrate the persistent queue Dict lazily, but make
+        # its first real use idempotently create it instead of turning /health
+        # into a 500 with Dict NotFoundError.
+        self.job_store = modal.Dict.from_name(JOB_DICT_NAME, create_if_missing=True)
         self.media_storage = create_media_storage(self.state_volume)
         self.media_store = self.media_storage  # compatibility alias for tests/callers
 
+        self._resolve_remote_handles()
+
+        self._warm_call = None
+        self._warm_lock = threading.RLock()
+        self._output_lock = threading.Lock()
+        self._session_lock = threading.Lock()
+        self._admission_lock = threading.RLock()
+        self._queue_snapshot = {
+            "queued": 0,
+            "running": 0,
+            "active": 0,
+            "capacity": self.max_queue_size,
+            "available": False,
+        }
+        # Modal object handles are intentionally cheap/lazy at construction
+        # time. Do not hydrate the Dict here: importing the local API must work
+        # without Modal credentials (for CI, tooling, schema tests, etc.).
+        self._active_index_initialized = False
+
+    def _resolve_remote_handles(self) -> None:
         worker_cls = modal.Cls.from_name(self.app_name, WORKER_CLASS_NAME)
         self.worker = worker_cls()
         self.generate_fn = self.worker.generate
         self.ready_fn = self.worker.ready
         self.native_generate_fn = modal.Function.from_name(self.app_name, NATIVE_FUNCTION_NAME)
 
-        self._warm_call = None
-        self._warm_lock = threading.Lock()
-        self._output_lock = threading.Lock()
-        self._session_lock = threading.Lock()
-        self._admission_lock = threading.RLock()
-        # Modal object handles are intentionally cheap/lazy at construction
-        # time. Do not hydrate the Dict here: importing the local API must work
-        # without Modal credentials (for CI, tooling, schema tests, etc.).
-        self._active_index_initialized = False
+    @staticmethod
+    def _is_stale_deployment_error(exc: Exception) -> bool:
+        return isinstance(exc, (modal.exception.ConflictError, modal.exception.NotFoundError))
+
+    def _refresh_remote_handles(self) -> None:
+        with self._warm_lock:
+            self._warm_call = None
+        self._resolve_remote_handles()
 
     @staticmethod
     def _utc_now() -> str:
@@ -219,6 +242,7 @@ class ModalClient:
             job_ids = self.job_store.get(self._active_jobs_key()) or []
             if job_id not in job_ids:
                 self.job_store.put(self._active_jobs_key(), [*job_ids, job_id])
+            self.queue_stats()
 
     def _remove_active_job(self, job_id: str) -> None:
         with self._admission_lock:
@@ -226,6 +250,7 @@ class ModalClient:
             job_ids = self.job_store.get(self._active_jobs_key()) or []
             next_ids = [item for item in job_ids if item != job_id]
             self.job_store.put(self._active_jobs_key(), next_ids)
+            self.queue_stats()
 
     def _fail_record(self, record: dict[str, Any], exc: Exception) -> dict[str, Any]:
         current = self._get_record(record["id"]) or record
@@ -272,12 +297,19 @@ class ModalClient:
                     active_ids.append(job_id)
             if active_ids != job_ids:
                 self.job_store.put(self._active_jobs_key(), active_ids)
-        return {
+        stats = {
             "queued": queued,
             "running": running,
             "active": queued + running,
             "capacity": self.max_queue_size,
+            "available": True,
         }
+        self._queue_snapshot = stats
+        return stats
+
+    def queue_snapshot(self) -> dict[str, Any]:
+        """Return the last known queue state without any Modal control-plane I/O."""
+        return dict(self._queue_snapshot)
 
     def _refresh(self, record: dict[str, Any]) -> dict[str, Any]:
         if record.get("status") not in ACTIVE_STATUSES:
@@ -312,7 +344,13 @@ class ModalClient:
     def set_idle_window(self, seconds: int) -> None:
         # Persistent-GPU mode: never let Studio lease/unload logic override the
         # deployed min_containers=1 policy and scale this worker to zero.
-        self.worker.update_autoscaler(min_containers=1, scaledown_window=seconds)
+        try:
+            self.worker.update_autoscaler(min_containers=1, scaledown_window=seconds)
+        except Exception as exc:
+            if not self._is_stale_deployment_error(exc):
+                raise
+            self._refresh_remote_handles()
+            self.worker.update_autoscaler(min_containers=1, scaledown_window=seconds)
 
     def start_warmup(self) -> bool:
         """Start one warmup call unless keep-warm is disabled or one is already pending."""
@@ -328,7 +366,13 @@ class ModalClient:
                     self._warm_call = None
                 else:
                     return False
-            self._warm_call = self.ready_fn.spawn()
+            try:
+                self._warm_call = self.ready_fn.spawn()
+            except Exception as exc:
+                if not self._is_stale_deployment_error(exc):
+                    raise
+                self._refresh_remote_handles()
+                self._warm_call = self.ready_fn.spawn()
             return True
 
     def enable_keep_warm(self) -> bool:
@@ -433,7 +477,19 @@ class ModalClient:
                     if request.mode in {"t2a", "keyframe_interpolation", "dfr"}
                     else self.generate_fn
                 )
-                call = generate_fn.spawn(job_id, request.model_dump(mode="json"))
+                payload = request.model_dump(mode="json")
+                try:
+                    call = generate_fn.spawn(job_id, payload)
+                except Exception as exc:
+                    if not self._is_stale_deployment_error(exc):
+                        raise
+                    self._refresh_remote_handles()
+                    generate_fn = (
+                        self.native_generate_fn
+                        if request.mode in {"t2a", "keyframe_interpolation", "dfr"}
+                        else self.generate_fn
+                    )
+                    call = generate_fn.spawn(job_id, payload)
                 self.job_store.put(f"call:{job_id}", call.object_id)
             except Exception as exc:
                 record["status"] = "failed"
