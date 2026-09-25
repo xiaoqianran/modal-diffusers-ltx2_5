@@ -64,6 +64,9 @@ ready/warming 状态探测，不会覆盖这一生产常驻策略。部署、Loo
 统一使用 `LTX25_MODAL_ENVIRONMENT`（默认 `main`），避免本机 active environment 变化后
 出现 lookup 到错误环境。开发部署固定使用 Modal `recreate` strategy；对于当前
 `max_containers=1` 的单 GPU Director，这保证 deploy 完成后新请求不会继续进入旧容器。
+为便于追踪 deployment 生命周期，`scripts/deploy_modal.ps1` 与 `delete-modal.bat`
+会把 deploy/stop 事件写入本地 `.ltx25-cache/deployment-events.log`。需要释放 GPU 时
+优先使用 `delete-modal.bat`，这样 stop 的来源、时间、主机和用户都会留下审计记录。
 模型/状态/kernel Volume 与 HF Secret 名称分别可通过
 `LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、
 `LTX25_MODAL_HF_SECRET` 覆盖。

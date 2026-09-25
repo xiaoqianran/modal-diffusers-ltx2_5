@@ -11,6 +11,25 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $repo '.env'
 $python = Join-Path $repo '.venv\Scripts\python.exe'
+$deploymentAudit = Join-Path $repo '.ltx25-cache\deployment-events.log'
+
+function Write-DeploymentEvent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Event,
+        [hashtable]$Data = @{}
+    )
+    $directory = Split-Path -Parent $deploymentAudit
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    $record = @{
+        time = (Get-Date).ToString('o')
+        event = $Event
+        source = 'scripts/deploy_modal.ps1'
+        computer = [Environment]::MachineName
+        user = [Environment]::UserName
+    }
+    foreach ($key in $Data.Keys) { $record[$key] = $Data[$key] }
+    ($record | ConvertTo-Json -Compress) | Add-Content -LiteralPath $deploymentAudit -Encoding UTF8
+}
 
 if (-not (Test-Path $envFile)) {
     throw "Missing .env: $envFile"
@@ -206,6 +225,11 @@ try {
     # RTX PRO 6000 until delete-modal.bat stops the App.
     $env:LTX25_MODAL_GPU_MIN_CONTAINERS = '1'
     Write-Host 'Deploying Modal app with recreate strategy...'
+    Write-DeploymentEvent -Event 'deploy_requested' -Data @{
+        app = $(if ($rawEnv['LTX25_MODAL_APP']) { $rawEnv['LTX25_MODAL_APP'] } else { 'ltx25-nvfp4' })
+        environment = $modalEnvironment
+        strategy = 'recreate'
+    }
     # max_containers=1 + development redeploys favor certainty over zero
     # downtime: once deploy returns, no old container may continue receiving
     # inputs while the replacement Director is warming.
@@ -285,6 +309,10 @@ raise SystemExit(2)
         exit $readyRc
     }
     Write-Host 'DirectorWorker is ready.'
+    Write-DeploymentEvent -Event 'deploy_ready' -Data @{
+        app = $(if ($rawEnv['LTX25_MODAL_APP']) { $rawEnv['LTX25_MODAL_APP'] } else { 'ltx25-nvfp4' })
+        environment = $modalEnvironment
+    }
 }
 finally {
     Pop-Location

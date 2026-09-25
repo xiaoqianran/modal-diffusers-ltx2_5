@@ -27,3 +27,8 @@ frontend/digest.txt
 .codegraph/
 api-e2e-assets/
 api-e2e-results/
+
+# Local generation / benchmark artifacts
+/tmp_travel_eval/
+/tmp_travel_full/
+/tmp_upscale_eval/

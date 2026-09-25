@@ -26,6 +26,11 @@ rem APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
 if defined LTX25_MODAL_APP set "APP_NAME=%LTX25_MODAL_APP%"
 if defined LTX25_MODAL_ENVIRONMENT set "MODAL_ENV=%LTX25_MODAL_ENVIRONMENT%"
 
+if not exist ".ltx25-cache" mkdir ".ltx25-cache" >nul 2>nul
+set "DEPLOYMENT_AUDIT=%~dp0.ltx25-cache\deployment-events.log"
+for /f %%T in ('powershell -NoProfile -Command "Get-Date -Format o"') do set "EVENT_TIME=%%T"
+>>"%DEPLOYMENT_AUDIT%" echo {"time":"%EVENT_TIME%","event":"stop_requested","source":"delete-modal.bat","app":"%APP_NAME%","environment":"%MODAL_ENV%","computer":"%COMPUTERNAME%","user":"%USERNAME%"}
+
 echo ========================================
 echo   LTX-2.5 / Qwen Modal Stop
 echo ========================================
@@ -39,6 +44,12 @@ echo.
 
 "%PYTHON%" -m modal app stop "%APP_NAME%" --env "%MODAL_ENV%" --yes
 set "RC=%ERRORLEVEL%"
+for /f %%T in ('powershell -NoProfile -Command "Get-Date -Format o"') do set "EVENT_TIME=%%T"
+if "%RC%"=="0" (
+  >>"%DEPLOYMENT_AUDIT%" echo {"time":"%EVENT_TIME%","event":"stop_succeeded","source":"delete-modal.bat","app":"%APP_NAME%","environment":"%MODAL_ENV%","computer":"%COMPUTERNAME%","user":"%USERNAME%"}
+) else (
+  >>"%DEPLOYMENT_AUDIT%" echo {"time":"%EVENT_TIME%","event":"stop_failed","source":"delete-modal.bat","app":"%APP_NAME%","environment":"%MODAL_ENV%","exit_code":%RC%,"computer":"%COMPUTERNAME%","user":"%USERNAME%"}
+)
 
 echo.
 if "%RC%"=="0" (
