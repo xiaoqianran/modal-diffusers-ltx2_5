@@ -9,6 +9,9 @@ const emit = defineEmits(['file', 'remove'])
 function titleFor(item, attachments) {
   return attachments[item.slot]?.filename || item.title
 }
+function isPrimary(item) {
+  return item.title?.toLowerCase().startsWith('primary')
+}
 function detailFor(item, attachments, uploading) {
   if (uploading[item.slot]) return 'Uploading…'
   const asset = attachments[item.slot]
@@ -28,9 +31,14 @@ function onChange(item, event) {
   <div class="reference-tray" :class="{ empty: !slots.length }">
     <span v-if="!slots.length" class="reference-placeholder">Prompt-only workflow</span>
     <template v-else>
-      <label v-for="item in slots" :key="item.slot" class="reference-card" :class="{ ready: Boolean(attachments[item.slot]) }">
+      <label
+        v-for="item in slots"
+        :key="item.slot"
+        class="reference-card"
+        :class="{ ready: Boolean(attachments[item.slot]), primary: isPrimary(item) }"
+      >
         <input type="file" :accept="item.accept" hidden @change="onChange(item, $event)" />
-        <span class="reference-card-type">{{ item.icon }}</span>
+        <span class="reference-card-type">{{ isPrimary(item) ? 'PRIMARY' : item.icon }}</span>
         <span class="reference-card-copy">
           <strong>{{ titleFor(item, attachments) }}</strong>
           <small>{{ detailFor(item, attachments, uploading) }}</small>

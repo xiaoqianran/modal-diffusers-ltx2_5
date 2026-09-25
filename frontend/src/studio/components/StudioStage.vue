@@ -53,8 +53,9 @@ function onDrop(event) {
       <div class="viewport-slot">
         <div v-if="!props.job" class="viewport viewport-empty">
           <div class="stage-state">
-            <p class="stage-hint-title">准备就绪</p>
-            <small>在下方描述一个镜头，或把图片 / 视频拖到这里开始。</small>
+            <span class="stage-empty-kicker">CREATE</span>
+            <p class="stage-hint-title">Start with an idea</p>
+            <small>Write a prompt below, or drop image / video media here.</small>
           </div>
         </div>
 

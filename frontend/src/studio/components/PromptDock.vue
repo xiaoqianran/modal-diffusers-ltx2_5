@@ -38,10 +38,11 @@ const expected = computed(() => engineLabel(expectedEngine(props.draft)))
       </button>
     </div>
     <div class="prompt-summary">
-      <span>{{ modeLabel(draft.mode) }}</span>
+      <span class="prompt-workflow">{{ modeLabel(draft.mode) }}</span>
       <span class="prompt-summary-separator">·</span>
-      <span v-if="draft.engine === 'auto'">Auto · Expected {{ expected }}</span>
-      <span v-else>{{ expected }}</span>
+      <span v-if="draft.engine === 'auto'" class="prompt-route">Auto → {{ expected }}</span>
+      <span v-else class="prompt-route">{{ expected }}</span>
+      <span class="prompt-shortcut">Ctrl ↵</span>
     </div>
     <p v-if="notice.text" class="dock-notice" :data-state="notice.state">{{ notice.text }}</p>
   </form>
