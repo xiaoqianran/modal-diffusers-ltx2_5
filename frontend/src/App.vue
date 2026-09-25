@@ -71,20 +71,24 @@ const stageQueuePosition = computed(() => (
 const queueCount = computed(() => (
   (queue.value?.running?.length || 0) + (queue.value?.upcoming?.length || 0)
 ))
-const isMock = computed(() => health.value?.service?.includes('mock'))
-const healthText = computed(() => {
-  if (isMock.value) return 'Mock data'
-  return health.value ? gpuLabel.value : 'Offline'
-})
-const activityText = computed(() => {
+const runtimeState = computed(() => {
   const job = stageJob.value
-  if (job?.status === 'running') return `Generating · ${Math.round((job.progress || 0) * 100)}%`
-  if (job?.status === 'queued') return 'Queued'
-  if (busy.preparing) return 'Preparing media'
-  if (gpuState.value === 'ready') return 'LTX ready · Qwen ready'
-  if (gpuState.value === 'warming') return 'Loading models'
-  return 'Models offline'
+  if (job?.status === 'running') return 'generating'
+  if (job?.status === 'queued') return 'queued'
+  if (busy.preparing) return 'preparing'
+  if (gpuState.value === 'warming') return 'warming'
+  if (gpuState.value === 'ready') return 'ready'
+  return 'offline'
 })
+const runtimePrimary = computed(() => {
+  if (runtimeState.value === 'generating') return `${Math.round((stageJob.value?.progress || 0) * 100)}%`
+  if (runtimeState.value === 'queued') return `#${stageQueuePosition.value || 1}`
+  if (runtimeState.value === 'warming') return 'Warming'
+  if (runtimeState.value === 'preparing') return 'Preparing'
+  if (runtimeState.value === 'ready') return gpuLabel.value
+  return 'Offline'
+})
+const modelState = computed(() => runtimeState.value === 'ready' || runtimeState.value === 'generating')
 const sectionTitle = computed(() => view.value === 'library' ? 'History' : modeLabel(draft.mode))
 
 const LTX_RATIO_OPTIONS = Object.freeze([
@@ -316,9 +320,21 @@ onBeforeUnmount(() => {
           <span class="status-dot" :class="{ live: queueCount > 0 }" />
           Jobs <b>{{ queueCount }}</b>
         </button>
-        <button class="topbar-pill health studio-status" type="button" :data-state="gpuState === 'ready' ? 'online' : 'offline'" @click="warmGpu">
-          <span class="status-dot" :class="{ live: gpuState === 'ready' }" />
-          <span class="status-copy"><strong>{{ healthText }}</strong><small>{{ activityText }}</small></span>
+        <button class="topbar-pill health studio-status runtime-strip" type="button" :data-state="runtimeState" @click="warmGpu">
+          <span class="runtime-segment runtime-gpu">
+            <i class="runtime-dot" />
+            <span><small>GPU</small><strong>{{ runtimePrimary }}</strong></span>
+          </span>
+          <span class="runtime-divider" />
+          <span class="runtime-segment" :class="{ ready: modelState }">
+            <i class="runtime-dot" />
+            <span><small>LTX</small><strong>{{ modelState ? 'Ready' : runtimeState === 'warming' ? 'Loading' : 'Idle' }}</strong></span>
+          </span>
+          <span class="runtime-divider" />
+          <span class="runtime-segment" :class="{ ready: modelState }">
+            <i class="runtime-dot" />
+            <span><small>Qwen</small><strong>{{ modelState ? 'Ready' : runtimeState === 'warming' ? 'Loading' : 'Idle' }}</strong></span>
+          </span>
         </button>
         <div class="menu-wrap topbar-menu" @click.stop>
           <button class="topbar-icon" type="button" title="More" aria-label="More" @click="moreOpen = !moreOpen">•••</button>

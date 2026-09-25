@@ -20,6 +20,11 @@ const qwenActive = computed(() => (
 ))
 const expected = computed(() => engineLabel(expectedEngine(props.draft)))
 const isImageOutput = computed(() => props.capability.output === 'image')
+const selectedRatio = computed(() => (
+  props.ratioOptions.find(item => item.value === props.draft.size)
+  || props.ratioOptions[0]
+  || { label: props.draft.size, aspect: '16 / 9' }
+))
 
 function setOptionalNumber(key, raw) {
   props.draft[key] = raw === '' ? null : Number(raw)
@@ -56,19 +61,29 @@ function setOptionalNumber(key, raw) {
 
       <section class="inspector-block">
         <div class="inspector-heading"><span>Output</span></div>
-        <div class="ratio-grid">
-          <button
-            v-for="item in ratioOptions"
-            :key="item.value"
-            type="button"
-            class="ratio-choice"
-            :class="{ active: draft.size === item.value }"
-            @click="draft.size = item.value"
-          >
-            <span class="ratio-shape" :style="{ aspectRatio: item.aspect }" />
-            <span>{{ item.label }}</span>
-          </button>
-        </div>
+        <details class="ratio-picker">
+          <summary class="ratio-picker-trigger">
+            <span class="ratio-picker-label">
+              <span class="ratio-shape" :style="{ aspectRatio: selectedRatio.aspect }" />
+              <span><small>Aspect ratio</small><strong>{{ selectedRatio.label }}</strong></span>
+            </span>
+            <span class="ratio-picker-size">{{ draft.size }}</span>
+            <span class="ratio-picker-chevron">⌄</span>
+          </summary>
+          <div class="ratio-popover">
+            <button
+              v-for="item in ratioOptions"
+              :key="item.value"
+              type="button"
+              class="ratio-choice"
+              :class="{ active: draft.size === item.value }"
+              @click="draft.size = item.value"
+            >
+              <span class="ratio-shape" :style="{ aspectRatio: item.aspect }" />
+              <span>{{ item.label }}</span>
+            </button>
+          </div>
+        </details>
 
         <div v-if="!isImageOutput" class="compact-options">
           <label class="field">
