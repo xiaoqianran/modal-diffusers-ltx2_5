@@ -108,6 +108,11 @@ def test_modal_app_is_deployment_shell_only():
     assert "ltx25.modal_client" not in imports
 
 
+def test_modal_input_staging_preserves_asset_identity():
+    source = (ROOT / "modal_app.py").read_text(encoding="utf-8")
+    assert 'target_input = input_dir / f"{asset_id}{Path(ref.key).suffix}"' in source
+
+
 def test_schemas_are_framework_agnostic():
     imports = _imports(PKG / "schemas.py")
     for forbidden in {"fastapi", "modal", "torch", "diffusers"}:

@@ -78,12 +78,27 @@ const healthText = computed(() => {
   return health.value ? gpuLabel.value : 'Offline'
 })
 
-const ratioOptions = Object.freeze([
+const LTX_RATIO_OPTIONS = Object.freeze([
   { value: '768x512', label: '3:2', aspect: '3 / 2' },
   { value: '704x480', label: '22:15', aspect: '22 / 15' },
   { value: '640x384', label: '5:3', aspect: '5 / 3' },
   { value: '512x320', label: '8:5', aspect: '8 / 5' },
 ])
+const QWEN_RATIO_OPTIONS = Object.freeze([
+  { value: '1024x1024', label: '1:1 · 2K', aspect: '1 / 1' },
+  { value: '1200x896', label: '4:3 · 2K', aspect: '4 / 3' },
+  { value: '896x1200', label: '3:4 · 2K', aspect: '3 / 4' },
+  { value: '1264x848', label: '3:2 · 2K', aspect: '3 / 2' },
+  { value: '848x1264', label: '2:3 · 2K', aspect: '2 / 3' },
+  { value: '1376x768', label: '16:9 · 2K', aspect: '16 / 9' },
+  { value: '768x1376', label: '9:16 · 2K', aspect: '9 / 16' },
+])
+const qwenActive = computed(() => (
+  activeCapability.value.qwenOnly
+  || draft.engine === 'qwen'
+  || (draft.mode === 't2i' && draft.engine === 'auto' && !draft.loraId)
+))
+const ratioOptions = computed(() => qwenActive.value ? QWEN_RATIO_OPTIONS : LTX_RATIO_OPTIONS)
 
 const fpsOptions = Object.freeze([16, 24, 30])
 
@@ -103,6 +118,22 @@ const frameOptions = computed(() => {
 const attachmentSlots = computed(() => {
   const capability = activeCapability.value
   const result = []
+  if (capability.multiReference) {
+    const imageAccept = capability.supportsHdr ? 'image/*,.exr' : 'image/*'
+    const used = []
+    for (let index = 0; index < 10; index += 1) {
+      if (attachments[`reference${index}`]) used.push(index)
+    }
+    const next = Array.from({ length: 10 }, (_, index) => index)
+      .find(index => !attachments[`reference${index}`])
+    for (const index of used) {
+      result.push({ slot: `reference${index}`, icon: 'IMAGE', title: `Reference ${index + 1}`, accept: imageAccept })
+    }
+    if (next !== undefined) {
+      result.push({ slot: `reference${next}`, icon: 'IMAGE', title: `Add reference ${used.length + 1}/10`, accept: imageAccept })
+    }
+    return result
+  }
   if (capability.input === 'image') {
     result.push({
       slot: 'first',
@@ -124,6 +155,16 @@ const attachmentSlots = computed(() => {
       title: 'Source',
       accept: capability.sourceIsVideo ? 'video/*' : 'image/*,video/*',
     })
+  }
+  return result
+})
+
+const keyframeSlots = computed(() => {
+  if (!['keyframe_interpolation', 'dfr'].includes(draft.mode)) return []
+  const result = []
+  for (let index = 0; index < 10; index += 1) {
+    if (!attachments[`reference${index}`]) continue
+    result.push({ index, label: `Keyframe ${index + 1}` })
   }
   return result
 })
@@ -194,6 +235,11 @@ function dropFile(file) {
   let slot = null
   if (capability.needsAudio) slot = 'audio'
   else if (capability.needsSource) slot = 'source'
+  else if (capability.multiReference) {
+    const next = Array.from({ length: 10 }, (_, index) => `reference${index}`)
+      .find(key => !attachments[key])
+    slot = next || null
+  }
   else if (capability.input === 'image' && capability.needsLast && attachments.first) slot = 'last'
   else if (capability.input === 'image') slot = 'first'
   if (slot) void attach(slot, file)
@@ -234,6 +280,8 @@ function onEngineChange() {
   draft.fps = 24
   draft.decoder = 'vae'
   draft.loraId = null
+  draft.qwenTrueCfgScale = draft.qwenTrueCfgScale ?? 1
+  draft.qwenUseKvCache = true
 }
 
 function setOptionalNumber(key, raw) {
@@ -761,20 +809,22 @@ onBeforeUnmount(() => {
               <select v-model="draft.engine" @change="onEngineChange">
                 <option value="auto">Auto · Director</option>
                 <option value="ltx">LTX-2.5 NVFP4</option>
-                <option value="qwen" :disabled="draft.mode !== 't2i'">Qwen-Image 2.1 BF16</option>
+                <option value="qwen" :disabled="!['t2i', 'image_edit'].includes(draft.mode)">Qwen-Image 2.1 BF16</option>
               </select>
             </label>
             <label class="field">
               <span>Frames</span>
-              <input v-model.number="draft.numFrames" type="number" min="9" max="481" step="8" :disabled="draft.engine === 'qwen'" />
+              <input v-model.number="draft.numFrames" type="number" min="9" max="481" step="8"
+                :disabled="draft.engine === 'qwen' || (activeCapability.supportsAutoDuration && draft.autoDuration)" />
             </label>
             <label class="field">
               <span>Steps</span>
-              <input v-model.number="draft.steps" type="number" min="1" max="100" />
+              <input v-model.number="draft.steps" type="number" min="1" max="100" :disabled="activeCapability.fixedSchedule" />
             </label>
             <label class="field">
               <span>Guidance</span>
-              <input v-model.number="draft.guidanceScale" type="number" min="0" max="20" step="0.1" :disabled="draft.engine === 'qwen'" />
+              <input v-model.number="draft.guidanceScale" type="number" min="0" max="20" step="0.1"
+                :disabled="draft.engine === 'qwen' || activeCapability.fixedSchedule" />
             </label>
             <label class="field">
               <span>Seed</span>
@@ -787,6 +837,59 @@ onBeforeUnmount(() => {
             <label class="field">
               <span>FPS</span>
               <input v-model.number="draft.fps" type="number" min="8" max="60" :disabled="draft.engine === 'qwen'" />
+            </label>
+          </div>
+
+          <template v-if="activeCapability.supportsAutoDuration">
+            <label class="switch-row">
+              <span><strong>Auto duration</strong><small>Use the LTX-2.5 duration head.</small></span>
+              <input v-model="draft.autoDuration" type="checkbox" />
+            </label>
+            <div v-if="draft.autoDuration" class="drawer-fields two-col">
+              <label class="field">
+                <span>Min seconds</span>
+                <input v-model.number="draft.minSeconds" type="number" min="1" max="19" step="0.5" />
+              </label>
+              <label class="field">
+                <span>Max seconds</span>
+                <input v-model.number="draft.maxSeconds" type="number" min="2" max="20" step="0.5" />
+              </label>
+            </div>
+          </template>
+
+          <div v-if="draft.mode === 'dfr'" class="drawer-fields two-col">
+            <label class="field">
+              <span>DFR spatial rounds</span>
+              <select v-model.number="draft.dfrSpatialUpscalings">
+                <option :value="1">1 · half → full</option>
+                <option :value="2">2 · quarter → half → full</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>DFR temporal rounds</span>
+              <select v-model.number="draft.dfrTemporalUpscalings">
+                <option :value="0">0 · base FPS</option>
+                <option :value="1">1 · 2× FPS</option>
+                <option :value="2">2 · 4× FPS</option>
+              </select>
+            </label>
+          </div>
+
+          <label v-if="activeCapability.supportsHdr" class="field">
+            <span>HDR / EXR colour space</span>
+            <select v-model="draft.hdrColorSpace">
+              <option :value="null">SDR</option>
+              <option value="SRGB_LINEAR">Linear Rec.709 / sRGB</option>
+              <option value="ACESCG">ACEScg</option>
+              <option value="ACESCCT">ACEScct</option>
+            </select>
+          </label>
+
+          <div v-if="keyframeSlots.length" class="drawer-fields two-col">
+            <label v-for="item in keyframeSlots" :key="item.index" class="field">
+              <span>{{ item.label }} frame</span>
+              <input v-model.number="draft.keyframeFrames[item.index]" type="number" min="0"
+                :max="Math.max(0, Number(draft.numFrames || 1) - 1)" step="1" placeholder="Auto" />
             </label>
           </div>
         </section>
@@ -821,12 +924,12 @@ onBeforeUnmount(() => {
         <section class="control-section">
           <div class="control-section-title">Advanced</div>
 
-          <label class="field">
+          <label v-if="!activeCapability.fixedSchedule" class="field">
             <span>Negative prompt</span>
             <textarea v-model="draft.negativePrompt" rows="3" />
           </label>
 
-          <div class="drawer-fields two-col">
+          <div v-if="!activeCapability.fixedSchedule" class="drawer-fields two-col">
             <label class="field">
               <span>Video modality</span>
               <input
@@ -853,9 +956,49 @@ onBeforeUnmount(() => {
             </label>
           </div>
 
+          <template v-if="draft.mode === 't2a'">
+            <div class="drawer-fields two-col">
+              <label class="field">
+                <span>Audio STG</span>
+                <input :value="draft.audioStgScale ?? ''" type="number" min="0" max="15" step="0.1"
+                  placeholder="Default" @input="setOptionalNumber('audioStgScale', $event.target.value)" />
+              </label>
+              <label class="field">
+                <span>Audio rescale</span>
+                <input :value="draft.audioRescaleScale ?? ''" type="number" min="0" max="15" step="0.1"
+                  placeholder="Default" @input="setOptionalNumber('audioRescaleScale', $event.target.value)" />
+              </label>
+              <label class="field">
+                <span>Audio skip step</span>
+                <input :value="draft.audioSkipStep ?? ''" type="number" min="0" max="100" step="1"
+                  placeholder="Default" @input="setOptionalNumber('audioSkipStep', $event.target.value)" />
+              </label>
+            </div>
+          </template>
+
+          <template v-if="qwenActive">
+            <div class="drawer-fields two-col">
+              <label class="field">
+                <span>Qwen True CFG</span>
+                <input v-model.number="draft.qwenTrueCfgScale" type="number" min="0" max="20" step="0.1" />
+              </label>
+              <label class="switch-row compact-switch">
+                <span><strong>KV cache</strong><small>Reuse attention KV during denoising.</small></span>
+                <input v-model="draft.qwenUseKvCache" type="checkbox" />
+              </label>
+            </div>
+            <label class="switch-row">
+              <span>
+                <strong>Transparent RGBA</strong>
+                <small>Ask Qwen-Image 2.1 for a true alpha-channel PNG.</small>
+              </span>
+              <input v-model="draft.transparentBackground" type="checkbox" />
+            </label>
+          </template>
+
           <label class="field">
             <span>Decoder</span>
-            <select v-model="draft.decoder" :disabled="Boolean(activeCapability.forcesDecoder) || draft.engine === 'qwen'">
+            <select v-model="draft.decoder" :disabled="Boolean(activeCapability.forcesDecoder) || qwenActive">
               <option value="vae">VAE</option>
               <option value="diffusion">Diffusion</option>
             </select>

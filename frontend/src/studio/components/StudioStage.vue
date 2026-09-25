@@ -73,6 +73,13 @@ function onDrop(event) {
             alt="生成结果"
             loading="lazy"
           />
+          <audio
+            v-else-if="props.job.audio_url"
+            class="stage-media stage-audio"
+            controls
+            preload="metadata"
+            :src="props.job.audio_url"
+          />
           <div v-else-if="isPending(props.job)" class="stage-state">
             <p>正在提交</p>
             <small>任务已加入队列</small>
@@ -140,9 +147,15 @@ function onDrop(event) {
           <a
             v-if="props.actions.canDownload"
             class="stage-act"
-            :href="props.job.video_url || props.job.image_url"
+            :href="props.job.video_url || props.job.image_url || props.job.audio_url"
             download
           >下载</a>
+          <a
+            v-if="props.job.hdr_exr_url"
+            class="stage-act"
+            :href="props.job.hdr_exr_url"
+            download
+          >EXR ZIP</a>
           <button
             v-if="props.actions.canReuse"
             class="stage-act"

@@ -11,6 +11,9 @@ class ConditionInput(BaseModel):
     # 例: 121 フレーム動画は latent 0〜15、中央付近は index=7(≒フレーム56)。
     # le=60 は 481 フレーム(20秒上限)の最終 latent に対応する。
     index: int = Field(default=0, ge=-1, le=60)
+    # Official KeyframeInterpolationPipeline addresses pixel-frame positions,
+    # not the Diffusers latent index above. Keep both contracts explicit.
+    frame_index: int | None = Field(default=None, ge=0, le=480)
     strength: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
@@ -85,7 +88,10 @@ class AssetUploadCompleteRequest(BaseModel):
     client_upload_seconds: float | None = Field(default=None, ge=0.0, le=24 * 60 * 60)
 
 
-STILL_IMAGE_MODES = {"t2i", "refine_image", "ref2i"}
+STILL_IMAGE_MODES = {"t2i", "image_edit", "refine_image", "ref2i"}
+AUDIO_ONLY_MODES = {"t2a"}
+QWEN_IMAGE_MODES = {"t2i", "image_edit"}
+NATIVE_LTX_MODES = {"t2a", "keyframe_interpolation", "dfr"}
 REF2I_NUM_FRAMES = {25, 41, 49}
 
 
@@ -93,7 +99,8 @@ class GenerateRequest(BaseModel):
     session_number: int | None = Field(default=None, ge=1)
     mode: Literal[
         "t2av", "i2v", "flf2v", "condition", "iclora", "retake", "extend", "a2v",
-        "t2i", "refine_image", "ref2i",
+        "t2a", "keyframe_interpolation", "dfr",
+        "t2i", "image_edit", "refine_image", "ref2i",
     ] = "t2av"
     # Explicit resident-engine routing. "auto" selects Qwen for unconstrained
     # text-to-image jobs and LTX for video/reference/edit/LoRA work.
@@ -113,8 +120,12 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = Field(
         default="worst quality, inconsistent motion, blurry, jittery, distorted", max_length=4000
     )
-    width: int = Field(default=768, ge=256, le=1920, multiple_of=32)
-    height: int = Field(default=512, ge=256, le=1920, multiple_of=32)
+    # Qwen native outputs are multiples of 32, while Studio keeps the historical
+    # LTX base-size -> optional 2x-final-size contract. Multiples of 16 here let
+    # Qwen map 1200x896 exactly to the official 2400x1792 output preset. LTX is
+    # still constrained to multiples of 32 in the model validator below.
+    width: int = Field(default=768, ge=256, le=1920, multiple_of=16)
+    height: int = Field(default=512, ge=256, le=1920, multiple_of=16)
     num_frames: int | None = Field(default=121, ge=9, le=481)
     min_seconds: float = Field(default=1.0, ge=1.0, le=19.0)
     max_seconds: float = Field(default=8.0, gt=1.0, le=20.0)
@@ -132,9 +143,23 @@ class GenerateRequest(BaseModel):
     modality_scale: float | None = Field(default=None, ge=0.0, le=15.0)
     audio_guidance_scale: float | None = Field(default=None, ge=0.0, le=15.0)
     audio_modality_scale: float | None = Field(default=None, ge=0.0, le=15.0)
+    # Native T2A guidance controls from ltx-pipelines.
+    audio_stg_scale: float | None = Field(default=None, ge=0.0, le=15.0)
+    audio_rescale_scale: float | None = Field(default=None, ge=0.0, le=15.0)
+    audio_skip_step: int | None = Field(default=None, ge=0, le=100)
+    audio_stg_blocks: list[int] | None = Field(default=None, max_length=64)
+    dfr_temporal_upscalings: Literal[0, 1, 2] = 0
+    dfr_spatial_upscalings: Literal[1, 2] = 1
+    hdr_color_space: Literal["SRGB_LINEAR", "ACESCG", "ACESCCT"] | None = None
     seed: int = Field(default=42, ge=0, le=2**63 - 1)
     enhance_prompt: bool = False
-    conditions: list[ConditionInput] = Field(default_factory=list, max_length=8)
+    # Qwen-Image 2.1 accepts up to ten ordered visual references. LTX keeps its
+    # tighter eight-condition limit in the engine-specific validation below.
+    conditions: list[ConditionInput] = Field(default_factory=list, max_length=10)
+    qwen_true_cfg_scale: float = Field(default=1.0, ge=0.0, le=20.0)
+    qwen_use_kv_cache: bool = True
+    qwen_sigmas: list[float] | None = Field(default=None, min_length=1, max_length=100)
+    transparent_background: bool = False
     retake_start: float | None = Field(default=None, ge=0.0)
     retake_end: float | None = Field(default=None, gt=0.0)
     regenerate_video: bool = True
@@ -161,17 +186,111 @@ class GenerateRequest(BaseModel):
             raise ValueError("max_seconds must be greater than min_seconds")
         if self.num_frames is not None and (self.num_frames - 1) % 8 != 0:
             raise ValueError("num_frames must be 8n+1 (for example 9, 121, 241 or 481)")
+        if self.qwen_sigmas is not None and any(value <= 0 for value in self.qwen_sigmas):
+            raise ValueError("qwen_sigmas must contain positive values")
+
+        if self.mode in NATIVE_LTX_MODES:
+            if self.engine == "qwen":
+                raise ValueError(f"{self.mode} requires the LTX-2.5 native engine")
+            if self.enhance_prompt:
+                raise ValueError(
+                    "native LTX-2.5 prompt enhancement requires a separate generative "
+                    "Gemma enhancer checkpoint and is not provisioned by this deployment"
+                )
+            self.engine = "ltx"
+            self.upscale = False
+            self.upscale_method = "latent"
+            self.temporal_upscale = False
+            self.decoder = "vae"
+            if self.mode == "t2a":
+                if self.hdr_color_space is not None:
+                    raise ValueError("t2a does not support HDR/EXR")
+                if self.conditions:
+                    raise ValueError("t2a does not accept visual conditions")
+                if self.audio_asset_id:
+                    raise ValueError("t2a generates audio from text and does not accept input audio")
+                return self
+            if self.mode == "dfr":
+                if self.hdr_color_space is not None:
+                    raise ValueError(
+                        "dfr HDR/EXR output is not supported by the pinned upstream DFR pipeline"
+                    )
+                divisor = 64 if self.dfr_spatial_upscalings == 1 else 128
+                if self.width % divisor or self.height % divisor:
+                    raise ValueError(
+                        f"dfr width and height must be divisible by {divisor} "
+                        f"when dfr_spatial_upscalings={self.dfr_spatial_upscalings}"
+                    )
+                if any(item.kind != "image" for item in self.conditions):
+                    raise ValueError("dfr accepts image conditions only")
+                if any(item.frame_index is None for item in self.conditions):
+                    raise ValueError("dfr image conditions require frame_index")
+                if self.num_frames is None and self.conditions:
+                    raise ValueError("dfr auto-duration is supported only without explicit image keyframes")
+                if self.num_frames is not None and any(
+                    item.frame_index is not None and item.frame_index >= self.num_frames
+                    for item in self.conditions
+                ):
+                    raise ValueError("dfr frame_index must be inside num_frames")
+                return self
+            if self.num_frames is None:
+                raise ValueError("keyframe_interpolation requires an explicit num_frames")
+            if self.width % 64 or self.height % 64:
+                raise ValueError("keyframe_interpolation width and height must be divisible by 64")
+            if len(self.conditions) < 2:
+                raise ValueError("keyframe_interpolation requires at least two image keyframes")
+            if any(item.kind != "image" for item in self.conditions):
+                raise ValueError("keyframe_interpolation accepts image keyframes only")
+            if any(item.frame_index is None for item in self.conditions):
+                raise ValueError("keyframe_interpolation requires frame_index for every keyframe")
+            frame_indices = [item.frame_index for item in self.conditions]
+            if len(set(frame_indices)) != len(frame_indices):
+                raise ValueError("keyframe_interpolation frame_index values must be unique")
+            if any(index is not None and index >= self.num_frames for index in frame_indices):
+                raise ValueError("keyframe_interpolation frame_index must be inside num_frames")
+            if len({item.id for item in self.loras}) != len(self.loras):
+                raise ValueError("the same LoRA cannot be selected more than once")
+            return self
+
+        # Qwen is the native engine for prompt-only T2I and image editing. Auto
+        # T2I with an LTX LoRA intentionally falls through to the LTX branch.
+        qwen_candidate = (
+            self.engine == "qwen"
+            or self.mode == "image_edit"
+            or (self.engine == "auto" and self.mode == "t2i" and not self.loras)
+        )
+        if qwen_candidate:
+            if self.mode not in QWEN_IMAGE_MODES:
+                raise ValueError("Qwen-Image 2.1 supports t2i and image_edit modes")
+            if self.engine == "ltx":
+                raise ValueError("image_edit requires the Qwen-Image 2.1 engine")
+            if self.mode == "t2i" and self.conditions:
+                raise ValueError("Qwen-Image 2.1 t2i does not accept visual conditions")
+            if self.mode == "image_edit":
+                if not self.conditions:
+                    raise ValueError("image_edit requires at least one image reference")
+                if any(item.kind != "image" for item in self.conditions):
+                    raise ValueError("image_edit accepts image references only")
+            if self.loras:
+                raise ValueError("Qwen-Image 2.1 LoRA routing is not enabled yet")
+            # These common-contract fields are not meaningful to Qwen itself.
+            self.num_frames = 9
+            self.temporal_upscale = False
+            self.upscale_method = "latent"
+            self.decoder = "vae"
+            final_scale = 2 if self.upscale else 1
+            if self.width * final_scale > 3072 or self.height * final_scale > 3072:
+                raise ValueError("Qwen-Image 2.1 output dimensions cannot exceed 3072 pixels")
+            return self
+
+        if self.width % 32 or self.height % 32:
+            raise ValueError("LTX-2.5 width and height must be divisible by 32")
+        if len(self.conditions) > 8:
+            raise ValueError("LTX-2.5 accepts at most eight visual conditions")
         if self.upscale and self.width * self.height > 960 * 544:
             raise ValueError("2x upscale base resolution cannot exceed 960x544 pixels")
         if self.upscale_method == "pixel" and not self.upscale:
             raise ValueError("pixel upscale method requires upscale=true")
-        if self.engine == "qwen":
-            if self.mode != "t2i":
-                raise ValueError("Qwen-Image 2.1 currently supports t2i mode only")
-            if self.conditions:
-                raise ValueError("Qwen-Image 2.1 t2i does not accept visual conditions")
-            if self.loras:
-                raise ValueError("Qwen-Image 2.1 LoRA routing is not enabled yet")
         if self.mode in STILL_IMAGE_MODES:
             # Probe-verified recipes (scratch_t2i_probe): t2i/refine_image are always
             # two-stage (distilled 8-sigma -> 2x latent upsample -> 3-sigma refine),
@@ -298,6 +417,8 @@ class JobResponse(BaseModel):
     error: str | None = None
     video_url: str | None = None
     image_url: str | None = None
+    audio_url: str | None = None
+    hdr_exr_url: str | None = None
     engine: str | None = None
     plan: dict[str, str | bool | None] | None = None
     graph: dict[str, int | bool] | None = None
@@ -332,6 +453,8 @@ class JobSummaryResponse(BaseModel):
     error: str | None = None
     video_url: str | None = None
     image_url: str | None = None
+    audio_url: str | None = None
+    hdr_exr_url: str | None = None
     engine: str | None = None
     plan: dict[str, str | bool | None] | None = None
     graph: dict[str, int | bool] | None = None
@@ -351,7 +474,8 @@ class PromptEnhanceRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     mode: Literal[
         "t2av", "i2v", "flf2v", "condition", "iclora", "retake", "extend", "a2v",
-        "t2i", "refine_image", "ref2i",
+        "t2a", "keyframe_interpolation", "dfr",
+        "t2i", "image_edit", "refine_image", "ref2i",
     ] = "t2av"
     shots: list[str] = Field(default_factory=list, max_length=12)
 

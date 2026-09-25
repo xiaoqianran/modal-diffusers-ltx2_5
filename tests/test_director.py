@@ -112,9 +112,45 @@ def test_qwen_t2i_preserves_final_size_contract():
     assert qwen_output_size(request) == (1024, 1024)
 
 
-def test_qwen_rejects_non_t2i_modes():
-    with pytest.raises(ValidationError, match="t2i mode only"):
+def test_qwen_rejects_non_image_modes():
+    with pytest.raises(ValidationError, match="t2i and image_edit"):
         GenerateRequest(mode="t2av", engine="qwen", prompt="cinematic city")
+
+
+def test_qwen_image_edit_accepts_ordered_multi_reference_and_routes_to_qwen():
+    conditions = [
+        {"asset_id": f"{index:032x}", "kind": "image", "index": index}
+        for index in range(1, 11)
+    ]
+    request = GenerateRequest(
+        mode="image_edit",
+        prompt="preserve the subject and change the background",
+        conditions=conditions,
+        width=1024,
+        height=1024,
+        transparent_background=True,
+        qwen_true_cfg_scale=4.0,
+    )
+
+    plan = build_execution_plan(request, runtime(LTX_ENGINE, QWEN_ENGINE))
+
+    assert plan.engine == QWEN_ENGINE
+    assert plan.fallback_engine is None
+    assert plan.reason == "auto:qwen_image_edit"
+    assert request.transparent_background is True
+    assert request.qwen_true_cfg_scale == 4.0
+    assert len(request.conditions) == 10
+    assert qwen_output_size(request) == (2048, 2048)
+
+
+def test_qwen_large_t2i_does_not_offer_incompatible_ltx_fallback():
+    request = GenerateRequest(mode="t2i", prompt="poster", width=1024, height=1024)
+
+    plan = build_execution_plan(request, runtime(LTX_ENGINE))
+
+    assert plan.engine == QWEN_ENGINE
+    assert plan.fallback_engine is None
+    assert plan.reason == "auto:pure_t2i:no_available_engine"
 
 
 def test_qwen_rejects_ltx_lora_routing():

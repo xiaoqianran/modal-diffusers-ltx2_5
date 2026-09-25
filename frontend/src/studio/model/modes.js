@@ -14,13 +14,18 @@
 /**
  * @typedef {object} ModeCapability
  * @property {string}   label          Human label used in the UI.
- * @property {'video'|'image'} output  What the mode produces.
+ * @property {'video'|'image'|'audio'} output What the mode produces.
  * @property {MediaKind} input         Primary visual input, if any.
  * @property {boolean}  needsLast      Requires a distinct last-frame image.
  * @property {boolean}  needsAudio     Requires an audio asset.
  * @property {boolean}  needsSource    Accepts a generic reference (image or video).
  * @property {boolean}  sourceIsVideo  Reference must specifically be a video.
  * @property {boolean}  singleReference Uses exactly one reference at index 1 (IC-LoRA).
+ * @property {boolean}  multiReference Accepts ordered image references (Qwen, max 10).
+ * @property {boolean}  qwenOnly       This mode has no LTX execution path.
+ * @property {boolean}  supportsAutoDuration Uses the LTX-2.5 DurationHead.
+ * @property {boolean}  supportsHdr     Supports HDR/EXR input/output contract.
+ * @property {boolean}  fixedSchedule   Uses a fixed distilled denoising schedule.
  * @property {boolean}  supportsUpscale Whether 2x spatial upscale applies.
  * @property {boolean}  supportsPixelUpscale Whether the pixel IC-LoRA path applies.
  * @property {boolean}  forcesUpscale  Always upsamples regardless of the toggle.
@@ -35,8 +40,9 @@ export const MODE_GROUPS = [
     id: 'create',
     label: '创建',
     sections: [
-      { label: '视频', modes: ['t2av', 'i2v', 'flf2v', 'a2v'] },
-      { label: '图片', modes: ['t2i', 'ref2i'] },
+      { label: '视频', modes: ['t2av', 'i2v', 'flf2v', 'a2v', 'keyframe_interpolation', 'dfr'] },
+      { label: '图片', modes: ['t2i', 'image_edit', 'ref2i'] },
+      { label: '音频', modes: ['t2a'] },
     ],
   },
   {
@@ -60,6 +66,11 @@ const BASE = {
   needsSource: false,
   sourceIsVideo: false,
   singleReference: false,
+  multiReference: false,
+  qwenOnly: false,
+  supportsAutoDuration: false,
+  supportsHdr: false,
+  fixedSchedule: false,
   supportsUpscale: true,
   supportsPixelUpscale: true,
   forcesUpscale: false,
@@ -77,10 +88,57 @@ export const MODE_CAPABILITIES = {
 
   a2v: { ...BASE, label: '音频 → 视频', needsAudio: true, group: 'create' },
 
+  t2a: {
+    ...BASE,
+    label: '文本 → 音频',
+    output: 'audio',
+    supportsAutoDuration: true,
+    supportsUpscale: false,
+    supportsPixelUpscale: false,
+    forcesDecoder: 'vae',
+    group: 'create',
+  },
+
+  keyframe_interpolation: {
+    ...BASE,
+    label: '关键帧插值',
+    output: 'video',
+    multiReference: true,
+    supportsHdr: true,
+    supportsUpscale: false,
+    supportsPixelUpscale: false,
+    forcesDecoder: 'vae',
+    group: 'create',
+  },
+
+  dfr: {
+    ...BASE,
+    label: 'DFR 生产质量',
+    output: 'video',
+    multiReference: true,
+    supportsAutoDuration: true,
+    fixedSchedule: true,
+    supportsUpscale: false,
+    supportsPixelUpscale: false,
+    forcesDecoder: 'vae',
+    group: 'create',
+  },
+
   t2i: {
     ...BASE,
     label: '文本 → 图片',
     output: 'image',
+    forcesUpscale: true,
+    group: 'create',
+  },
+
+  image_edit: {
+    ...BASE,
+    label: 'Qwen 图片编辑',
+    output: 'image',
+    multiReference: true,
+    qwenOnly: true,
+    supportsPixelUpscale: false,
     forcesUpscale: true,
     group: 'create',
   },

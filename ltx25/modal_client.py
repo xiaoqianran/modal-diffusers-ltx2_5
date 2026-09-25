@@ -24,6 +24,7 @@ APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
 STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 WORKER_CLASS_NAME = os.environ.get("LTX25_MODAL_WORKER_CLASS", "DirectorWorker")
+NATIVE_FUNCTION_NAME = os.environ.get("LTX25_MODAL_NATIVE_FUNCTION", "native_generate")
 MODEL_ID = "Lightricks/LTX-2.5-Diffusers"
 ACTIVE_STATUSES = {"queued", "running"}
 
@@ -75,6 +76,7 @@ class ModalClient:
         self.worker = worker_cls()
         self.generate_fn = self.worker.generate
         self.ready_fn = self.worker.ready
+        self.native_generate_fn = modal.Function.from_name(self.app_name, NATIVE_FUNCTION_NAME)
 
         self._warm_call = None
         self._warm_lock = threading.Lock()
@@ -159,14 +161,20 @@ class ModalClient:
         public = {
             name: value
             for name, value in record.items()
-            if name not in {"call_id", "video_key", "image_key"}
+            if name not in {"call_id", "video_key", "image_key", "audio_key", "hdr_exr_key"}
         }
         video_key = record.get("video_key")
         image_key = record.get("image_key")
+        audio_key = record.get("audio_key")
+        hdr_exr_key = record.get("hdr_exr_key")
         if isinstance(video_key, str) and video_key:
             public["video_url"] = f"/outputs/{Path(video_key).name}"
         if isinstance(image_key, str) and image_key:
             public["image_url"] = f"/outputs/{Path(image_key).name}"
+        if isinstance(audio_key, str) and audio_key:
+            public["audio_url"] = f"/outputs/{Path(audio_key).name}"
+        if isinstance(hdr_exr_key, str) and hdr_exr_key:
+            public["hdr_exr_url"] = f"/outputs/{Path(hdr_exr_key).name}"
         return public
 
     @staticmethod
@@ -403,6 +411,7 @@ class ModalClient:
                 "error": None,
                 "video_url": None,
                 "image_url": None,
+                "audio_url": None,
                 "request": request.model_dump(mode="json"),
                 "created_at": now,
                 "updated_at": now,
@@ -417,7 +426,12 @@ class ModalClient:
             self._add_active_job(job_id)
 
             try:
-                call = self.generate_fn.spawn(job_id, request.model_dump(mode="json"))
+                generate_fn = (
+                    self.native_generate_fn
+                    if request.mode in {"t2a", "keyframe_interpolation", "dfr"}
+                    else self.generate_fn
+                )
+                call = generate_fn.spawn(job_id, request.model_dump(mode="json"))
                 self.job_store.put(f"call:{job_id}", call.object_id)
             except Exception as exc:
                 record["status"] = "failed"

@@ -44,6 +44,12 @@ const cases = [
   ['i2v', { first: asset(A, 'image') }, {}],
   ['flf2v', { first: asset(A, 'image'), last: asset(B, 'image') }, {}],
   ['a2v', { audio: asset(C, 'audio') }, {}],
+  ['t2a', {}, { autoDuration: false }],
+  ['keyframe_interpolation', { reference0: asset(A, 'image'), reference1: asset(B, 'image') }, {
+    numFrames: 121,
+    keyframeFrames: [0, 120, null, null, null, null, null, null, null, null],
+  }],
+  ['dfr', {}, { numFrames: 121, dfrSpatialUpscalings: 1, dfrTemporalUpscalings: 1 }],
   ['t2i', {}, { decoder: 'vae' }],
   ['ref2i', { first: asset(A, 'image') }, { numFrames: 49, range: { framePosition: 'last' } }],
   ['refine_image', { first: asset(A, 'image') }, { range: { strength: 0.8 } }],

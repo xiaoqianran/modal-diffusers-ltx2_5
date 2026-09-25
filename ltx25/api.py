@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from PIL import Image
 
-from .media_store import MediaStoreError
+from .media_store import MediaStoreError, media_content_type
 from .schemas import (
     AssetResponse,
     AssetUploadCompleteRequest,
@@ -45,7 +45,7 @@ from .modal_client import (
 )
 
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".exr"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".gif"}
 AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac"}
 logger = logging.getLogger(__name__)
@@ -281,6 +281,10 @@ def _upload_kind(filename: str) -> tuple[str, str]:
 
 def _validate_uploaded_media(local_path: Path, kind: str, suffix: str) -> None:
     if kind == "image":
+        if suffix == ".exr":
+            # Native LTX validates OpenEXR structure while loading. Pillow builds
+            # commonly lack OpenEXR support, so do not reject valid EXR plates here.
+            return
         with Image.open(local_path) as image:
             image.verify()
         return
@@ -496,5 +500,4 @@ def output_file(filename: str, request: Request):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Output not found") from exc
 
-    media_type = "video/mp4" if path.suffix.lower() == ".mp4" else "image/png"
-    return FileResponse(path, media_type=media_type)
+    return FileResponse(path, media_type=media_content_type(path.name))

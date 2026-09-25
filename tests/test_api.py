@@ -303,10 +303,12 @@ def test_validation():
 
     with pytest.raises(ValueError):
         GenerateRequest(prompt="x", upscale=False, upscale_method="pixel")
+    # Auto T2I now resolves to Qwen-Image 2.1 and may use Qwen's larger native
+    # image envelope. Keep the historical LTX-only constraints explicit here.
     with pytest.raises(ValueError):
-        GenerateRequest(prompt="x", mode="t2i", upscale_method="pixel")
+        GenerateRequest(prompt="x", mode="t2i", engine="ltx", upscale_method="pixel")
     with pytest.raises(ValueError):
-        GenerateRequest(prompt="x", width=1280, height=704, upscale=True)
+        GenerateRequest(prompt="x", mode="t2i", engine="ltx", width=1280, height=704, upscale=True)
     with pytest.raises(ValueError):
         GenerateRequest(prompt="x", loras=[{"id": "style.safetensors"}, {"id": "style.safetensors"}])
     with pytest.raises(ValueError):

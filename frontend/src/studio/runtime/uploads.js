@@ -11,7 +11,7 @@
 
 import { api as defaultApi } from './api.js'
 
-const IMAGE = /\.(png|jpe?g|webp|bmp|gif)$/i
+const IMAGE = /\.(png|jpe?g|webp|bmp|gif|exr)$/i
 const VIDEO = /\.(mp4|mov|webm|mkv|m4v)$/i
 const AUDIO = /\.(wav|mp3|m4a|flac|ogg|aac|opus)$/i
 

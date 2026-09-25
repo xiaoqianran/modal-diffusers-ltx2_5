@@ -85,7 +85,7 @@ test('every mode has a label and a group', () => {
   for (const [mode, capability] of Object.entries(MODE_CAPABILITIES)) {
     assert.ok(capability.label, `${mode} missing label`)
     assert.ok(capability.group, `${mode} missing group`)
-    assert.ok(['video', 'image'].includes(capability.output), `${mode} bad output`)
+    assert.ok(['video', 'image', 'audio'].includes(capability.output), `${mode} bad output`)
   }
 })
 
@@ -107,7 +107,7 @@ test('unknown modes fall back to the default without throwing', () => {
 })
 
 test('still modes are exactly the image outputs', () => {
-  assert.deepEqual(STILL_MODES.sort(), ['ref2i', 'refine_image', 't2i'].sort())
+  assert.deepEqual(STILL_MODES.sort(), ['image_edit', 'ref2i', 'refine_image', 't2i'].sort())
   assert.equal(isStillMode('t2i'), true)
   assert.equal(isStillMode('t2av'), false)
 })
@@ -133,10 +133,11 @@ test('only retake and extend require a video source', () => {
   assert.deepEqual(videoSources, ['extend', 'retake'])
 })
 
-test('only t2i force-enables upscale', () => {
+test('Qwen still creation modes force-enable the final-size scale', () => {
   // Verified against schemas.py: t2i/refine_image are always two-stage, while
   // ref2i is explicitly single-stage at base resolution (upscale forced false).
   assert.equal(MODE_CAPABILITIES.t2i.forcesUpscale, true)
+  assert.equal(MODE_CAPABILITIES.image_edit.forcesUpscale, true)
   assert.equal(MODE_CAPABILITIES.ref2i.forcesUpscale, false)
   assert.equal(MODE_CAPABILITIES.t2av.forcesUpscale, false)
 })
@@ -144,7 +145,7 @@ test('only t2i force-enables upscale', () => {
 test('modes that cannot upscale are marked as such', () => {
   const noUpscale = Object.entries(MODE_CAPABILITIES)
     .filter(([, c]) => !c.supportsUpscale).map(([m]) => m).sort()
-  assert.deepEqual(noUpscale, ['extend', 'iclora', 'ref2i', 'retake'])
+  assert.deepEqual(noUpscale, ['dfr', 'extend', 'iclora', 'keyframe_interpolation', 'ref2i', 'retake', 't2a'])
 })
 
 test('iclora, retake and extend pin the decoder to VAE', () => {
@@ -428,9 +429,11 @@ test('valid t2av draft passes', () => {
   assert.deepEqual(validateGenerationDraft(draft(), {}), [])
 })
 
-test('qwen engine is limited to t2i', () => {
-  assert.match(validateGenerationDraft(draft({ engine: 'qwen' }), {}).join(' '), /Text → Image/)
+test('qwen engine supports t2i and image_edit only', () => {
+  assert.match(validateGenerationDraft(draft({ engine: 'qwen' }), {}).join(' '), /Image Edit/)
   assert.deepEqual(validateGenerationDraft(draft({ mode: 't2i', engine: 'qwen' }), {}), [])
+  const refs = { reference0: asset('a', 'image') }
+  assert.deepEqual(validateGenerationDraft(draft({ mode: 'image_edit', engine: 'qwen' }), refs), [])
 })
 
 test('qwen engine rejects LoRA in the Studio model layer', () => {
@@ -549,6 +552,23 @@ test('buildConditions for t2av sends nothing', () => {
   assert.deepEqual(buildConditions(draft(), {}), [])
 })
 
+test('buildConditions for Qwen image_edit preserves up to ten ordered references', () => {
+  const refs = {
+    reference0: asset('a', 'image'),
+    reference2: asset('c', 'image'),
+    reference9: asset('j', 'image'),
+  }
+  const conditions = buildConditions(draft({ mode: 'image_edit', engine: 'qwen' }), refs)
+  assert.deepEqual(conditions.map(item => [item.asset_id, item.index]), [['a', 0], ['c', 2], ['j', 9]])
+})
+
+test('Qwen 2K base preset bypasses the LTX 960x544 base limit', () => {
+  assert.deepEqual(
+    validateGenerationDraft(draft({ mode: 't2i', engine: 'qwen', width: 1024, height: 1024 }), {}),
+    []
+  )
+})
+
 test('buildLoras returns one entry with strength', () => {
   assert.deepEqual(buildLoras(draft({ loraId: 'x', loraStrength: 0.8 })), [{ id: 'x', strength: 0.8 }])
   assert.deepEqual(buildLoras(draft()), [])
@@ -607,6 +627,7 @@ test('no request field is null except the documented optionals', () => {
   const nullable = new Set([
     'negative_prompt', 'retake_start', 'retake_end',
     'modality_scale', 'audio_guidance_scale', 'audio_asset_id',
+    'audio_stg_scale', 'audio_rescale_scale', 'audio_skip_step', 'audio_stg_blocks', 'hdr_color_space',
   ])
   for (const mode of Object.keys(MODE_CAPABILITIES)) {
     const body = buildGenerationRequest(draft({ mode }), {

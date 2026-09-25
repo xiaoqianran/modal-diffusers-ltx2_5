@@ -44,7 +44,7 @@ export function isTerminal(job) {
 }
 
 export function hasMedia(job) {
-  return Boolean(job?.video_url || job?.image_url)
+  return Boolean(job?.video_url || job?.image_url || job?.audio_url)
 }
 
 export function isPending(job) {
@@ -78,6 +78,8 @@ export function makePendingJob(token, request, sessionNumber, createdAt = Date.n
     error: null,
     video_url: null,
     image_url: null,
+    audio_url: null,
+    hdr_exr_url: null,
     request,
     created_at: timestamp,
     updated_at: timestamp,

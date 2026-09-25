@@ -187,6 +187,7 @@ group('uploads')
 
 await test('guessKind recognises each media type', () => {
   assert.equal(guessKind({ name: 'a.PNG' }), 'image')
+  assert.equal(guessKind({ name: 'plate.exr' }), 'image')
   assert.equal(guessKind({ name: 'a.mp4' }), 'video')
   assert.equal(guessKind({ name: 'a.wav' }), 'audio')
   assert.equal(guessKind({ name: 'a.txt' }), 'unknown')
@@ -607,7 +608,10 @@ await test('detach and clearAttachments reset slots', async () => {
   assert.equal(runtime.attachments.first, null)
   await runtime.attach('first', new File([new Uint8Array([1])], 'a.png', { type: 'image/png' }))
   runtime.clearAttachments()
-  assert.deepEqual({ ...runtime.attachments }, { first: null, last: null, source: null, audio: null })
+  assert.deepEqual({ ...runtime.attachments }, {
+    first: null, last: null, source: null, audio: null,
+    ...Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`reference${index}`, null])),
+  })
 })
 
 group('runtime: lifecycle')

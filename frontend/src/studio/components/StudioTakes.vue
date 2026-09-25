@@ -29,6 +29,7 @@ const emit = defineEmits(['select'])
         <span class="take-media">
           <video v-if="job.video_url" :src="job.video_url" preload="metadata" muted playsinline />
           <img v-else-if="job.image_url" :src="job.image_url" alt="" loading="lazy" />
+          <span v-else-if="job.audio_url" class="thumb-blank">AUDIO</span>
           <span v-else class="thumb-blank">{{ modeLabel(job.request?.mode) }}</span>
         </span>
         <span class="take-meta">

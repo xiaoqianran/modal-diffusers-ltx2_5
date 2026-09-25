@@ -42,6 +42,8 @@ MODEL_ROOT = "/models/ltx25"
 PIPELINE_DIR = f"{MODEL_ROOT}/pipeline"
 NVFP4_CKPT = f"{MODEL_ROOT}/checkpoints/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors"
 QWEN_IMAGE21_DIR = "/qwen-cache/huggingface/hub"
+QWEN_IMAGE21_MODEL_ID = "Qwen/Qwen-Image-2.1"
+QWEN_IMAGE21_REVISION = "b3179ad355be050328e483a9dfdd9e60cd62adfa"
 
 app = modal.App(APP_NAME)
 model_volume = modal.Volume.from_name(MODEL_VOLUME_NAME, create_if_missing=True)
@@ -126,6 +128,11 @@ prep_image = (
         "/app/scripts/download_quantize_ltx25.py",
         copy=True,
     )
+    .add_local_file(
+        "scripts/download_native_ltx25.py",
+        "/app/scripts/download_native_ltx25.py",
+        copy=True,
+    )
 )
 
 # Modal runtime is deliberately split into two layers:
@@ -151,6 +158,29 @@ runtime_base_image = (
 )
 
 runtime_image = runtime_base_image.add_local_dir(
+    "ltx25",
+    "/app/ltx25",
+    copy=False,
+    ignore=["**/__pycache__/**", "**/*.pyc"],
+)
+
+# Exact upstream ltx-pipelines must live in an isolated environment.  ltx-core
+# 1.3.0 currently requires transformers<5.15 while the resident Qwen-Image 2.1
+# path uses transformers 5.17.
+LTX_NATIVE_COMMIT = "a95ab856bf29407b6b066ede0abe1846050db56c"
+native_base_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .run_commands(
+        "apt-get update && "
+        "apt-get install -y --no-install-recommends build-essential ffmpeg git && "
+        "rm -rf /var/lib/apt/lists/*",
+        "python -m pip install --no-cache-dir uv pydantic pydantic-settings boto3",
+        "git clone --filter=blob:none https://github.com/Lightricks/LTX-2.git /opt/ltx2",
+        f"cd /opt/ltx2 && git checkout {LTX_NATIVE_COMMIT}",
+        "cd /opt/ltx2 && uv sync --package ltx-pipelines --no-dev",
+    )
+)
+native_runtime_image = native_base_image.add_local_dir(
     "ltx25",
     "/app/ltx25",
     copy=False,
@@ -189,6 +219,59 @@ def prepare_models() -> dict[str, str]:
         "qwen_image21_cache": QWEN_CACHE_VOLUME_NAME if DIRECTOR_QWEN_ENABLED else "disabled",
         "status": "ready",
     }
+
+
+@app.function(
+    image=prep_image,
+    cpu=8,
+    memory=32768,
+    timeout=6 * 60 * 60,
+    env={"HF_XET_HIGH_PERFORMANCE": "1"},
+    volumes={"/qwen-cache": qwen_cache_volume},
+    secrets=[hf_secret],
+)
+def prepare_qwen_image21() -> dict[str, str]:
+    """Populate the read-only Qwen Hub cache used by the resident Director."""
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=QWEN_IMAGE21_MODEL_ID,
+        revision=QWEN_IMAGE21_REVISION,
+        token=os.environ.get("HF_TOKEN"),
+        cache_dir=QWEN_IMAGE21_DIR,
+    )
+    qwen_cache_volume.commit()
+    return {
+        "model": QWEN_IMAGE21_MODEL_ID,
+        "revision": QWEN_IMAGE21_REVISION,
+        "cache": QWEN_CACHE_VOLUME_NAME,
+        "status": "ready",
+    }
+
+
+@app.function(
+    image=prep_image,
+    cpu=8,
+    memory=32768,
+    timeout=6 * 60 * 60,
+    env={"HF_XET_HIGH_PERFORMANCE": "1"},
+    volumes={"/models": model_volume},
+    secrets=[hf_secret],
+)
+def prepare_native_models() -> dict[str, str]:
+    """Download the BF16 split pack needed by exact upstream native pipelines."""
+    native_root = f"{MODEL_ROOT}/native"
+    subprocess.run(
+        [
+            sys.executable,
+            "/app/scripts/download_native_ltx25.py",
+            "--output-dir",
+            native_root,
+        ],
+        check=True,
+    )
+    model_volume.commit()
+    return {"native_root": native_root, "status": "ready"}
 
 
 GPU_ENV = {
@@ -396,7 +479,7 @@ class DirectorWorker:
                 if not isinstance(asset_record, dict):
                     raise FileNotFoundError(f"Input asset metadata not found: {asset_id}")
                 ref = MediaRef.from_value(asset_record, default_store_id=self.media_storage.primary_id)
-                target_input = input_dir / Path(ref.key).name
+                target_input = input_dir / f"{asset_id}{Path(ref.key).suffix}"
                 size = int(asset_record.get("size") or 0)
                 if (
                     media_mount is not None
@@ -426,7 +509,7 @@ class DirectorWorker:
             raise
         input_staging_seconds = time.monotonic() - staging_started
         if request.mode in STILL_IMAGE_MODES:
-            prefix = {"t2i": "t2i", "refine_image": "refine", "ref2i": "ref2i"}[request.mode]
+            prefix = {"t2i": "t2i", "image_edit": "qwen-edit", "refine_image": "refine", "ref2i": "ref2i"}[request.mode]
             if plan.engine == "qwen":
                 prefix = "qwen"
             target = Path(settings.output_dir) / f"{prefix}_{job_id}.png"
@@ -550,7 +633,206 @@ class DirectorWorker:
             shutil.rmtree(workspace, ignore_errors=True)
 
 
+NATIVE_WORKER_VOLUMES = {
+    "/models": model_volume.with_mount_options(read_only=True),
+    "/data": state_volume,
+}
+if media_mount is not None:
+    NATIVE_WORKER_VOLUMES["/media-primary"] = media_mount
+
+
+@app.function(
+    image=native_runtime_image,
+    gpu="RTX-PRO-6000",
+    memory=131072,
+    timeout=45 * 60,
+    startup_timeout=30 * 60,
+    max_containers=1,
+    scaledown_window=60,
+    retries=modal.Retries(
+        max_retries=1,
+        backoff_coefficient=1.5,
+        initial_delay=2.0,
+        max_delay=10.0,
+    ),
+    secrets=WORKER_SECRETS,
+    env={
+        **GPU_ENV,
+        "DIRECTOR_QWEN_ENABLED": "0",
+        "LTX25_NATIVE_MODEL_ROOT": f"{MODEL_ROOT}/native",
+        "LTX25_NATIVE_PYTHON": "/opt/ltx2/.venv/bin/python",
+        "LTX25_NATIVE_OFFLOAD": os.environ.get("LTX25_NATIVE_OFFLOAD", "cpu"),
+    },
+    volumes=NATIVE_WORKER_VOLUMES,
+)
+def native_generate(job_id: str, request_payload: dict) -> dict:
+    """Execute exact upstream T2A, keyframe interpolation or DFR in an isolated stack."""
+    import shutil
+    import time
+    from pathlib import Path
+
+    from ltx25.media_storage import MediaRef, create_media_storage
+    from ltx25.native_ltx import build_native_command, validate_native_assets
+    from ltx25.schemas import GenerateRequest, NATIVE_LTX_MODES
+
+    record_key = f"job:{job_id}"
+    record = job_store.get(record_key) or {}
+    started = time.monotonic()
+
+    def save(**updates):
+        current = job_store.get(record_key) or record
+        current.update(updates)
+        current["updated_at"] = datetime.now(timezone.utc).isoformat()
+        job_store.put(record_key, current)
+        return current
+
+    try:
+        request = GenerateRequest.model_validate(request_payload)
+        if request.mode not in NATIVE_LTX_MODES:
+            raise ValueError(f"native_generate does not support mode {request.mode!r}")
+
+        interrupted = _honor_interrupt(job_id, record)
+        if interrupted is not None:
+            return interrupted
+
+        state_volume.reload()
+        media_storage = create_media_storage(state_volume)
+        plan = {
+            "requested_engine": request.engine,
+            "engine": "ltx-native",
+            "fallback_engine": None,
+            "reason": f"native:{request.mode}",
+            "mode": request.mode,
+        }
+        record = save(
+            status="running",
+            progress=0.02,
+            error=None,
+            engine="ltx-native",
+            plan=plan,
+        )
+
+        workspace = Path(f"/tmp/ltx25-native/{job_id}")
+        input_dir = workspace / "inputs"
+        shutil.rmtree(workspace, ignore_errors=True)
+        input_dir.mkdir(parents=True, exist_ok=True)
+
+        for condition in request.conditions:
+            asset_record = job_store.get(f"asset:{condition.asset_id}")
+            if not isinstance(asset_record, dict):
+                raise FileNotFoundError(f"Input asset metadata not found: {condition.asset_id}")
+            ref = MediaRef.from_value(asset_record, default_store_id=media_storage.primary_id)
+            suffix = Path(ref.key).suffix
+            target_input = input_dir / f"{condition.asset_id}{suffix}"
+            media_storage.download_to(ref, target_input)
+
+        interrupted = _honor_interrupt(job_id, record)
+        if interrupted is not None:
+            return interrupted
+        save(progress=0.08)
+
+        suffix = ".wav" if request.mode == "t2a" else ".mp4"
+        prefix = {"t2a": "t2a", "keyframe_interpolation": "keyframe", "dfr": "dfr"}[request.mode]
+        target = (
+            Path("/data/outputs") / f"{prefix}_{job_id}{suffix}"
+            if MEDIA_PRIMARY_BACKEND == "volume"
+            else workspace / f"{prefix}_{job_id}{suffix}"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        validate_native_assets(request.mode)
+        command = build_native_command(
+            request,
+            input_dir,
+            target,
+            lora_dir=Path("/data/loras"),
+        )
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout or "")[-4000:]
+            raise RuntimeError(f"ltx-pipelines {request.mode} failed: {tail}")
+        if not target.is_file() or target.stat().st_size <= 0:
+            raise RuntimeError(f"ltx-pipelines {request.mode} produced no output")
+
+        hdr_archive = None
+        if request.hdr_color_space is not None:
+            exr_dir = target.with_name(f"{target.stem}_exr")
+            if not exr_dir.is_dir() or not any(exr_dir.glob("*.exr")):
+                raise RuntimeError("HDR generation produced no EXR frame sequence")
+            archive_base = target.with_name(f"{target.stem}_exr")
+            hdr_archive = Path(shutil.make_archive(str(archive_base), "zip", root_dir=exr_dir))
+
+        interrupted = _honor_interrupt(job_id, record)
+        if interrupted is not None:
+            return interrupted
+        save(progress=0.95)
+
+        output_size = target.stat().st_size
+        if MEDIA_PRIMARY_BACKEND == "volume" and not MEDIA_FALLBACK_ID:
+            state_volume.commit()
+            output_ref = MediaRef(media_storage.primary_id, f"outputs/{target.name}")
+        else:
+            output_ref = media_storage.upload_local(target, f"outputs/{target.name}")
+            target.unlink(missing_ok=True)
+        job_store.put(
+            f"output:{Path(output_ref.key).name}",
+            {**output_ref.as_dict(), "size": output_size},
+        )
+
+        hdr_exr_key = None
+        if hdr_archive is not None:
+            archive_size = hdr_archive.stat().st_size
+            if MEDIA_PRIMARY_BACKEND == "volume" and not MEDIA_FALLBACK_ID:
+                state_volume.commit()
+                archive_ref = MediaRef(media_storage.primary_id, f"outputs/{hdr_archive.name}")
+            else:
+                archive_ref = media_storage.upload_local(hdr_archive, f"outputs/{hdr_archive.name}")
+                hdr_archive.unlink(missing_ok=True)
+            job_store.put(
+                f"output:{Path(archive_ref.key).name}",
+                {**archive_ref.as_dict(), "size": archive_size},
+            )
+            hdr_exr_key = f"outputs/{Path(archive_ref.key).name}"
+
+        output_key = f"outputs/{Path(output_ref.key).name}"
+        record = save(
+            status="completed",
+            progress=1.0,
+            error=None,
+            generation_seconds=time.monotonic() - started,
+            peak_vram_gb=None,
+            engine="ltx-native",
+            plan=plan,
+            graph=None,
+            image_key=None,
+            video_key=output_key if request.mode != "t2a" else None,
+            audio_key=output_key if request.mode == "t2a" else None,
+            hdr_exr_key=hdr_exr_key,
+            image_url=None,
+            video_url=None,
+            audio_url=None,
+            hdr_exr_url=None,
+        )
+        return record
+    except Exception as exc:
+        interrupted = _honor_interrupt(job_id, record)
+        if interrupted is not None:
+            return interrupted
+        return save(
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+            generation_seconds=time.monotonic() - started,
+            engine="ltx-native",
+        )
+    finally:
+        shutil.rmtree(Path(f"/tmp/ltx25-native/{job_id}"), ignore_errors=True)
+
+
 @app.local_entrypoint()
 def prepare() -> None:
     """Run once (or rerun safely) before deploy: modal run modal_app.py::prepare."""
-    print(prepare_models.remote())
+    print({
+        "resident": prepare_models.remote(),
+        "qwen": prepare_qwen_image21.remote() if DIRECTOR_QWEN_ENABLED else {"status": "disabled"},
+        "native": prepare_native_models.remote(),
+    })

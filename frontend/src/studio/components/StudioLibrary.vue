@@ -88,6 +88,7 @@ function meta(job) {
         <div class="tile-media">
           <video v-if="job.video_url" :src="job.video_url" preload="metadata" muted playsinline />
           <img v-else-if="job.image_url" :src="job.image_url" alt="" loading="lazy" />
+          <audio v-else-if="job.audio_url" :src="job.audio_url" controls preload="metadata" />
           <div v-else class="thumb-blank">{{ modeLabel(job.request?.mode) }}</div>
         </div>
         <figcaption>
@@ -109,9 +110,10 @@ function meta(job) {
           <a
             v-if="selectJobActions(job).canDownload"
             class="job-action"
-            :href="job.video_url || job.image_url"
+            :href="job.video_url || job.image_url || job.audio_url"
             download
           >下载</a>
+          <a v-if="job.hdr_exr_url" class="job-action" :href="job.hdr_exr_url" download>EXR ZIP</a>
           <button
             v-if="selectJobActions(job).canDelete"
             class="job-action danger"

@@ -38,6 +38,9 @@ const CONDITION_INDEX = {
  * @property {string} decoder
  * @property {number|null} modalityScale
  * @property {number|null} audioGuidanceScale
+ * @property {number} qwenTrueCfgScale
+ * @property {boolean} qwenUseKvCache
+ * @property {boolean} transparentBackground
  * @property {string|null} loraId
  * @property {number} loraStrength
  * @property {object} range   Mode-specific extras (retakeStart, extendSeconds, …).
@@ -53,8 +56,11 @@ export function validateGenerationDraft(draft, assets = {}, loras = []) {
 
   if (!String(draft.prompt || '').trim()) problems.push('Prompt 不能为空')
 
-  if (draft.engine === 'qwen' && draft.mode !== 't2i') {
-    problems.push('Qwen-Image 2.1 当前只支持 Text → Image')
+  if (capability.qwenOnly && draft.engine === 'ltx') {
+    problems.push(`${modeLabel(draft.mode)} 只能使用 Qwen-Image 2.1`)
+  }
+  if (draft.engine === 'qwen' && !['t2i', 'image_edit'].includes(draft.mode)) {
+    problems.push('Qwen-Image 2.1 当前支持 Text → Image 和 Image Edit')
   }
   if (draft.engine === 'qwen' && draft.loraId) {
     problems.push('Qwen-Image 2.1 暂未接入 LoRA 路由')
@@ -71,6 +77,14 @@ export function validateGenerationDraft(draft, assets = {}, loras = []) {
   }
   if (capability.needsSource && !assets.source) {
     problems.push(`${modeLabel(draft.mode)} 需要先添加参考素材`)
+  }
+  if (capability.multiReference) {
+    const references = Array.from({ length: 10 }, (_, index) => assets[`reference${index}`]).filter(Boolean)
+    const minimum = draft.mode === 'keyframe_interpolation' ? 2 : draft.mode === 'dfr' ? 0 : 1
+    if (references.length < minimum) problems.push(`${modeLabel(draft.mode)} 至少需要 ${minimum} 张参考图片`)
+    if (draft.mode === 'dfr' && draft.autoDuration && references.length) {
+      problems.push('DFR 使用关键帧时需要明确 Frames；Auto duration 仅支持纯文本 DFR')
+    }
   }
   if (capability.sourceIsVideo && assets.source && assets.source.kind !== 'video') {
     problems.push(`${modeLabel(draft.mode)} 的参考素材必须是视频`)
@@ -102,10 +116,17 @@ export function validateGenerationDraft(draft, assets = {}, loras = []) {
 
   const wantsUpscale = capability.forcesUpscale ? true
     : capability.supportsUpscale && Boolean(draft.upscale)
+  const qwenRequest = capability.qwenOnly
+    || draft.engine === 'qwen'
+    || (draft.mode === 't2i' && draft.engine === 'auto' && !draft.loraId)
 
   if (wantsUpscale) {
-    if (draft.width * draft.height > 960 * 544) {
+    if (!qwenRequest && draft.width * draft.height > 960 * 544) {
       problems.push('2× 放大的基础分辨率不能超过 960×544')
+    }
+    const finalScale = wantsUpscale ? 2 : 1
+    if (qwenRequest && (draft.width * finalScale > 3072 || draft.height * finalScale > 3072)) {
+      problems.push('Qwen-Image 2.1 输出边长不能超过 3072')
     }
     if (draft.upscaleMethod === 'pixel' && !capability.supportsPixelUpscale) {
       problems.push(`${modeLabel(draft.mode)} 不支持 Pixel 放大`)
@@ -125,6 +146,34 @@ export function validateGenerationDraft(draft, assets = {}, loras = []) {
 export function buildConditions(draft, assets = {}) {
   const capability = getModeCapabilities(draft.mode)
   const conditions = []
+
+  if (capability.multiReference) {
+    const attached = []
+    for (let index = 0; index < 10; index += 1) {
+      const asset = assets[`reference${index}`]
+      if (!asset) continue
+      attached.push({ index, asset })
+    }
+    for (let order = 0; order < attached.length; order += 1) {
+      const { index, asset } = attached[order]
+      let frameIndex = null
+      if (['keyframe_interpolation', 'dfr'].includes(draft.mode)) {
+        const raw = draft.keyframeFrames?.[index]
+        const explicit = raw === null || raw === undefined || raw === '' ? null : Number(raw)
+        const fallback = attached.length <= 1
+          ? 0
+          : Math.round(order * (Number(draft.numFrames) - 1) / (attached.length - 1))
+        frameIndex = explicit !== null && Number.isFinite(explicit) ? explicit : fallback
+      }
+      conditions.push({
+        asset_id: asset.id,
+        kind: 'image',
+        index,
+        ...(frameIndex === null ? {} : { frame_index: frameIndex }),
+        strength: 1,
+      })
+    }
+  }
 
   if (capability.input === 'image' && assets.first) {
     conditions.push({
@@ -196,7 +245,11 @@ export function buildGenerationRequest(draft, assets, sessionNumber, seedOffset 
     seed: Number(draft.seed || 0) + seedOffset,
     steps: Number(draft.steps),
     guidance_scale: Number(draft.guidanceScale),
-    num_frames: capability.fixedFrames ?? Number(draft.numFrames),
+    num_frames: capability.supportsAutoDuration && draft.autoDuration
+      ? null
+      : (capability.fixedFrames ?? Number(draft.numFrames)),
+    min_seconds: Number(draft.minSeconds ?? 1),
+    max_seconds: Number(draft.maxSeconds ?? 8),
     fps: Number(draft.fps),
     conditions: buildConditions(draft, assets),
     loras: buildLoras(draft),
@@ -220,6 +273,18 @@ export function buildGenerationRequest(draft, assets, sessionNumber, seedOffset 
     regenerate_audio: true,
     modality_scale: draft.modalityScale ?? null,
     audio_guidance_scale: draft.audioGuidanceScale ?? null,
+    audio_stg_scale: draft.audioStgScale ?? null,
+    audio_rescale_scale: draft.audioRescaleScale ?? null,
+    audio_skip_step: draft.audioSkipStep ?? null,
+    audio_stg_blocks: Array.isArray(draft.audioStgBlocks) && draft.audioStgBlocks.length
+      ? draft.audioStgBlocks.map(Number)
+      : null,
+    qwen_true_cfg_scale: Number(draft.qwenTrueCfgScale ?? 1),
+    qwen_use_kv_cache: draft.qwenUseKvCache !== false,
+    transparent_background: Boolean(draft.transparentBackground),
+    dfr_temporal_upscalings: Number(draft.dfrTemporalUpscalings ?? 0),
+    dfr_spatial_upscalings: Number(draft.dfrSpatialUpscalings ?? 1),
+    hdr_color_space: capability.supportsHdr ? (draft.hdrColorSpace || null) : null,
   }
 
   return body

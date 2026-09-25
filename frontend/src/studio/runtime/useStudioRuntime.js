@@ -62,6 +62,20 @@ export function createDraft(overrides = {}) {
     decoder: 'vae',
     modalityScale: null,
     audioGuidanceScale: null,
+    audioStgScale: null,
+    audioRescaleScale: null,
+    audioSkipStep: null,
+    audioStgBlocks: [],
+    autoDuration: false,
+    minSeconds: 1,
+    maxSeconds: 8,
+    keyframeFrames: Array(10).fill(null),
+    dfrTemporalUpscalings: 0,
+    dfrSpatialUpscalings: 1,
+    hdrColorSpace: null,
+    qwenTrueCfgScale: 1,
+    qwenUseKvCache: true,
+    transparentBackground: false,
     loraId: null,
     loraStrength: 1,
     range: { ...DEFAULT_RANGE },
@@ -105,7 +119,13 @@ export function useStudioRuntime(options = {}) {
 
   // draft state
   const draft = reactive(createDraft())
-  const attachments = reactive({ first: null, last: null, source: null, audio: null })
+  const attachments = reactive({
+    first: null,
+    last: null,
+    source: null,
+    audio: null,
+    ...Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`reference${index}`, null])),
+  })
 
   // ui state
   const selectedJobId = ref(null)
@@ -279,7 +299,8 @@ export function useStudioRuntime(options = {}) {
   function setMode(mode) {
     const capability = getModeCapabilities(mode)
     draft.mode = mode
-    if (mode !== 't2i' && draft.engine === 'qwen') draft.engine = 'auto'
+    if (capability.qwenOnly) draft.engine = 'qwen'
+    else if (!['t2i', 'image_edit'].includes(mode) && draft.engine === 'qwen') draft.engine = 'auto'
     // Mirror the backend's normalisation so the controls reflect what is sent.
     if (!capability.supportsUpscale) {
       draft.upscale = false
@@ -525,6 +546,19 @@ export function useStudioRuntime(options = {}) {
       fps: request.fps || draft.fps,
       steps: request.steps || draft.steps,
       guidanceScale: request.guidance_scale ?? draft.guidanceScale,
+      qwenTrueCfgScale: request.qwen_true_cfg_scale ?? draft.qwenTrueCfgScale,
+      qwenUseKvCache: request.qwen_use_kv_cache ?? draft.qwenUseKvCache,
+      transparentBackground: Boolean(request.transparent_background),
+      audioStgScale: request.audio_stg_scale ?? draft.audioStgScale,
+      audioRescaleScale: request.audio_rescale_scale ?? draft.audioRescaleScale,
+      audioSkipStep: request.audio_skip_step ?? draft.audioSkipStep,
+      audioStgBlocks: request.audio_stg_blocks || [],
+      autoDuration: request.mode === 't2a' && request.num_frames == null,
+      minSeconds: request.min_seconds ?? draft.minSeconds,
+      maxSeconds: request.max_seconds ?? draft.maxSeconds,
+      dfrTemporalUpscalings: request.dfr_temporal_upscalings ?? draft.dfrTemporalUpscalings,
+      dfrSpatialUpscalings: request.dfr_spatial_upscalings ?? draft.dfrSpatialUpscalings,
+      hdrColorSpace: request.hdr_color_space ?? null,
       seed: request.seed ?? draft.seed,
       upscale: Boolean(request.upscale),
       upscaleMethod: request.upscale_method || 'latent',

@@ -83,8 +83,17 @@ def build_execution_plan(request: GenerateRequest, runtime: RuntimeSnapshot) -> 
         reason = f"explicit:{engine}"
         if engine not in available:
             reason += ":unavailable"
+    elif request.mode == "image_edit":
+        engine = QWEN_ENGINE
+        reason = "auto:qwen_image_edit"
+        if engine not in available:
+            reason += ":unavailable"
     elif request.mode == "t2i" and not request.conditions and not request.loras:
-        fallback_engine = LTX_ENGINE if LTX_ENGINE in available else None
+        fallback_engine = (
+            LTX_ENGINE
+            if LTX_ENGINE in available and _ltx_t2i_fallback_compatible(request)
+            else None
+        )
         if QWEN_ENGINE in available:
             engine = QWEN_ENGINE
             reason = "auto:pure_t2i"
@@ -126,8 +135,17 @@ def qwen_output_size(request: GenerateRequest) -> tuple[int, int]:
     return request.width * scale, request.height * scale
 
 
+def _ltx_t2i_fallback_compatible(request: GenerateRequest) -> bool:
+    """Whether an auto-routed Qwen T2I can safely fall back to the LTX still path."""
+    return (
+        request.width % 32 == 0
+        and request.height % 32 == 0
+        and request.width * request.height <= 960 * 544
+    )
+
+
 class QwenImage21Generator:
-    """Resident Qwen-Image 2.1 BF16 text-to-image engine."""
+    """Resident Qwen-Image 2.1 BF16 T2I + multi-reference image-edit engine."""
 
     def __init__(self, model_dir: Path):
         self.model_dir = Path(model_dir)
@@ -159,13 +177,16 @@ class QwenImage21Generator:
         request: GenerateRequest,
         target: Path,
         progress: ProgressCallback | None = None,
+        *,
+        input_dir: Path | None = None,
     ) -> dict[str, float | str]:
         import torch
+        from PIL import Image
 
         if self.pipe is None:
             raise RuntimeError("Qwen-Image 2.1 is not loaded")
-        if request.mode != "t2i":
-            raise ValueError("Qwen-Image 2.1 currently supports t2i jobs only")
+        if request.mode not in {"t2i", "image_edit"}:
+            raise ValueError("Qwen-Image 2.1 supports t2i and image_edit jobs")
 
         width, height = qwen_output_size(request)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -179,24 +200,52 @@ class QwenImage21Generator:
                 progress(0.05 + 0.9 * ((step_index + 1) / max(1, request.steps)))
             return callback_kwargs
 
+        prompt = request.prompt
+        if request.transparent_background and "transparent" not in prompt.lower():
+            prompt = (
+                "Generate the result with a transparent background and a true RGBA alpha channel. "
+                + prompt
+            )
+
+        pipe_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": request.negative_prompt or None,
+            "width": width,
+            "height": height,
+            "num_inference_steps": request.steps,
+            "true_cfg_scale": request.qwen_true_cfg_scale,
+            "use_kv_cache": request.qwen_use_kv_cache,
+            "generator": torch.Generator(device="cuda").manual_seed(request.seed),
+            "callback_on_step_end": on_step_end,
+        }
+        if request.qwen_sigmas is not None:
+            pipe_kwargs["sigmas"] = request.qwen_sigmas
+
+        reference_images = []
+        if request.mode == "image_edit":
+            root = (input_dir or Path(".")).resolve()
+            image_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+            for condition in request.conditions:
+                matches = list(root.glob(f"{condition.asset_id}.*"))
+                if len(matches) != 1:
+                    raise ValueError(f"Qwen input asset not found: {condition.asset_id}")
+                source = matches[0]
+                if source.suffix.lower() not in image_suffixes:
+                    raise ValueError(f"Qwen image-edit input is not an image: {condition.asset_id}")
+                with Image.open(source) as opened:
+                    reference_images.append(opened.copy())
+            pipe_kwargs["image"] = reference_images
+
         started = time.monotonic()
-        image = self.pipe(
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt or None,
-            width=width,
-            height=height,
-            num_inference_steps=request.steps,
-            true_cfg_scale=1.0,
-            use_kv_cache=True,
-            generator=torch.Generator(device="cuda").manual_seed(request.seed),
-            callback_on_step_end=on_step_end,
-        ).images[0]
+        image = self.pipe(**pipe_kwargs).images[0]
         image.save(target)
         torch.cuda.synchronize()
         elapsed = time.monotonic() - started
         peak_vram_gb = torch.cuda.max_memory_reserved() / 1024**3
 
         del image
+        for reference in reference_images:
+            reference.close()
         gc.collect()
         torch.cuda.empty_cache()
         if progress:
@@ -274,7 +323,9 @@ class DirectorRuntime:
         if plan.engine == QWEN_ENGINE:
             if self.qwen is None:
                 raise RuntimeError("Execution plan selected unavailable Qwen-Image 2.1 engine")
-            metrics = self.qwen.generate(request, target, progress)
+            metrics = self.qwen.generate(
+                request, target, progress, input_dir=input_dir
+            )
             metrics["plan"] = plan.as_dict()
             return metrics
 
