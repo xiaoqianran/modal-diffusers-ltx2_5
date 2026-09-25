@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ltx25.media_storage import MediaRef, MediaStorage
+from ltx25.media_storage import MediaRef, MediaStorage, create_media_storage
 
 
 class FakeStore:
@@ -69,6 +69,28 @@ def test_prepare_uses_primary_and_returns_stable_store_id():
     plan = storage.prepare_upload(key="inputs/a.png", content_type="image/png", size=1)
     assert plan["store_id"] == "r2"
     assert plan["url"].startswith("https://primary/")
+
+
+def test_routed_storage_keeps_volume_registered_for_persisted_refs(monkeypatch):
+    volume = object()
+    monkeypatch.setattr(
+        "ltx25.media_storage._s3_store",
+        lambda values, prefix: FakeStore(prefix.rstrip("_").lower()),
+    )
+    storage = create_media_storage(
+        volume,
+        {
+            "LTX25_MEDIA_PRIMARY_ID": "r2",
+            "LTX25_MEDIA_PRIMARY_BACKEND": "s3",
+            "LTX25_MEDIA_FALLBACK_ID": "minio",
+            "LTX25_MEDIA_FALLBACK_BACKEND": "s3",
+        },
+    )
+
+    assert storage.primary_id == "r2"
+    assert storage.fallback_id == "minio"
+    assert set(storage.stores) == {"r2", "minio", "volume"}
+    assert storage.store("volume").volume is volume
 
 
 def test_prepare_falls_back_when_primary_prepare_really_fails():

@@ -313,6 +313,14 @@ def create_media_storage(volume: Any, env: dict[str, str] | None = None) -> Medi
             else:
                 raise ValueError("LTX25_MEDIA_FALLBACK_BACKEND must be 'volume' or 's3'")
             stores[fallback_id] = fallback_store
+
+        # The GPU worker has historically written outputs to the Modal Volume,
+        # and persisted MediaRef records may therefore still point at
+        # store_id="volume" even when the local router now uses routed S3
+        # storage (for example R2 primary + MinIO fallback). Keep the Volume
+        # registered as an addressable compatibility store without changing
+        # primary/fallback write policy.
+        stores.setdefault("volume", VolumeMediaStore(volume))
         return MediaStorage(
             stores=stores,
             primary_id=primary_id,
