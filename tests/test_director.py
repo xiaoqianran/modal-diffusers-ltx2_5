@@ -218,3 +218,59 @@ def test_failed_ltx_execution_resets_graph_cache(monkeypatch, tmp_path):
         runtime_obj.execute(plan, request, tmp_path / "out.mp4")
 
     assert runtime_obj.ltx._graph_runner.reset_calls == 1
+
+
+def test_qwen_execution_releases_ltx_graph_cache_first(tmp_path):
+    class Runner:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def stats(self):
+            return {
+                "enabled": True,
+                "captures": 1,
+                "eager_shapes": 0,
+                "replays": 8,
+                "replacements": 0,
+                "overflow_misses": 0,
+                "max_captures": 1,
+            }
+
+        def reset(self):
+            self.reset_calls += 1
+
+    class LTX:
+        def __init__(self):
+            self._graph_runner = Runner()
+
+    class Qwen:
+        def generate(self, *_args, **_kwargs):
+            return {"engine": "qwen", "generation_seconds": 1.0, "peak_vram_gb": 80.0}
+
+    runtime_obj = object.__new__(DirectorRuntime)
+    runtime_obj.ltx = LTX()
+    runtime_obj.qwen = Qwen()
+
+    request = GenerateRequest(
+        mode="t2i",
+        engine="qwen",
+        prompt="travel landscape",
+        width=768,
+        height=512,
+        upscale=True,
+    )
+    plan = ExecutionPlan(
+        requested_engine="qwen",
+        engine="qwen",
+        fallback_engine=None,
+        fallback_applied=False,
+        reason="explicit:qwen",
+        resource_class="qwen_verified_1536x1024",
+        acceleration="qwen_default",
+    )
+
+    metrics = runtime_obj.execute(plan, request, tmp_path / "out.png")
+
+    assert runtime_obj.ltx._graph_runner.reset_calls == 1
+    assert metrics["engine"] == "qwen"
+    assert metrics["plan"]["resource_class"] == "qwen_verified_1536x1024"

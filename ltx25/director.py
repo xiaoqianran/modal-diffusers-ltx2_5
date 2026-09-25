@@ -255,24 +255,30 @@ class QwenImage21Generator:
             pipe_kwargs["image"] = reference_images
 
         started = time.monotonic()
-        image = self.pipe(**pipe_kwargs).images[0]
-        image.save(target)
-        torch.cuda.synchronize()
-        elapsed = time.monotonic() - started
-        peak_vram_gb = torch.cuda.max_memory_reserved() / 1024**3
-
-        del image
-        for reference in reference_images:
-            reference.close()
-        gc.collect()
-        torch.cuda.empty_cache()
-        if progress:
-            progress(1.0)
-        return {
-            "engine": QWEN_ENGINE,
-            "generation_seconds": elapsed,
-            "peak_vram_gb": peak_vram_gb,
-        }
+        image = None
+        try:
+            image = self.pipe(**pipe_kwargs).images[0]
+            image.save(target)
+            torch.cuda.synchronize()
+            elapsed = time.monotonic() - started
+            peak_vram_gb = torch.cuda.max_memory_reserved() / 1024**3
+            if progress:
+                progress(1.0)
+            return {
+                "engine": QWEN_ENGINE,
+                "generation_seconds": elapsed,
+                "peak_vram_gb": peak_vram_gb,
+            }
+        finally:
+            # Qwen shares a 96 GB worker with the resident LTX pipeline. An OOM
+            # or decoder failure must return allocator cache to the shared pool;
+            # otherwise one failed large-image request can poison later jobs.
+            if image is not None:
+                del image
+            for reference in reference_images:
+                reference.close()
+            gc.collect()
+            torch.cuda.empty_cache()
 
 
 class DirectorRuntime:
@@ -331,27 +337,40 @@ class DirectorRuntime:
             }
         return runner.stats()
 
-    def _reset_ltx_graphs_after_failure(self) -> None:
-        """Drop captures created by a failed LTX request.
+    def _reset_ltx_graphs(self, *, context: str) -> None:
+        """Drop LTX CUDA Graph captures and return their private pool to CUDA.
 
-        A request can successfully capture a graph and then fail later (for
-        example during an upscale/decode OOM). With a one-slot production cache,
-        keeping that capture poisons the worker: every subsequent shape is forced
-        to eager. Failure recovery must therefore invalidate the graph cache.
+        The director keeps LTX and Qwen resident on the same 96 GB worker. A
+        captured LTX graph can retain several GiB in a private CUDA mempool, so
+        Qwen requests must be able to reclaim that headroom before generation.
         """
         runner = getattr(self.ltx, "_graph_runner", None)
         if runner is None:
             return
         try:
             runner.reset()
-            # Return allocator cache to the shared dual-resident headroom after
-            # an OOM. This is best-effort and intentionally not on the hot path.
             import torch
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception as exc:
-            print(f"[ltx25] cudagraph: failure reset failed: {exc!r}", flush=True)
+            print(f"[ltx25] cudagraph: {context} reset failed: {exc!r}", flush=True)
+
+    def _reset_ltx_graphs_after_failure(self) -> None:
+        """Invalidate graph state after a failed LTX request."""
+        self._reset_ltx_graphs(context="failure")
+
+    def _release_ltx_graphs_for_qwen(self) -> None:
+        """Reclaim LTX graph memory before Qwen uses the shared GPU."""
+        graph = self._ltx_graph_stats()
+        if int(graph["captures"]) <= 0:
+            return
+        print(
+            f"[director] releasing {graph['captures']} LTX CUDA graph capture(s) "
+            "before Qwen generation",
+            flush=True,
+        )
+        self._reset_ltx_graphs(context="qwen headroom")
 
     def execute(
         self,
@@ -365,6 +384,7 @@ class DirectorRuntime:
         if plan.engine == QWEN_ENGINE:
             if self.qwen is None:
                 raise RuntimeError("Execution plan selected unavailable Qwen-Image 2.1 engine")
+            self._release_ltx_graphs_for_qwen()
             metrics = self.qwen.generate(
                 request, target, progress, input_dir=input_dir
             )
