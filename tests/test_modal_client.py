@@ -90,6 +90,7 @@ def make_client(tmp_path: Path):
     control.gpu_idle_seconds = 600
     control.keep_gpu_warm = False
     control.warm_lease_seconds = 90
+    control.submission_stale_seconds = 120
     control.max_queue_size = 256
     control.gpu_concurrency = 1
     control._warm_lease_until = 0.0
@@ -373,6 +374,28 @@ def test_keep_warm_dedupes_pending_call_and_unload_cancels_it(tmp_path):
     assert control.start_warmup() is False
 
 
+def test_completed_warm_probe_is_replaced_with_fresh_probe(tmp_path):
+    control = make_client(tmp_path)
+    control.keep_gpu_warm = True
+    spawned = []
+
+    class CompletedCall:
+        def get(self, timeout=0):
+            return {"status": "ready"}
+
+    class PendingCall:
+        def get(self, timeout=0):
+            raise TimeoutError
+
+    control._warm_call = CompletedCall()
+    pending = PendingCall()
+    control.ready_fn = SimpleNamespace(spawn=lambda: spawned.append(pending) or pending)
+
+    assert control.start_warmup() is True
+    assert control._warm_call is pending
+    assert spawned == [pending]
+
+
 def test_warm_status_preserves_stopped_deployment_error(tmp_path):
     control = make_client(tmp_path)
     control.keep_gpu_warm = True
@@ -390,6 +413,24 @@ def test_warm_status_preserves_stopped_deployment_error(tmp_path):
     assert status["state"] == "error"
     assert "ConflictError" in status["error"]
     assert "stopped or disabled" in status["error"]
+
+
+def test_stale_queued_submission_without_call_id_is_failed_and_removed(tmp_path):
+    control = make_client(tmp_path)
+    control.submission_stale_seconds = 30
+    job = control.create_job(GenerateRequest(prompt="stale"))
+    record = control.job_store.get(f"job:{job['id']}")
+    record["created_at"] = "2020-01-01T00:00:00+00:00"
+    record["call_id"] = None
+    control.job_store.put(f"job:{job['id']}", record)
+    control.job_store.pop(f"call:{job['id']}", None)
+
+    stats = control.queue_stats()
+    refreshed = control.get_job(job["id"])
+
+    assert stats["active"] == 0
+    assert refreshed["status"] == "failed"
+    assert "submission did not complete" in refreshed["error"]
 
 
 def test_expired_warm_lease_scales_down_when_queue_is_idle(tmp_path):

@@ -62,6 +62,9 @@ class ModalClient:
             "", "0", "false", "no", "off"
         }
         self.warm_lease_seconds = max(30, int(os.environ.get("LTX25_WARM_LEASE_SECONDS", "90")))
+        self.submission_stale_seconds = max(
+            30, int(os.environ.get("LTX25_SUBMISSION_STALE_SECONDS", "120"))
+        )
         # Backlog admission is intentionally separate from GPU execution
         # concurrency. The Modal DirectorWorker is max_containers=1 with
         # @modal.concurrent(max_inputs=1), so jobs are consumed serially even
@@ -141,6 +144,33 @@ class ModalClient:
     @staticmethod
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _expire_stale_submission(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Fail queued records whose submission never obtained a FunctionCall id."""
+        if record.get("status") != "queued":
+            return record
+        call_id = self.job_store.get(f"call:{record['id']}") or record.get("call_id")
+        if call_id:
+            return record
+        created_at = record.get("created_at")
+        if not isinstance(created_at, str):
+            return record
+        try:
+            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError:
+            return record
+        age = (datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds()
+        if age < self.submission_stale_seconds:
+            return record
+        current = self._get_record(record["id"]) or record
+        if current.get("status") == "queued":
+            current["status"] = "failed"
+            current["error"] = (
+                "Job submission did not complete; the local Router or Modal submission "
+                "was interrupted before a remote call id was recorded"
+            )
+            self._save(current)
+        return current
 
     @staticmethod
     def _key(job_id: str) -> str:
@@ -315,6 +345,7 @@ class ModalClient:
                 value = self._get_record(job_id)
                 if not isinstance(value, dict):
                     continue
+                value = self._expire_stale_submission(value)
                 status = value.get("status")
                 if status == "queued":
                     queued += 1
@@ -346,7 +377,10 @@ class ModalClient:
 
         call_id = self.job_store.get(f"call:{record['id']}") or record.get("call_id")
         if not call_id:
-            return record
+            refreshed = self._expire_stale_submission(record)
+            if refreshed.get("status") not in ACTIVE_STATUSES:
+                self._remove_active_job(refreshed["id"])
+            return refreshed
 
         try:
             result = modal.FunctionCall.from_id(call_id).get(timeout=0)
@@ -396,7 +430,11 @@ class ModalClient:
                     self._warm_call = None
                 else:
                     self._warm_error = None
-                    return False
+                    # A completed ready() call only proves that an older
+                    # deployment was healthy at that moment. Drop the completed
+                    # call and issue a fresh probe so a later stopped/recreated
+                    # deployment cannot leave /health reporting stale "ready".
+                    self._warm_call = None
             try:
                 self._warm_call = self.ready_fn.spawn()
             except Exception as exc:
