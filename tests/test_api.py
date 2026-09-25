@@ -47,10 +47,26 @@ class FakeControl:
     def queue_stats(self):
         queued = sum(job["status"] == "queued" for job in self.jobs.values())
         running = sum(job["status"] == "running" for job in self.jobs.values())
-        return {"queued": queued, "running": running, "active": queued + running, "capacity": 4}
+        return {
+            "queued": queued,
+            "running": running,
+            "active": queued + running,
+            "capacity": 256,
+            "pending_capacity": 256,
+            "execution_capacity": 1,
+            "available": queued + running < 256,
+        }
 
     def queue_snapshot(self):
-        return {"queued": 0, "running": 0, "active": 0, "capacity": 4, "available": True}
+        return {
+            "queued": 0,
+            "running": 0,
+            "active": 0,
+            "capacity": 256,
+            "pending_capacity": 256,
+            "execution_capacity": 1,
+            "available": True,
+        }
 
     def maintain_keep_warm(self):
         return False
@@ -299,13 +315,13 @@ def test_keep_warm_loop_survives_transient_failure(monkeypatch, tmp_path):
 def test_queue_full_maps_to_http_429(client):
     test_client, control = client
     control.create_job = lambda request: (_ for _ in ()).throw(
-        QueueFullError("GPU queue is full (4/4)")
+        QueueFullError("Pending queue is full (256/256)")
     )
 
     response = test_client.post("/api/jobs", json={"prompt": "queued"})
 
     assert response.status_code == 429
-    assert "GPU queue is full" in response.json()["detail"]
+    assert "Pending queue is full" in response.json()["detail"]
 
 
 def test_validation():

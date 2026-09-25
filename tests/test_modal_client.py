@@ -90,7 +90,8 @@ def make_client(tmp_path: Path):
     control.gpu_idle_seconds = 600
     control.keep_gpu_warm = False
     control.warm_lease_seconds = 90
-    control.max_queue_size = 4
+    control.max_queue_size = 256
+    control.gpu_concurrency = 1
     control._warm_lease_until = 0.0
     control.cache_root = tmp_path
     control.output_cache = tmp_path / "outputs"
@@ -113,7 +114,9 @@ def make_client(tmp_path: Path):
         "running": 0,
         "active": 0,
         "capacity": control.max_queue_size,
-        "available": False,
+        "pending_capacity": control.max_queue_size,
+        "execution_capacity": control.gpu_concurrency,
+        "available": True,
     }
     control._active_index_initialized = False
     control.job_store.put(control._active_jobs_key(), [])
@@ -419,20 +422,30 @@ def test_active_job_keeps_gpu_warm_after_studio_lease_expires(tmp_path):
     assert idle_windows[-1] == control.gpu_idle_seconds
 
 
-def test_queue_capacity_is_enforced_before_spawn(tmp_path):
+def test_pending_queue_capacity_is_independent_from_gpu_concurrency(tmp_path):
     control = make_client(tmp_path)
-    control.max_queue_size = 2
-    first = control.create_job(GenerateRequest(prompt="first"))
-    control.create_job(GenerateRequest(prompt="second"))
+    control.max_queue_size = 12
+    control.gpu_concurrency = 1
 
-    with pytest.raises(QueueFullError, match="GPU queue is full"):
-        control.create_job(GenerateRequest(prompt="third"))
+    jobs = [control.create_job(GenerateRequest(prompt=f"job-{index}")) for index in range(12)]
 
+    assert all(job["status"] == "queued" for job in jobs)
+    stats = control.queue_stats()
+    assert stats["active"] == 12
+    assert stats["capacity"] == 12
+    assert stats["pending_capacity"] == 12
+    assert stats["execution_capacity"] == 1
+    assert stats["available"] is False
+
+    with pytest.raises(QueueFullError, match="Pending queue is full"):
+        control.create_job(GenerateRequest(prompt="overflow"))
+
+    first = jobs[0]
     record = control.job_store.get(f"job:{first['id']}")
     record["status"] = "completed"
     control.job_store.put(f"job:{first['id']}", record)
-    third = control.create_job(GenerateRequest(prompt="third"))
-    assert third["status"] == "queued"
+    replacement = control.create_job(GenerateRequest(prompt="replacement"))
+    assert replacement["status"] == "queued"
 
 
 def test_interrupt_without_id_prefers_running_job(tmp_path, monkeypatch):

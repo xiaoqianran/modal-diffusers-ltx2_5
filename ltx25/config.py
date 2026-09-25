@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     input_dir: Path = Path("inputs")
     lora_dir: Path = Path("loras")
     max_upload_size_mb: int = 500
-    max_queue_size: int = 4
+    # Persistent backlog admission limit. GPU execution remains strictly
+    # serial in modal_app.py (max_containers=1, max_inputs=1).
+    max_queue_size: int = 256
     history_db: Path = Path("outputs/history.sqlite3")
     # OpenAI-compatible chat-completions endpoint used only for prompt rewriting.
     llm_base_url: str | None = None

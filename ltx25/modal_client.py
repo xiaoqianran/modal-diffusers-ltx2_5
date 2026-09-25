@@ -62,7 +62,12 @@ class ModalClient:
             "", "0", "false", "no", "off"
         }
         self.warm_lease_seconds = max(30, int(os.environ.get("LTX25_WARM_LEASE_SECONDS", "90")))
-        self.max_queue_size = max(1, int(os.environ.get("MAX_QUEUE_SIZE", "4")))
+        # Backlog admission is intentionally separate from GPU execution
+        # concurrency. The Modal DirectorWorker is max_containers=1 with
+        # @modal.concurrent(max_inputs=1), so jobs are consumed serially even
+        # when hundreds are accepted into the persistent queue.
+        self.max_queue_size = max(1, int(os.environ.get("MAX_QUEUE_SIZE", "256")))
+        self.gpu_concurrency = 1
         self._warm_lease_until = time.monotonic() + self.warm_lease_seconds if self.keep_gpu_warm else 0.0
 
         self.cache_root = Path(os.environ.get("LTX25_LOCAL_CACHE", ".ltx25-cache")).resolve()
@@ -98,7 +103,11 @@ class ModalClient:
             "running": 0,
             "active": 0,
             "capacity": self.max_queue_size,
-            "available": False,
+            "pending_capacity": self.max_queue_size,
+            "execution_capacity": self.gpu_concurrency,
+            # This flag describes local backlog admission, not remote GPU
+            # readiness. An empty fresh Router can accept work immediately.
+            "available": True,
         }
         # Modal object handles are intentionally cheap/lazy at construction
         # time. Do not hydrate the Dict here: importing the local API must work
@@ -320,7 +329,9 @@ class ModalClient:
             "running": running,
             "active": queued + running,
             "capacity": self.max_queue_size,
-            "available": True,
+            "pending_capacity": self.max_queue_size,
+            "execution_capacity": self.gpu_concurrency,
+            "available": (queued + running) < self.max_queue_size,
         }
         self._queue_snapshot = stats
         return stats
@@ -481,7 +492,7 @@ class ModalClient:
             stats = self.queue_stats()
             if stats["active"] >= self.max_queue_size:
                 raise QueueFullError(
-                    f"GPU queue is full ({stats['active']}/{self.max_queue_size}); retry after a job finishes"
+                    f"Pending queue is full ({stats['active']}/{self.max_queue_size}); retry after a job finishes"
                 )
             session_number = request.session_number or self.create_session()
             request.session_number = session_number
