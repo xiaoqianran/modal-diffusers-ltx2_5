@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { modeLabel } from '../model/modes.js'
 import { describeJob, describePerformance, selectJobActions } from '../model/selectors.js'
@@ -12,15 +12,22 @@ const emit = defineEmits(['back', 'kind', 'page', 'filter', 'select', 'reuse', '
 
 const search = ref(props.assets.query || '')
 let searchTimer = null
+let suppressNextSearch = false
 
 watch(() => props.assets.query, value => {
   if (value !== search.value) search.value = value || ''
 })
 
 watch(search, value => {
+  if (suppressNextSearch) {
+    suppressNextSearch = false
+    return
+  }
   clearTimeout(searchTimer)
   searchTimer = setTimeout(() => emit('filter', { query: value }), 250)
 })
+
+onBeforeUnmount(() => clearTimeout(searchTimer))
 
 const pageNumbers = computed(() => {
   const current = Number(props.assets.page || 1)
@@ -66,6 +73,8 @@ function stopPreview(event) {
 }
 
 function clearFilters() {
+  clearTimeout(searchTimer)
+  suppressNextSearch = true
   search.value = ''
   emit('filter', { query: '', aspect: 'all', size: 'all', sort: 'newest' })
 }

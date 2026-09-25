@@ -174,6 +174,7 @@ export function useStudioRuntime(options = {}) {
   const notice = reactive({ text: '', state: '' })
 
   let pendingSeq = 0
+  let assetRequestSeq = 0
   let disposed = false
   let warmLeaseTimer = null
 
@@ -321,6 +322,7 @@ export function useStudioRuntime(options = {}) {
       assets.pages = 1
       return
     }
+    const requestSeq = ++assetRequestSeq
     assets.loading = true
     try {
       const result = await client.listGeneratedAssets(
@@ -335,15 +337,17 @@ export function useStudioRuntime(options = {}) {
           size: assets.size,
         },
       )
+      if (requestSeq !== assetRequestSeq) return
       assets.kind = kind
       assets.items = result.items || []
       assets.total = Number(result.total || 0)
       assets.page = Number(result.page || 1)
       assets.pages = Number(result.pages || 1)
     } catch (error) {
+      if (requestSeq !== assetRequestSeq) return
       setNotice(`Assets 加载失败：${error.message}`, 'error')
     } finally {
-      assets.loading = false
+      if (requestSeq === assetRequestSeq) assets.loading = false
     }
   }
 

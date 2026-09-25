@@ -299,6 +299,41 @@ await test('assets are paged independently from job history', async () => {
   assert.equal(runtime.assets.page, 1)
 })
 
+await test('stale asset responses cannot overwrite a newer filter request', async () => {
+  const pendingRequests = []
+  const runtime = makeRuntime(fakeApi({
+    listGeneratedAssets: async (_session, options = {}) => new Promise(resolve => {
+      pendingRequests.push({ options, resolve })
+    }),
+  }))
+  runtime.sessionNumber.value = 1
+
+  const older = runtime.refreshAssets({ kind: 'image', page: 1 })
+  const newer = runtime.refreshAssets({ kind: 'video', page: 1 })
+
+  pendingRequests[1].resolve({
+    items: [JOB({ id: 'video-new', status: 'completed', video_url: '/new.mp4' })],
+    total: 1,
+    page: 1,
+    page_size: 24,
+    pages: 1,
+  })
+  await newer
+
+  pendingRequests[0].resolve({
+    items: [JOB({ id: 'image-old', status: 'completed', image_url: '/old.png' })],
+    total: 1,
+    page: 1,
+    page_size: 24,
+    pages: 1,
+  })
+  await older
+
+  assert.equal(runtime.assets.kind, 'video')
+  assert.equal(runtime.assets.items[0].id, 'video-new')
+  assert.equal(runtime.assets.loading, false)
+})
+
 await test('stage, takes and queue are projections of one list', async () => {
   const runtime = makeRuntime(fakeApi({
     listJobs: async () => [

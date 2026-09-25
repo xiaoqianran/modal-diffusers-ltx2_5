@@ -730,7 +730,7 @@ class ModalClient:
             raise ActiveJobError("A queued or running job cannot be deleted")
 
         self.remove_output(f"{job_id}.mp4")
-        for prefix in ("t2i", "refine", "ref2i"):
+        for prefix in ("t2i", "qwen-edit", "refine", "ref2i"):
             self.remove_output(f"{prefix}_{job_id}.png")
         self._remove_job_from_index(record["session_number"], job_id)
         self.job_store.pop(self._key(job_id), None)
