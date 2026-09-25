@@ -92,7 +92,7 @@ function fakeApi(overrides = {}) {
   const record = (name, value) => { calls.push([name, value]) }
 
   const base = {
-    health: async () => ({ warmup: { state: 'ready', gpu: 'MOCK GPU' } }),
+    health: async () => ({ warmup: { state: 'ready', gpu: 'MOCK GPU', engines: ['ltx', 'qwen'] } }),
     warm: async () => { record('warm', true); return { status: 'warming' } },
     unload: async options => { record('unload', options); return { result: 'ok' } },
     loras: async () => [],
@@ -234,6 +234,30 @@ await test('setMode normalises controls the backend would override', () => {
   runtime.setMode('ref2i')
   assert.equal(runtime.draft.upscale, false, 'ref2i is single-stage')
   assert.equal(runtime.draft.numFrames, 49, 'ref2i pins its frame count')
+})
+
+await test('engine selection follows the active capability', () => {
+  const runtime = makeRuntime()
+  runtime.setMode('t2i')
+  assert.equal(runtime.setEngine('qwen'), true)
+  assert.equal(runtime.draft.engine, 'qwen')
+  assert.equal(runtime.draft.steps, 40)
+  assert.equal(runtime.draft.guidanceScale, 1)
+
+  runtime.setMode('i2v')
+  assert.equal(runtime.draft.engine, 'auto', 'unsupported Qwen selection should fall back')
+  assert.equal(runtime.setEngine('qwen'), false)
+  assert.equal(runtime.setEngine('ltx'), true)
+  assert.equal(runtime.draft.engine, 'ltx')
+})
+
+await test('engine health is projected independently', async () => {
+  const runtime = makeRuntime(fakeApi({
+    health: async () => ({ warmup: { state: 'ready', gpu: 'ONE GPU', engines: ['ltx'] } }),
+  }))
+  await runtime.refreshHealth()
+  assert.equal(runtime.engineStates.value.ltx.state, 'ready')
+  assert.equal(runtime.engineStates.value.qwen.state, 'unavailable')
 })
 
 await test('stage, takes and queue are projections of one list', async () => {

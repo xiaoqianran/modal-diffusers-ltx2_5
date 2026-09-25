@@ -534,7 +534,12 @@ class Handler(BaseHTTPRequestHandler):
                 "keep_gpu_warm": keep_gpu_warm,
                 "gpu_idle_seconds": 600,
                 "warmup": (
-                    {"state": "ready", "gpu": "MOCK RTX PRO 6000", "allocated_gb": 19.4}
+                    {
+                        "state": "ready",
+                        "gpu": "MOCK RTX PRO 6000",
+                        "allocated_gb": 19.4,
+                        "engines": ["ltx", "qwen"],
+                    }
                     if keep_gpu_warm else {"state": "disabled"}
                 ),
             })

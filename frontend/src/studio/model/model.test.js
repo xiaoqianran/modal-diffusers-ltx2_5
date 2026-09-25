@@ -10,8 +10,16 @@
 import assert from 'node:assert/strict'
 import {
   MODE_CAPABILITIES, MODE_GROUPS, DEFAULT_MODE, STILL_MODES, DERIVED_MODES,
-  getModeCapabilities, modeLabel, modeTag, isStillMode, groupOfMode, modesInGroup,
+  getModeCapabilities, modeLabel, modeIntentLabel, modeTag, isStillMode, groupOfMode, modesInGroup,
 } from './modes.js'
+import {
+  attachmentSlotsForDraft, engineStateFromHealth, frameOptionsForCapability,
+  keyframeSlotsForDraft, ratioOptionsForDraft,
+} from './composer.js'
+import {
+  ADVANCED_WORKFLOWS, CREATION_SURFACES, WORKFLOW_GROUPS,
+  creationSurfaceForMode, defaultModeForSurface,
+} from './workflows.js'
 import {
   JOB_STATUS, ACTIVE_STATUSES, STATUS_FILTERS, isActive, isTerminal, hasMedia,
   isPending, statusLabel, makePendingJob, mergePendingJobs, buildQueueIndex,
@@ -158,6 +166,57 @@ test('iclora, retake and extend pin the decoder to VAE', () => {
 test('ref2i pins its frame count and whitelist', () => {
   assert.equal(MODE_CAPABILITIES.ref2i.fixedFrames, 49)
   assert.deepEqual(MODE_CAPABILITIES.ref2i.validFrames, [25, 41, 49])
+})
+
+test('product intent labels stay separate from technical mode labels', () => {
+  assert.equal(modeLabel('i2v'), '图片 → 视频')
+  assert.equal(modeIntentLabel('i2v'), 'Animate image')
+  assert.equal(modeIntentLabel('retake'), 'Retake')
+})
+
+test('engine options are capability driven', () => {
+  assert.deepEqual(MODE_CAPABILITIES.t2i.allowedEngines, ['auto', 'ltx', 'qwen'])
+  assert.deepEqual(MODE_CAPABILITIES.image_edit.allowedEngines, ['qwen'])
+  assert.deepEqual(MODE_CAPABILITIES.i2v.allowedEngines, ['auto', 'ltx'])
+})
+
+test('creation surfaces expose artifact types instead of derived actions', () => {
+  assert.deepEqual(CREATION_SURFACES.map(item => item.id), ['image', 'video', 'audio'])
+  assert.equal(defaultModeForSurface('image'), 't2i')
+  assert.equal(defaultModeForSurface('video'), 't2av')
+  assert.equal(creationSurfaceForMode('t2i'), 'image')
+  assert.equal(creationSurfaceForMode('retake'), 'video')
+  const pickerModes = WORKFLOW_GROUPS.flatMap(group => group.modes)
+  for (const derived of ['retake', 'extend', 'refine_image']) {
+    assert.equal(pickerModes.includes(derived), false, derived + ' should be an artifact action')
+  }
+  assert.deepEqual(ADVANCED_WORKFLOWS.map(item => item.mode), [
+    'keyframe_interpolation', 'dfr', 'condition', 'iclora',
+  ])
+})
+
+test('composer projections come from capabilities', () => {
+  const qwenDraft = { mode: 't2i', engine: 'auto', loraId: null }
+  assert.equal(ratioOptionsForDraft(qwenDraft)[0].value, '1024x1024')
+  assert.deepEqual(frameOptionsForCapability(MODE_CAPABILITIES.ref2i).map(item => item.value), [25, 41, 49])
+  assert.deepEqual(
+    attachmentSlotsForDraft(MODE_CAPABILITIES.i2v, { mode: 'i2v' }, {}).map(item => item.slot),
+    ['first'],
+  )
+  assert.deepEqual(
+    keyframeSlotsForDraft(
+      MODE_CAPABILITIES.keyframe_interpolation,
+      { reference0: asset('a', 'image'), reference1: asset('b', 'image') },
+    ).map(item => item.index),
+    [0, 1],
+  )
+})
+
+test('engine health reports each resident engine independently', () => {
+  const health = { warmup: { state: 'ready', engines: ['ltx'], gpu: 'GPU' } }
+  assert.deepEqual(engineStateFromHealth(health, 'ltx'), { state: 'ready', label: 'Ready' })
+  assert.deepEqual(engineStateFromHealth(health, 'qwen'), { state: 'unavailable', label: 'Unavailable' })
+  assert.equal(engineStateFromHealth({ warmup: { state: 'warming' } }, 'ltx').state, 'loading')
 })
 
 // -------------------------------------------------------------- jobs.js

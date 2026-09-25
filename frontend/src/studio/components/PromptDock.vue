@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { modeLabel } from '../model/modes.js'
+import { modeIntentLabel } from '../model/modes.js'
 import { engineLabel, expectedEngine, WORKFLOW_GROUPS } from '../model/workflows.js'
 import ReferenceTray from './ReferenceTray.vue'
 
@@ -34,10 +34,10 @@ const durationLabel = computed(() => {
     @submit.prevent="emit('submit')"
   >
     <div v-if="sourceHandoff || attachmentSlots.length" class="composer-input-slot">
-      <div v-if="sourceHandoff" class="workflow-handoff" aria-label="Qwen image to LTX video workflow">
-        <span class="handoff-source">Qwen Image</span>
+      <div v-if="sourceHandoff" class="workflow-handoff" aria-label="Source image to LTX video workflow">
+        <span class="handoff-source">Source image</span>
         <span class="handoff-arrow" aria-hidden="true">→</span>
-        <span class="handoff-target">LTX 2.5 · Image to Video</span>
+        <span class="handoff-target">Animate with LTX-2.5</span>
       </div>
       <ReferenceTray
         v-else
@@ -62,10 +62,10 @@ const durationLabel = computed(() => {
     </div>
     <div class="prompt-summary">
       <label class="composer-chip prompt-workflow workflow-chip">
-        <span class="sr-only">Workflow</span>
+        <span class="sr-only">Creative intent</span>
         <select :value="draft.mode" @change="emit('mode', $event.target.value)">
           <optgroup v-for="group in WORKFLOW_GROUPS" :key="group.id" :label="group.label">
-            <option v-for="mode in group.modes" :key="mode" :value="mode">{{ modeLabel(mode) }}</option>
+            <option v-for="mode in group.modes" :key="mode" :value="mode">{{ modeIntentLabel(mode) }}</option>
           </optgroup>
         </select>
       </label>

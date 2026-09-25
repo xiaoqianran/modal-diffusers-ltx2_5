@@ -2591,17 +2591,6 @@
 /* 2026-09-26 typography normalization
    Functional UI text stays >= 10px. The scale mirrors modern creative tools:
    metadata 10-11, controls 12-13, body/prompt 13-14, section titles 16-24. */
-:root {
-  --text-micro: 10px;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-ui: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 24px;
-}
-
 .studio-v3 small,
 .studio-v3 .eyebrow {
   font-size: var(--text-micro);
@@ -2860,5 +2849,302 @@
 
   .studio-v3 .rail-section-link span {
     font-size: var(--text-xs);
+  }
+}
+
+
+/* Frontend V4 — artifact-first navigation and compact runtime details */
+
+.creation-surfaces {
+  display: grid;
+  gap: 6px;
+  padding: 2px 8px 14px;
+}
+
+.creation-surface {
+  width: 100%;
+  min-width: 0;
+  min-height: 62px;
+  padding: 9px 9px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #89929d;
+  text-align: left;
+  transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+
+.creation-surface:hover {
+  border-color: rgba(255,255,255,.06);
+  background: rgba(255,255,255,.024);
+  color: #cbd1d7;
+}
+
+.creation-surface.active {
+  border-color: rgba(200,241,105,.12);
+  background: linear-gradient(90deg, rgba(200,241,105,.07), rgba(255,255,255,.012));
+  color: #eef2f4;
+  box-shadow: inset 2px 0 0 rgba(200,241,105,.8);
+}
+
+.creation-surface-icon {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 7px;
+  background: rgba(255,255,255,.018);
+  color: #77818c;
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
+.creation-surface.active .creation-surface-icon {
+  border-color: rgba(200,241,105,.14);
+  color: var(--accent);
+  background: rgba(200,241,105,.045);
+}
+
+.creation-surface-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.creation-surface-copy strong {
+  color: inherit;
+  font-size: var(--text-sm);
+  font-weight: 610;
+}
+
+.creation-surface-copy small {
+  overflow: hidden;
+  color: #5f6873;
+  font-size: var(--text-micro);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+}
+
+.creation-surface.active small {
+  color: #7d8870;
+}
+
+.workflow-tool-section {
+  padding: 11px 8px 14px;
+  border-top: 1px solid rgba(255,255,255,.05);
+  display: grid;
+  gap: 3px;
+}
+
+.rail-caption {
+  padding: 0 8px 6px;
+  color: #59626d;
+  font-size: var(--text-micro);
+  font-weight: 720;
+  letter-spacing: .13em;
+}
+
+.rail-tool {
+  min-width: 0;
+  min-height: 39px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  display: grid;
+  gap: 1px;
+  color: #717b86;
+  text-align: left;
+}
+
+.rail-tool:hover {
+  background: rgba(255,255,255,.022);
+  color: #aeb6bf;
+}
+
+.rail-tool.active {
+  border-color: rgba(255,255,255,.055);
+  background: rgba(255,255,255,.035);
+  color: #e0e5e9;
+}
+
+.rail-tool > span {
+  font-size: var(--text-xs);
+  font-weight: 570;
+}
+
+.rail-tool small {
+  overflow: hidden;
+  color: #555f6a;
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-menu {
+  position: relative;
+}
+
+.runtime-pill {
+  min-width: 126px;
+  min-height: 36px;
+  padding: 0 10px;
+  gap: 7px;
+  justify-content: flex-start;
+  background: rgba(255,255,255,.018);
+}
+
+.runtime-pill > span:not(.runtime-dot) {
+  color: #858f99;
+  font-size: var(--text-xs);
+}
+
+.runtime-pill > strong {
+  margin-left: auto;
+  color: #c4cbd1;
+  font-size: var(--text-xs);
+  font-weight: 620;
+}
+
+.runtime-pill .runtime-dot {
+  flex: 0 0 auto;
+}
+
+.runtime-pill[data-state="ready"] .runtime-dot,
+.runtime-pill[data-state="generating"] .runtime-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(200,241,105,.07);
+}
+
+.runtime-pill[data-state="warming"] .runtime-dot,
+.runtime-pill[data-state="preparing"] .runtime-dot,
+.runtime-pill[data-state="queued"] .runtime-dot {
+  background: #e8c86c;
+}
+
+.runtime-popover {
+  top: calc(100% + 9px);
+  right: 0;
+  width: 286px;
+  padding: 8px;
+}
+
+.runtime-popover-head {
+  min-height: 52px;
+  padding: 7px 8px 9px;
+  border-bottom: 1px solid rgba(255,255,255,.055);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runtime-popover-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.runtime-popover-head strong {
+  color: #dce1e5;
+  font-size: var(--text-ui);
+  font-weight: 620;
+}
+
+.runtime-refresh {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 7px;
+  background: rgba(255,255,255,.025);
+  color: #9ca5ae;
+  font-size: var(--text-xs);
+}
+
+.runtime-detail-row {
+  min-height: 38px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runtime-detail-row + .runtime-detail-row {
+  border-top: 1px solid rgba(255,255,255,.035);
+}
+
+.runtime-detail-row > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #78828d;
+  font-size: var(--text-xs);
+}
+
+.runtime-detail-row > strong {
+  max-width: 150px;
+  overflow: hidden;
+  color: #b9c0c7;
+  font-size: var(--text-xs);
+  font-weight: 580;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #59626d;
+}
+
+.runtime-state-dot[data-state="ready"] {
+  background: var(--accent);
+}
+
+.runtime-state-dot[data-state="loading"],
+.runtime-state-dot[data-state="warming"] {
+  background: #e8c86c;
+}
+
+.runtime-state-dot[data-state="error"],
+.runtime-state-dot[data-state="unavailable"] {
+  background: var(--danger);
+}
+
+.inspector-identity h2 {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 1280px) {
+  .creation-surface {
+    grid-template-columns: 22px minmax(0, 1fr);
+    padding-inline: 7px;
+  }
+
+  .creation-surface-icon {
+    width: 22px;
+    height: 22px;
+  }
+
+  .runtime-pill {
+    min-width: 108px;
+  }
+}
+
+@media (max-width: 1020px) {
+  .runtime-pill > span:not(.runtime-dot) {
+    display: none;
+  }
+
+  .runtime-pill {
+    min-width: 72px;
   }
 }

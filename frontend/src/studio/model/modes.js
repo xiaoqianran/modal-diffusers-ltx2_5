@@ -14,6 +14,7 @@
 /**
  * @typedef {object} ModeCapability
  * @property {string}   label          Human label used in the UI.
+ * @property {string}   intentLabel    Product-facing action label.
  * @property {'video'|'image'|'audio'} output What the mode produces.
  * @property {MediaKind} input         Primary visual input, if any.
  * @property {boolean}  needsLast      Requires a distinct last-frame image.
@@ -22,6 +23,7 @@
  * @property {boolean}  sourceIsVideo  Reference must specifically be a video.
  * @property {boolean}  singleReference Uses exactly one reference at index 1 (IC-LoRA).
  * @property {boolean}  multiReference Accepts ordered image references (Qwen, max 10).
+ * @property {boolean}  orderedKeyframes References also expose timeline positions.
  * @property {boolean}  qwenOnly       This mode has no LTX execution path.
  * @property {boolean}  supportsAutoDuration Uses the LTX-2.5 DurationHead.
  * @property {boolean}  supportsHdr     Supports HDR/EXR input/output contract.
@@ -31,6 +33,7 @@
  * @property {boolean}  forcesUpscale  Always upsamples regardless of the toggle.
  * @property {number}   [fixedFrames]  Overrides the frame count.
  * @property {string[]} [rangeFields]  Extra numeric fields this mode needs.
+ * @property {string[]} allowedEngines Engines the composer may expose.
  * @property {string}   group          Rail group this mode belongs to.
  */
 
@@ -59,6 +62,7 @@ export const MODE_GROUPS = [
 
 const BASE = {
   label: '',
+  intentLabel: '',
   output: 'video',
   input: null,
   needsLast: false,
@@ -67,6 +71,7 @@ const BASE = {
   sourceIsVideo: false,
   singleReference: false,
   multiReference: false,
+  orderedKeyframes: false,
   qwenOnly: false,
   supportsAutoDuration: false,
   supportsHdr: false,
@@ -75,22 +80,24 @@ const BASE = {
   supportsPixelUpscale: true,
   forcesUpscale: false,
   rangeFields: [],
+  allowedEngines: ['auto', 'ltx'],
   group: 'create',
 }
 
 /** @type {Record<string, ModeCapability>} */
 export const MODE_CAPABILITIES = {
-  t2av: { ...BASE, label: '文本 → 视频', input: null, group: 'create' },
+  t2av: { ...BASE, label: '文本 → 视频', intentLabel: 'Generate video', input: null, group: 'create' },
 
-  i2v: { ...BASE, label: '图片 → 视频', input: 'image', group: 'create' },
+  i2v: { ...BASE, label: '图片 → 视频', intentLabel: 'Animate image', input: 'image', group: 'create' },
 
-  flf2v: { ...BASE, label: '首尾帧 → 视频', input: 'image', needsLast: true, group: 'create' },
+  flf2v: { ...BASE, label: '首尾帧 → 视频', intentLabel: 'First & last frame', input: 'image', needsLast: true, group: 'create' },
 
-  a2v: { ...BASE, label: '音频 → 视频', needsAudio: true, group: 'create' },
+  a2v: { ...BASE, label: '音频 → 视频', intentLabel: 'Audio-driven video', needsAudio: true, group: 'create' },
 
   t2a: {
     ...BASE,
     label: '文本 → 音频',
+    intentLabel: 'Generate audio',
     output: 'audio',
     supportsAutoDuration: true,
     supportsUpscale: false,
@@ -102,8 +109,10 @@ export const MODE_CAPABILITIES = {
   keyframe_interpolation: {
     ...BASE,
     label: '关键帧插值',
+    intentLabel: 'Keyframe interpolation',
     output: 'video',
     multiReference: true,
+    orderedKeyframes: true,
     supportsHdr: true,
     supportsUpscale: false,
     supportsPixelUpscale: false,
@@ -114,8 +123,10 @@ export const MODE_CAPABILITIES = {
   dfr: {
     ...BASE,
     label: 'DFR 生产质量',
+    intentLabel: 'DFR production',
     output: 'video',
     multiReference: true,
+    orderedKeyframes: true,
     supportsAutoDuration: true,
     fixedSchedule: true,
     supportsUpscale: false,
@@ -127,7 +138,9 @@ export const MODE_CAPABILITIES = {
   t2i: {
     ...BASE,
     label: '文本 → 图片',
+    intentLabel: 'Generate image',
     output: 'image',
+    allowedEngines: ['auto', 'ltx', 'qwen'],
     forcesUpscale: true,
     group: 'create',
   },
@@ -135,9 +148,11 @@ export const MODE_CAPABILITIES = {
   image_edit: {
     ...BASE,
     label: 'Qwen 图片编辑',
+    intentLabel: 'Edit image',
     output: 'image',
     multiReference: true,
     qwenOnly: true,
+    allowedEngines: ['qwen'],
     supportsPixelUpscale: false,
     forcesUpscale: true,
     group: 'create',
@@ -146,6 +161,7 @@ export const MODE_CAPABILITIES = {
   ref2i: {
     ...BASE,
     label: '图片 → 图片',
+    intentLabel: 'Reference to image',
     output: 'image',
     input: 'image',
     // ref2i is single-stage at base resolution: the backend force-disables
@@ -162,6 +178,7 @@ export const MODE_CAPABILITIES = {
   refine_image: {
     ...BASE,
     label: '精修图片',
+    intentLabel: 'Refine image',
     output: 'image',
     input: 'image',
     supportsPixelUpscale: false,
@@ -172,6 +189,7 @@ export const MODE_CAPABILITIES = {
   retake: {
     ...BASE,
     label: '重拍片段',
+    intentLabel: 'Retake',
     needsSource: true,
     sourceIsVideo: true,
     // Single-stage masked denoise at source resolution; decoder is pinned to VAE.
@@ -185,6 +203,7 @@ export const MODE_CAPABILITIES = {
   extend: {
     ...BASE,
     label: '延长片段',
+    intentLabel: 'Extend',
     needsSource: true,
     sourceIsVideo: true,
     supportsUpscale: false,
@@ -197,6 +216,7 @@ export const MODE_CAPABILITIES = {
   condition: {
     ...BASE,
     label: '多条件引导',
+    intentLabel: 'Conditions',
     needsSource: true,
     group: 'control',
   },
@@ -204,6 +224,7 @@ export const MODE_CAPABILITIES = {
   iclora: {
     ...BASE,
     label: 'IC-LoRA 参考',
+    intentLabel: 'IC-LoRA reference',
     needsSource: true,
     singleReference: true,
     // The backend force-disables upscale, temporal upscale and switches the
@@ -236,6 +257,11 @@ export function isKnownMode(mode) {
 
 export function modeLabel(mode) {
   return getModeCapabilities(mode).label
+}
+
+export function modeIntentLabel(mode) {
+  const capability = getModeCapabilities(mode)
+  return capability.intentLabel || capability.label
 }
 
 /** Short uppercase tag shown on cards ("T2AV", "I2V", …). */

@@ -21,6 +21,7 @@ import { createPoller, POLL_HEALTH_MS, POLL_HEALTH_WARMING_MS } from './polling.
 import { uploadFile } from './uploads.js'
 
 import { DEFAULT_MODE, STILL_MODES, getModeCapabilities } from '../model/modes.js'
+import { engineStateFromHealth } from '../model/composer.js'
 import { isActive, isPending, makePendingJob, mergePendingJobs } from '../model/jobs.js'
 import {
   selectStageJob, selectTakes, selectQueue, selectCounts, selectAvailableModes,
@@ -183,6 +184,10 @@ export function useStudioRuntime(options = {}) {
   const canSubmit = computed(() => problems.value.length === 0 && !busy.submitting)
 
   const gpuState = computed(() => health.value?.warmup?.state || 'unknown')
+  const engineStates = computed(() => ({
+    ltx: engineStateFromHealth(health.value, 'ltx'),
+    qwen: engineStateFromHealth(health.value, 'qwen'),
+  }))
   const gpuLabel = computed(() => {
     if (!health.value) return '离线'
     const warm = health.value.warmup || {}
@@ -322,8 +327,11 @@ export function useStudioRuntime(options = {}) {
   function setMode(mode) {
     const capability = getModeCapabilities(mode)
     draft.mode = mode
-    if (capability.qwenOnly) draft.engine = 'qwen'
-    else if (!['t2i', 'image_edit'].includes(mode) && draft.engine === 'qwen') draft.engine = 'auto'
+    if (!capability.allowedEngines.includes(draft.engine)) {
+      draft.engine = capability.allowedEngines.includes('auto')
+        ? 'auto'
+        : capability.allowedEngines[0]
+    }
     // Mirror the backend's normalisation so the controls reflect what is sent.
     if (!capability.supportsUpscale) {
       draft.upscale = false
@@ -334,6 +342,23 @@ export function useStudioRuntime(options = {}) {
     if (capability.forcesDecoder) draft.decoder = capability.forcesDecoder
     if (capability.fixedFrames) draft.numFrames = capability.fixedFrames
     if (!capability.supportsPixelUpscale) draft.upscaleMethod = 'latent'
+  }
+
+  function setEngine(engine) {
+    const capability = activeCapability.value
+    if (!capability.allowedEngines.includes(engine)) return false
+    draft.engine = engine
+    if (engine === 'qwen') {
+      draft.steps = 40
+      draft.guidanceScale = 1
+      draft.numFrames = 9
+      draft.fps = 24
+      draft.decoder = 'vae'
+      draft.loraId = null
+      draft.qwenTrueCfgScale = draft.qwenTrueCfgScale ?? 1
+      draft.qwenUseKvCache = true
+    }
+    return true
   }
 
   function updateDraft(patch) {
@@ -672,12 +697,12 @@ export function useStudioRuntime(options = {}) {
     // derived
     allJobs, stageJob, takes, queue, counts, availableModes, libraryJobs,
     stageActions, hasActiveWork, activeCapability, isStillMode,
-    problems, canSubmit, gpuState, gpuLabel,
+    problems, canSubmit, gpuState, gpuLabel, engineStates,
 
     // actions
     start, dispose, warmGpu, releaseGpu,
     refreshJobs, refreshHealth, refreshLoras, ensureSession,
-    setMode, updateDraft, updateRange, resetDraftInputs, clearAttachments,
+    setMode, setEngine, updateDraft, updateRange, resetDraftInputs, clearAttachments,
     attach, detach,
     selectJob, clearSelection,
     showView, setFilter, setSortOrder, toggleQueue,

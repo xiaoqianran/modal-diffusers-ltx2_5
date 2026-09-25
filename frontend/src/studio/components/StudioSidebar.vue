@@ -1,6 +1,13 @@
 <script setup>
-import { modeLabel } from '../model/modes.js'
-import { WORKFLOW_GROUPS, workflowGroupForMode } from '../model/workflows.js'
+import { computed } from 'vue'
+
+import { modeIntentLabel } from '../model/modes.js'
+import {
+  ADVANCED_WORKFLOWS,
+  CREATION_SURFACES,
+  creationSurfaceForMode,
+  defaultModeForSurface,
+} from '../model/workflows.js'
 
 const props = defineProps({
   currentMode: { type: String, required: true },
@@ -8,77 +15,63 @@ const props = defineProps({
 })
 const emit = defineEmits(['select-mode', 'history'])
 
-const createModes = WORKFLOW_GROUPS
-  .filter(group => ['image', 'video'].includes(group.id))
-  .flatMap(group => group.modes)
-const editModes = WORKFLOW_GROUPS.find(group => group.id === 'edit').modes
-const controlModes = WORKFLOW_GROUPS.find(group => group.id === 'advanced').modes
+const activeSurface = computed(() => creationSurfaceForMode(props.currentMode))
+const advancedActive = computed(() => (
+  ADVANCED_WORKFLOWS.some(item => item.mode === props.currentMode)
+))
 
-function sectionForMode(mode) {
-  const group = workflowGroupForMode(mode)
-  if (group === 'edit') return 'edit'
-  if (group === 'advanced') return 'control'
-  return 'create'
-}
-
-function modesForSection(section) {
-  if (section === 'create') return createModes
-  if (section === 'edit') return editModes
-  return controlModes
-}
-
-function chooseSection(section) {
-  if (section === sectionForMode(props.currentMode)) return
-  if (section === 'create') emit('select-mode', 't2i')
-  if (section === 'edit') emit('select-mode', 'retake')
-  if (section === 'control') emit('select-mode', 'keyframe_interpolation')
+function chooseSurface(surfaceId) {
+  emit('select-mode', defaultModeForSurface(surfaceId))
 }
 </script>
 
 <template>
-  <nav class="workflow-sidebar" aria-label="Create workflows">
+  <nav class="workflow-sidebar workflow-sidebar-v4" aria-label="Creative workspace">
     <div class="workflow-sidebar-head">
-      <span class="eyebrow">WORKSPACE</span>
+      <span class="eyebrow">CREATE</span>
     </div>
-    <div class="workflow-groups rail-sections">
-      <div
-        v-for="section in [
-          { id: 'create', label: 'Create', count: createModes.length },
-          { id: 'edit', label: 'Edit', count: editModes.length },
-          { id: 'control', label: 'Control', count: controlModes.length },
-        ]"
-        :key="section.id"
-        class="rail-section"
-        :class="{ expanded: !historyActive && sectionForMode(currentMode) === section.id }"
+
+    <div class="creation-surfaces">
+      <button
+        v-for="surface in CREATION_SURFACES"
+        :key="surface.id"
+        class="creation-surface"
+        :class="{ active: !historyActive && !advancedActive && activeSurface === surface.id }"
+        type="button"
+        @click="chooseSurface(surface.id)"
       >
-        <button
-          class="workflow-link rail-section-link"
-          :class="{ active: !historyActive && sectionForMode(currentMode) === section.id }"
-          type="button"
-          @click="chooseSection(section.id)"
-        >
-          <span>{{ section.label }}</span><small>{{ section.count }} workflows</small>
-        </button>
-        <div
-          v-if="!historyActive && sectionForMode(currentMode) === section.id"
-          class="rail-workflows"
-        >
-          <button
-            v-for="mode in modesForSection(section.id)"
-            :key="mode"
-            class="rail-workflow"
-            :class="{ active: currentMode === mode }"
-            type="button"
-            @click="emit('select-mode', mode)"
-          >
-            <span>{{ modeLabel(mode) }}</span>
-            <i aria-hidden="true">›</i>
-          </button>
-        </div>
-      </div>
+        <span class="creation-surface-icon" aria-hidden="true">
+          {{ surface.id === 'image' ? '□' : surface.id === 'video' ? '▷' : '⌁' }}
+        </span>
+        <span class="creation-surface-copy">
+          <strong>{{ surface.label }}</strong>
+          <small>{{ surface.description }}</small>
+        </span>
+      </button>
     </div>
+
+    <div class="workflow-tool-section">
+      <span class="rail-caption">TOOLS</span>
+      <button
+        v-for="item in ADVANCED_WORKFLOWS"
+        :key="item.mode"
+        class="rail-tool"
+        :class="{ active: !historyActive && currentMode === item.mode }"
+        type="button"
+        @click="emit('select-mode', item.mode)"
+      >
+        <span>{{ item.label }}</span>
+        <small>{{ modeIntentLabel(item.mode) }}</small>
+      </button>
+    </div>
+
     <div class="workflow-sidebar-foot">
-      <button class="workflow-link history-link" :class="{ active: historyActive }" type="button" @click="emit('history')">
+      <button
+        class="workflow-link history-link"
+        :class="{ active: historyActive }"
+        type="button"
+        @click="emit('history')"
+      >
         <span>History</span>
       </button>
     </div>

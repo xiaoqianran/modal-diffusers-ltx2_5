@@ -150,6 +150,7 @@ export const mockApi = {
       warmup: {
         state: warm ? 'ready' : 'cold',
         gpu: warm ? 'MOCK' : null,
+        engines: warm ? ['ltx', 'qwen'] : [],
       },
     }
   },
