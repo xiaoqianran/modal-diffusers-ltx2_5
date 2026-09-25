@@ -209,7 +209,10 @@ try {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     Write-Host 'Waiting for DirectorWorker to finish model startup...'
-    & $python -c @'
+    $readyScript = Join-Path ([System.IO.Path]::GetTempPath()) ("ltx25-ready-" + [guid]::NewGuid().ToString("N") + ".py")
+    $readyRc = 1
+    try {
+        @'
 import json
 import os
 import modal
@@ -222,13 +225,18 @@ worker = modal.Cls.from_name(
     worker_name,
     environment_name=environment_name,
 )()
-call = worker.ready.spawn()
-result = call.get(timeout=900)
+result = worker.ready.remote()
 print("[READY] " + json.dumps(result, default=str))
-'@
-    if ($LASTEXITCODE -ne 0) {
+'@ | Set-Content -LiteralPath $readyScript -Encoding UTF8
+        & $python $readyScript
+        $readyRc = $LASTEXITCODE
+    }
+    finally {
+        Remove-Item $readyScript -Force -ErrorAction SilentlyContinue
+    }
+    if ($readyRc -ne 0) {
         Write-Error 'Modal deploy completed, but DirectorWorker did not become ready.'
-        exit $LASTEXITCODE
+        exit $readyRc
     }
     Write-Host 'DirectorWorker is ready.'
 }
