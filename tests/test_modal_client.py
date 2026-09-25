@@ -112,6 +112,18 @@ def make_client(tmp_path: Path):
     return control
 
 
+def test_list_loras_treats_missing_modal_directory_as_empty(tmp_path):
+    control = make_client(tmp_path)
+
+    class MissingModalDirectoryVolume(Volume):
+        def iterdir(self, path, recursive=False):
+            raise modal_client_module.modal.exception.NotFoundError("No such file or directory")
+
+    control.state_volume = MissingModalDirectoryVolume()
+
+    assert control.list_loras() == []
+
+
 def test_constructor_does_not_hydrate_modal_state(monkeypatch, tmp_path):
     class NoIoStore:
         def get(self, *_args, **_kwargs):

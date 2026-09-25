@@ -877,7 +877,7 @@ class ModalClient:
     def list_loras(self) -> list[LoraResponse]:
         try:
             entries = list(self.state_volume.iterdir("loras", recursive=False))
-        except FileNotFoundError:
+        except (FileNotFoundError, modal.exception.NotFoundError):
             entries = []
 
         items: list[LoraResponse] = []
