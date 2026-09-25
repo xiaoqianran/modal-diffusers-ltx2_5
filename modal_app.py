@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import modal
 
 APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
+MODAL_ENVIRONMENT = os.environ.get("LTX25_MODAL_ENVIRONMENT", "main")
 MODEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_MODEL_VOLUME", "ltx25-models")
 STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
 KERNEL_VOLUME_NAME = os.environ.get("LTX25_MODAL_KERNEL_VOLUME", "ltx25-kernels")
@@ -47,12 +48,32 @@ QWEN_IMAGE21_MODEL_ID = "Qwen/Qwen-Image-2.1"
 QWEN_IMAGE21_REVISION = "b3179ad355be050328e483a9dfdd9e60cd62adfa"
 
 app = modal.App(APP_NAME)
-model_volume = modal.Volume.from_name(MODEL_VOLUME_NAME, create_if_missing=True)
-state_volume = modal.Volume.from_name(STATE_VOLUME_NAME, create_if_missing=True)
-kernel_volume = modal.Volume.from_name(KERNEL_VOLUME_NAME, create_if_missing=True)
-qwen_cache_volume = modal.Volume.from_name(QWEN_CACHE_VOLUME_NAME, create_if_missing=True)
-job_store = modal.Dict.from_name(JOB_DICT_NAME, create_if_missing=True)
-hf_secret = modal.Secret.from_name(HF_SECRET_NAME)
+model_volume = modal.Volume.from_name(
+    MODEL_VOLUME_NAME,
+    environment_name=MODAL_ENVIRONMENT,
+    create_if_missing=True,
+)
+state_volume = modal.Volume.from_name(
+    STATE_VOLUME_NAME,
+    environment_name=MODAL_ENVIRONMENT,
+    create_if_missing=True,
+)
+kernel_volume = modal.Volume.from_name(
+    KERNEL_VOLUME_NAME,
+    environment_name=MODAL_ENVIRONMENT,
+    create_if_missing=True,
+)
+qwen_cache_volume = modal.Volume.from_name(
+    QWEN_CACHE_VOLUME_NAME,
+    environment_name=MODAL_ENVIRONMENT,
+    create_if_missing=True,
+)
+job_store = modal.Dict.from_name(
+    JOB_DICT_NAME,
+    environment_name=MODAL_ENVIRONMENT,
+    create_if_missing=True,
+)
+hf_secret = modal.Secret.from_name(HF_SECRET_NAME, environment_name=MODAL_ENVIRONMENT)
 
 media_mount = None
 media_secret = None
@@ -62,6 +83,7 @@ if MEDIA_PRIMARY_BACKEND == "s3":
         raise RuntimeError("Primary S3 bucket is required for object-storage media")
     media_secret = modal.Secret.from_name(
         MEDIA_SECRET_NAME,
+        environment_name=MODAL_ENVIRONMENT,
         required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
     )
     mount_kwargs = {

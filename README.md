@@ -58,10 +58,13 @@ modal deploy modal_app.py
 Volume，避免已加载的 `.so` 阻塞逐任务 `state_volume.reload()`。任务状态保存在
 `ltx25-jobs` Modal Dict。
 本地 `ltx25/modal_client.py` 通过 `.spawn()` 提交任务，GPU 每个容器串行推理，默认最多一个 GPU 容器。
-Studio 启动时会显式获取 90 秒 warm lease，并每 30 秒续租；active job 也会保持 worker。
-租约过期且没有 active job 时会自动将 Modal `scaledown_window` 收到 2 秒，页面正常离开
-也会通过 keepalive 调用 `/api/admin/unload` 立即释放。保温期间的 idle window 由
-`LTX25_MODAL_GPU_IDLE_SECONDS` 配置；模型/状态/kernel Volume 与 HF Secret 名称分别可通过
+生产 Director 固定 `min_containers=1`，因此部署后会持续保留一个 RTX PRO 6000 容器，
+直到显式执行 `delete-modal.bat` / `modal app stop`。Studio 的 warm lease 只负责
+ready/warming 状态探测，不会覆盖这一生产常驻策略。部署、Lookup、Volume/Dict/Secret
+统一使用 `LTX25_MODAL_ENVIRONMENT`（默认 `main`），避免本机 active environment 变化后
+出现 lookup 到错误环境。开发部署固定使用 Modal `recreate` strategy；对于当前
+`max_containers=1` 的单 GPU Director，这保证 deploy 完成后新请求不会继续进入旧容器。
+模型/状态/kernel Volume 与 HF Secret 名称分别可通过
 `LTX25_MODAL_MODEL_VOLUME`、`LTX25_MODAL_STATE_VOLUME`、`LTX25_MODAL_KERNEL_VOLUME`、
 `LTX25_MODAL_HF_SECRET` 覆盖。
 导演台请求支持 `engine=auto|ltx|qwen`。`auto` 会把纯 `t2i` 路由到 Qwen-Image 2.1，
@@ -86,9 +89,12 @@ npm run dev
 如需切换后端，设置 `VITE_API_TARGET` 后重新启动前端。前端可以连续提交任务，后端仍保持单 GPU
 串行执行（`max_containers=1`、`max_inputs=1`），后续任务在 Modal 队列中等待。
 
-部署前设置 `$env:LTX25_MODAL_GPU_IDLE_SECONDS="120"` 可调整 GPU 空闲保留时间；
-较长的时间适合连续生成，较短的时间减少空闲 GPU 费用。该变量在执行 Modal CLI
-时读取，修改后需要重新部署；不会自动读取本地 `.env` 文件。
+生产部署使用 `min_containers=1`，因此 `LTX25_MODAL_GPU_IDLE_SECONDS` 不会让唯一的
+Director 容器自动缩到 0；如需释放 GPU，请显式停止 App。若未来切回
+`min_containers=0`，该 idle window 才重新决定空闲容器的回收时机。
+
+`ltx25-jobs` 使用 Modal Dict 保存运行期 job/session/asset 元数据。Modal Dict 条目不是
+永久历史数据库；长期归档应写入独立持久层，而 Studio 的 History 仅应视为近期运行历史。
 
 网关在同一容器内串行化 Volume 操作（包括完整文件响应），避免打开文件期间
 执行 `reload()`；健康检查和任务轮询仍可并发。大文件传输期间，同容器的其他

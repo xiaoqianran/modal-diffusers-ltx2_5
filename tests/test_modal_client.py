@@ -169,7 +169,15 @@ def test_constructor_does_not_hydrate_modal_state(monkeypatch, tmp_path):
 
     assert control.job_store is store
     assert control._active_index_initialized is False
-    assert dict_calls == [((modal_client_module.JOB_DICT_NAME,), {"create_if_missing": True})]
+    assert dict_calls == [
+        (
+            (modal_client_module.JOB_DICT_NAME,),
+            {
+                "environment_name": modal_client_module.MODAL_ENVIRONMENT,
+                "create_if_missing": True,
+            },
+        )
+    ]
 
 
 def test_active_index_is_lazy_backfilled_once_and_repairs_shape(tmp_path):

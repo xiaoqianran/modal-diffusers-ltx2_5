@@ -21,6 +21,7 @@ from .schemas import GenerateRequest, LoraResponse
 
 
 APP_NAME = os.environ.get("LTX25_MODAL_APP", "ltx25-nvfp4")
+MODAL_ENVIRONMENT = os.environ.get("LTX25_MODAL_ENVIRONMENT", "main")
 STATE_VOLUME_NAME = os.environ.get("LTX25_MODAL_STATE_VOLUME", "ltx25-state")
 JOB_DICT_NAME = os.environ.get("LTX25_MODAL_JOB_DICT", "ltx25-jobs")
 WORKER_CLASS_NAME = os.environ.get("LTX25_MODAL_WORKER_CLASS", "DirectorWorker")
@@ -54,6 +55,7 @@ class ModalClient:
 
     def __init__(self) -> None:
         self.app_name = APP_NAME
+        self.environment_name = MODAL_ENVIRONMENT
         self.model_id = MODEL_ID
         self.gpu_idle_seconds = int(os.environ.get("LTX25_MODAL_GPU_IDLE_SECONDS", "600"))
         self.keep_gpu_warm = os.environ.get("LTX25_LOCAL_KEEP_GPU_WARM", "0").strip().lower() not in {
@@ -67,12 +69,19 @@ class ModalClient:
         self.output_cache = self.cache_root / "outputs"
         self.upload_cache = self.cache_root / "uploads"
 
-        self.state_volume = modal.Volume.from_name(STATE_VOLUME_NAME)
+        self.state_volume = modal.Volume.from_name(
+            STATE_VOLUME_NAME,
+            environment_name=self.environment_name,
+        )
         # The local Router may start before the first Modal deploy on a fresh
         # workspace/account. Hydrate the persistent queue Dict lazily, but make
         # its first real use idempotently create it instead of turning /health
         # into a 500 with Dict NotFoundError.
-        self.job_store = modal.Dict.from_name(JOB_DICT_NAME, create_if_missing=True)
+        self.job_store = modal.Dict.from_name(
+            JOB_DICT_NAME,
+            environment_name=self.environment_name,
+            create_if_missing=True,
+        )
         self.media_storage = create_media_storage(self.state_volume)
         self.media_store = self.media_storage  # compatibility alias for tests/callers
 
@@ -96,11 +105,19 @@ class ModalClient:
         self._active_index_initialized = False
 
     def _resolve_remote_handles(self) -> None:
-        worker_cls = modal.Cls.from_name(self.app_name, WORKER_CLASS_NAME)
+        worker_cls = modal.Cls.from_name(
+            self.app_name,
+            WORKER_CLASS_NAME,
+            environment_name=self.environment_name,
+        )
         self.worker = worker_cls()
         self.generate_fn = self.worker.generate
         self.ready_fn = self.worker.ready
-        self.native_generate_fn = modal.Function.from_name(self.app_name, NATIVE_FUNCTION_NAME)
+        self.native_generate_fn = modal.Function.from_name(
+            self.app_name,
+            NATIVE_FUNCTION_NAME,
+            environment_name=self.environment_name,
+        )
 
     @staticmethod
     def _is_stale_deployment_error(exc: Exception) -> bool:
