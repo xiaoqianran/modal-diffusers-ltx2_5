@@ -9,6 +9,8 @@
  */
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
+const API_TARGET = String(import.meta.env?.VITE_API_TARGET || '').replace(/\/+$/, '')
+const MEDIA_URL_KEYS = new Set(['video_url', 'image_url', 'audio_url', 'hdr_exr_url'])
 
 /**
  * Resolve a site-relative path against the current origin.
@@ -20,8 +22,34 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' }
  */
 function absolute(path) {
   if (/^https?:\/\//i.test(path)) return path
+  if (API_TARGET && /^\/(?:api|outputs)\//.test(path)) {
+    return new URL(path, `${API_TARGET}/`).href
+  }
   const base = globalThis.window?.location?.href || 'http://localhost/'
   return new URL(path, base).href
+}
+
+function resolveMediaUrls(value) {
+  if (Array.isArray(value)) return value.map(resolveMediaUrls)
+  if (!value || typeof value !== 'object') return value
+  const resolved = { ...value }
+  for (const key of MEDIA_URL_KEYS) {
+    if (typeof resolved[key] === 'string' && resolved[key]) {
+      resolved[key] = absolute(resolved[key])
+    }
+  }
+  const primaryMedia = resolved.video_url || resolved.image_url || resolved.audio_url
+  if (primaryMedia) {
+    const url = new URL(primaryMedia)
+    url.searchParams.set('download', '1')
+    resolved.download_url = url.href
+  }
+  if (resolved.hdr_exr_url) {
+    const url = new URL(resolved.hdr_exr_url)
+    url.searchParams.set('download', '1')
+    resolved.hdr_exr_download_url = url.href
+  }
+  return resolved
 }
 
 /** Error carrying the server's `detail` so the UI can show something useful. */
@@ -38,7 +66,7 @@ async function parse(response) {
   const text = await response.text()
   if (!text) return null
   try {
-    return JSON.parse(text)
+    return resolveMediaUrls(JSON.parse(text))
   } catch {
     return { detail: text.slice(0, 400) }
   }

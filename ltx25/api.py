@@ -490,14 +490,20 @@ def concat_jobs(request: ConcatRequest):
 
 @app.api_route("/outputs/{filename}", methods=["GET", "HEAD"])
 def output_file(filename: str, request: Request):
+    download = request.query_params.get("download") in {"1", "true", "yes"}
     try:
-        redirect_url = modal_client.output_delivery_url(filename, method=request.method)
-        if redirect_url:
-            return RedirectResponse(redirect_url, status_code=307)
+        if not download:
+            redirect_url = modal_client.output_delivery_url(filename, method=request.method)
+            if redirect_url:
+                return RedirectResponse(redirect_url, status_code=307)
         path = modal_client.download_output(filename)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Output not found") from exc
 
-    return FileResponse(path, media_type=media_content_type(path.name))
+    return FileResponse(
+        path,
+        media_type=media_content_type(path.name),
+        filename=path.name if download else None,
+    )

@@ -110,10 +110,10 @@ function meta(job) {
           <a
             v-if="selectJobActions(job).canDownload"
             class="job-action"
-            :href="job.video_url || job.image_url || job.audio_url"
+            :href="job.download_url || job.video_url || job.image_url || job.audio_url"
             download
           >下载</a>
-          <a v-if="job.hdr_exr_url" class="job-action" :href="job.hdr_exr_url" download>EXR ZIP</a>
+          <a v-if="job.hdr_exr_url" class="job-action" :href="job.hdr_exr_download_url || job.hdr_exr_url" download>EXR ZIP</a>
           <button
             v-if="selectJobActions(job).canDelete"
             class="job-action danger"

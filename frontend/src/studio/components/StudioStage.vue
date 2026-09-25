@@ -147,13 +147,13 @@ function onDrop(event) {
           <a
             v-if="props.actions.canDownload"
             class="stage-act"
-            :href="props.job.video_url || props.job.image_url || props.job.audio_url"
+            :href="props.job.download_url || props.job.video_url || props.job.image_url || props.job.audio_url"
             download
           >下载</a>
           <a
             v-if="props.job.hdr_exr_url"
             class="stage-act"
-            :href="props.job.hdr_exr_url"
+            :href="props.job.hdr_exr_download_url || props.job.hdr_exr_url"
             download
           >EXR ZIP</a>
           <button
