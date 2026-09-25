@@ -62,7 +62,6 @@ function onDrop(event) {
         <div
           v-else
           class="viewport"
-          :class="{ 'viewport-image': Boolean(props.job.image_url) }"
         >
           <video
             v-if="props.job.video_url"

@@ -29,19 +29,21 @@ const durationLabel = computed(() => {
 
 <template>
   <form class="prompt-dock prompt-dock-v3" @submit.prevent="emit('submit')">
-    <div v-if="sourceHandoff" class="workflow-handoff" aria-label="Qwen image to LTX video workflow">
-      <span class="handoff-source">Qwen Image</span>
-      <span class="handoff-arrow" aria-hidden="true">→</span>
-      <span class="handoff-target">LTX 2.5 · Image to Video</span>
+    <div class="composer-input-slot" :class="{ empty: !sourceHandoff && !attachmentSlots.length }">
+      <div v-if="sourceHandoff" class="workflow-handoff" aria-label="Qwen image to LTX video workflow">
+        <span class="handoff-source">Qwen Image</span>
+        <span class="handoff-arrow" aria-hidden="true">→</span>
+        <span class="handoff-target">LTX 2.5 · Image to Video</span>
+      </div>
+      <ReferenceTray
+        v-else-if="attachmentSlots.length"
+        :slots="attachmentSlots"
+        :attachments="attachments"
+        :uploading="uploading"
+        @file="(...args) => emit('file', ...args)"
+        @remove="slot => emit('remove', slot)"
+      />
     </div>
-    <ReferenceTray
-      v-if="attachmentSlots.length"
-      :slots="attachmentSlots"
-      :attachments="attachments"
-      :uploading="uploading"
-      @file="(...args) => emit('file', ...args)"
-      @remove="slot => emit('remove', slot)"
-    />
     <div class="prompt-row">
       <textarea
         v-model="draft.prompt"

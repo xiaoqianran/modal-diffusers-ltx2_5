@@ -1424,3 +1424,33 @@
     display: none;
   }
 }
+
+/* keep Stage geometry stable across Create / Edit / Control */
+
+.composer-input-slot {
+  height: 44px;
+  min-height: 44px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.composer-input-slot.empty {
+  pointer-events: none;
+}
+
+.composer-input-slot .reference-tray {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.composer-input-slot .workflow-handoff {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.studio-v3 .viewport,
+.studio-v3 .viewport.viewport-image {
+  width: min(100cqw, 1280px, calc(100cqh * 16 / 9));
+  aspect-ratio: 16 / 9;
+}
