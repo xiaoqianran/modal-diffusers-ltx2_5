@@ -160,17 +160,35 @@ class QwenImage21Generator:
             raise FileNotFoundError(f"Qwen-Image 2.1 model directory not found: {self.model_dir}")
 
         started = time.monotonic()
-        self.pipe = QwenImage21Pipeline.from_pretrained(
+        print("[qwen] from_pretrained: start", flush=True)
+        pipe = QwenImage21Pipeline.from_pretrained(
             QWEN_IMAGE21_MODEL_ID,
             revision=QWEN_IMAGE21_REVISION,
             cache_dir=str(self.model_dir),
             dtype=torch.bfloat16,
             local_files_only=True,
-        ).to("cuda")
+        )
+        loaded_cpu = time.monotonic()
+        print(
+            f"[qwen] from_pretrained: done in {loaded_cpu - started:.2f}s; "
+            f"moving pipeline to cuda",
+            flush=True,
+        )
+        pipe = pipe.to("cuda")
+        moved_cuda = time.monotonic()
+        print(
+            f"[qwen] to(cuda): done in {moved_cuda - loaded_cpu:.2f}s; "
+            f"allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GiB "
+            f"reserved={torch.cuda.memory_reserved() / 1024**3:.2f} GiB",
+            flush=True,
+        )
+        self.pipe = pipe
         torch.cuda.synchronize()
+        print("[qwen] cuda synchronize: done", flush=True)
         gc.collect()
         torch.cuda.empty_cache()
         self.load_seconds = time.monotonic() - started
+        print(f"[qwen] resident load complete in {self.load_seconds:.2f}s", flush=True)
 
     def generate(
         self,
