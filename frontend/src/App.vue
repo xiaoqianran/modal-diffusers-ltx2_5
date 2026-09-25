@@ -71,6 +71,18 @@ const stageQueuePosition = computed(() => (
 const queueCount = computed(() => (
   (queue.value?.running?.length || 0) + (queue.value?.upcoming?.length || 0)
 ))
+const queueCapacity = computed(() => (
+  Number(health.value?.queue?.pending_capacity || health.value?.queue?.capacity || 256)
+))
+const executionCapacity = computed(() => (
+  Number(health.value?.queue?.execution_capacity || 1)
+))
+const queueMeta = computed(() => ({
+  active: queueCount.value,
+  capacity: queueCapacity.value,
+  executionCapacity: executionCapacity.value,
+  available: health.value?.queue?.available !== false,
+}))
 const runtimeState = computed(() => {
   const job = stageJob.value
   if (job?.status === 'running') return 'generating'
@@ -318,7 +330,8 @@ onBeforeUnmount(() => {
       <div class="header-actions">
         <button class="topbar-pill jobs-pill" :class="{ active: jobsOpen }" type="button" @click.stop="jobsOpen = !jobsOpen">
           <span class="status-dot" :class="{ live: queueCount > 0 }" />
-          Jobs <b>{{ queueCount }}</b>
+          <span class="jobs-copy"><span>Jobs</span><small v-if="queueCount">{{ queueCount }}/{{ queueCapacity }}</small></span>
+          <b>{{ queueCount }}</b>
         </button>
         <button class="topbar-pill health studio-status runtime-strip" type="button" :data-state="runtimeState" @click="warmGpu">
           <span class="runtime-segment runtime-gpu">
@@ -427,7 +440,13 @@ onBeforeUnmount(() => {
         <div><span class="eyebrow">ACTIVITY</span><h2>Jobs</h2></div>
         <button class="drawer-close" type="button" @click="jobsOpen = false">×</button>
       </div>
-      <StudioQueue :queue="queue" :collapsed="false" @toggle="jobsOpen = false" @cancel="cancelJob" />
+      <StudioQueue
+        :queue="queue"
+        :queue-meta="queueMeta"
+        :collapsed="false"
+        @toggle="jobsOpen = false"
+        @cancel="cancelJob"
+      />
     </aside>
   </div>
 </template>

@@ -9,6 +9,10 @@ const props = defineProps({
     default: () => ({ running: [], upcoming: [] }),
   },
   collapsed: { type: Boolean, default: false },
+  queueMeta: {
+    type: Object,
+    default: () => ({ active: 0, capacity: 256, executionCapacity: 1, available: true }),
+  },
 })
 
 const emit = defineEmits(['toggle', 'cancel'])
@@ -17,10 +21,13 @@ const percent = job => Math.round((job?.progress || 0) * 100)
 
 <template>
   <aside class="queue-panel" :class="{ collapsed: props.collapsed }">
-    <div class="panel-head">
-      <span>QUEUE</span>
+    <div class="panel-head queue-panel-head">
+      <div class="queue-heading-copy">
+        <span>QUEUE</span>
+        <small>Persistent backlog · serial GPU execution</small>
+      </div>
       <div class="head-actions">
-        <small>{{ props.queue.running.length + props.queue.upcoming.length }}</small>
+        <small>{{ props.queueMeta.active }} / {{ props.queueMeta.capacity }}</small>
         <button
           class="ghost icon"
           type="button"
@@ -32,8 +39,21 @@ const percent = job => Math.round((job?.progress || 0) * 100)
     </div>
 
     <div class="queue-body">
+      <div class="queue-runtime-card">
+        <div>
+          <span class="queue-runtime-label">GPU consumer</span>
+          <strong>{{ props.queueMeta.executionCapacity }} at a time</strong>
+        </div>
+        <div class="queue-capacity-copy">
+          <span>{{ props.queueMeta.active }} queued / running</span>
+          <small>{{ Math.max(0, props.queueMeta.capacity - props.queueMeta.active) }} slots available</small>
+        </div>
+      </div>
       <div class="queue">
-        <div v-if="!props.queue.running.length && !props.queue.upcoming.length" class="empty">队列空闲</div>
+        <div v-if="!props.queue.running.length && !props.queue.upcoming.length" class="empty queue-empty">
+          <strong>Queue is clear</strong>
+          <small>New jobs will start on the GPU immediately.</small>
+        </div>
 
         <article
           v-for="job in props.queue.running"
@@ -42,7 +62,7 @@ const percent = job => Math.round((job?.progress || 0) * 100)
         >
           <div class="qcard-head">
             <span class="dot" />
-            <span>生成中</span>
+            <span>GPU · Generating</span>
             <small>{{ percent(job) }}%</small>
           </div>
           <p class="qcard-title">{{ job.request?.prompt || '' }}</p>
@@ -56,7 +76,7 @@ const percent = job => Math.round((job?.progress || 0) * 100)
         </article>
 
         <template v-if="props.queue.upcoming.length">
-          <div class="queue-subhead">UP NEXT · {{ props.queue.upcoming.length }}</div>
+          <div class="queue-subhead"><span>UP NEXT</span><small>{{ props.queue.upcoming.length }} waiting</small></div>
           <div class="queue-rows">
             <div
               v-for="(job, index) in props.queue.upcoming"

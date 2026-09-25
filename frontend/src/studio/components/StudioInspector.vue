@@ -53,9 +53,12 @@ function setOptionalNumber(key, raw) {
           </select>
         </label>
         <div class="resolved-card">
-          <span>{{ draft.engine === 'auto' ? 'Expected' : 'Engine' }}</span>
+          <div class="resolved-card-head">
+            <span>{{ draft.engine === 'auto' ? 'Expected engine' : 'Engine' }}</span>
+            <i class="resolved-live-dot" aria-hidden="true" />
+          </div>
           <strong>{{ expected }}</strong>
-          <small v-if="draft.engine === 'auto'">The completed job shows the authoritative Director route.</small>
+          <small v-if="draft.engine === 'auto'">Director chooses the execution engine before the job starts.</small>
         </div>
       </section>
 

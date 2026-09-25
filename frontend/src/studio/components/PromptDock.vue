@@ -69,7 +69,10 @@ const durationLabel = computed(() => {
           </optgroup>
         </select>
       </label>
-      <span class="composer-chip prompt-route">{{ draft.engine === 'auto' ? 'Auto → ' + expected : expected }}</span>
+      <span class="composer-chip prompt-route">
+        <small>{{ draft.engine === 'auto' ? 'Director' : 'Engine' }}</small>
+        <strong>{{ draft.engine === 'auto' ? 'Auto → ' + expected : expected }}</strong>
+      </span>
       <span class="composer-chip">{{ draft.size }}</span>
       <span v-if="durationLabel" class="composer-chip">{{ durationLabel }}</span>
       <span class="prompt-shortcut">Ctrl ↵</span>
