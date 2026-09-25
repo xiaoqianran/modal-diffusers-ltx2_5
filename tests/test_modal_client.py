@@ -248,6 +248,25 @@ def test_completed_output_can_be_reused_inside_volume_without_download(tmp_path)
     assert control.transfer_metrics()["download"]["count"] == 0
 
 
+def test_completed_image_output_can_be_reused_inside_volume_without_download(tmp_path):
+    control = make_client(tmp_path)
+    job = control.create_job(GenerateRequest(prompt="source image", mode="t2i", session_number=101))
+    record = control.job_store.get(f"job:{job['id']}")
+    record.update(status="completed", image_url=f"/outputs/{job['id']}.png")
+    control.job_store.put(f"job:{job['id']}", record)
+    control.state_volume.files[f"outputs/{job['id']}.png"] = b"image-data"
+
+    asset = control.copy_output_to_input(job["id"])
+
+    remote_path = control.job_store.get(f"asset:{asset['id']}")["key"]
+    assert control.state_volume.files[remote_path] == b"image-data"
+    assert remote_path.endswith(".png")
+    assert asset["kind"] == "image"
+    assert asset["size"] == len(b"image-data")
+    assert control.transfer_metrics()["copy"]["count"] == 1
+    assert control.transfer_metrics()["download"]["count"] == 0
+
+
 def test_job_summary_keeps_render_fields_but_drops_heavy_request_details(tmp_path):
     control = make_client(tmp_path)
     job = control.create_job(GenerateRequest(prompt="summary", negative_prompt="very long negative", session_number=101))

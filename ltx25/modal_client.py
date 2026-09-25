@@ -310,7 +310,9 @@ class ModalClient:
         return self._get_record(record["id"]) or record
 
     def set_idle_window(self, seconds: int) -> None:
-        self.worker.update_autoscaler(min_containers=0, scaledown_window=seconds)
+        # Persistent-GPU mode: never let Studio lease/unload logic override the
+        # deployed min_containers=1 policy and scale this worker to zero.
+        self.worker.update_autoscaler(min_containers=1, scaledown_window=seconds)
 
     def start_warmup(self) -> bool:
         """Start one warmup call unless keep-warm is disabled or one is already pending."""
@@ -727,30 +729,49 @@ class ModalClient:
         self.job_store.put(self._output_key(filename), record)
 
     def copy_output_to_input(self, job_id: str) -> dict[str, Any]:
-        """Expose a completed video output as a new input without a browser round-trip."""
+        """Expose a completed media output as a new input without a browser round-trip."""
         record = self._get_record(job_id)
         if not record or record.get("status") != "completed":
             raise FileNotFoundError(job_id)
 
-        source = record.get("video_key")
-        if not source and record.get("video_url"):
-            source = f"outputs/{Path(record['video_url']).name}"
-        if not isinstance(source, str) or not source:
+        output_candidates = (
+            ("video", "video_key", "video_url"),
+            ("image", "image_key", "image_url"),
+            ("audio", "audio_key", "audio_url"),
+        )
+        kind = None
+        source = None
+        for candidate_kind, key_name, url_name in output_candidates:
+            candidate = record.get(key_name)
+            if not candidate and record.get(url_name):
+                candidate = f"outputs/{Path(record[url_name]).name}"
+            if isinstance(candidate, str) and candidate:
+                kind = candidate_kind
+                source = candidate
+                break
+        if kind is None or not isinstance(source, str) or not source:
             raise FileNotFoundError(job_id)
+
         filename = Path(source).name
-        if Path(filename).name != filename or Path(filename).suffix.lower() != ".mp4":
-            raise ValueError("Job output is not a reusable MP4")
+        suffix = Path(filename).suffix.lower()
+        allowed_suffixes = {
+            "video": {".mp4"},
+            "image": {".png", ".jpg", ".jpeg", ".webp"},
+            "audio": {".wav", ".mp3", ".m4a", ".aac", ".flac"},
+        }
+        if Path(filename).name != filename or suffix not in allowed_suffixes[kind]:
+            raise ValueError(f"Job {kind} output is not reusable")
 
         source_ref = self._output_ref(filename)
         asset_id = uuid.uuid4().hex
-        destination = f"inputs/{asset_id}.mp4"
+        destination = f"inputs/{asset_id}{suffix}"
         destination_ref, size = self.media_storage.copy(source_ref, destination)
 
         try:
             self.register_asset(
                 asset_id,
                 destination,
-                kind="video",
+                kind=kind,
                 filename=filename,
                 size=size,
                 store_id=destination_ref.store_id,
@@ -761,7 +782,7 @@ class ModalClient:
 
         return {
             "id": asset_id,
-            "kind": "video",
+            "kind": kind,
             "filename": filename,
             "size": size,
         }

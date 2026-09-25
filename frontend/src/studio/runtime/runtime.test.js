@@ -516,7 +516,7 @@ await test('selectJob pins the stage', async () => {
   assert.equal(runtime.stageJob.value.id, 'run')
 })
 
-await test('editFromOutput reuses the output inside remote storage and switches mode', async () => {
+await test('deriveFromOutput reuses a video inside remote storage and switches mode', async () => {
   const api = fakeApi({
     listJobs: async () => [JOB({ id: 'v'.repeat(32), video_url: '/outputs/v.mp4' })],
   })
@@ -525,8 +525,8 @@ await test('editFromOutput reuses the output inside remote storage and switches 
   await runtime.refreshJobs()
   runtime.selectJob('v'.repeat(32))
 
-  const result = await runtime.editFromOutput('retake')
-  assert.equal(result.ok, true, `editFromOutput failed: ${runtime.notice.text}`)
+  const result = await runtime.deriveFromOutput('retake')
+  assert.equal(result.ok, true, `deriveFromOutput failed: ${runtime.notice.text}`)
   assert.equal(runtime.draft.mode, 'retake')
   assert.equal(runtime.attachments.source.id, 'c'.repeat(32))
   assert.equal(runtime.busy.preparing, false)
@@ -535,15 +535,15 @@ await test('editFromOutput reuses the output inside remote storage and switches 
   assert.ok(!names.includes('uploadAsset'), 'should not re-upload the output through the browser')
 })
 
-await test('editFromOutput refuses without a completed video', async () => {
+await test('deriveFromOutput refuses without a completed video', async () => {
   const runtime = makeRuntime()
   runtime.draft.prompt = 'x'
-  const result = await runtime.editFromOutput('retake')
+  const result = await runtime.deriveFromOutput('retake')
   assert.equal(result.ok, false)
   assert.match(runtime.notice.text, /已完成的视频/)
 })
 
-await test('editFromOutput reports remote reuse failures and leaves no source', async () => {
+await test('deriveFromOutput reports remote reuse failures and leaves no source', async () => {
   const api = fakeApi({
     listJobs: async () => [JOB({ id: 'v'.repeat(32) })],
     reuseOutput: async () => { throw new ApiError('boom', 500) },
@@ -552,10 +552,62 @@ await test('editFromOutput reports remote reuse failures and leaves no source', 
   runtime.sessionNumber.value = 1
   await runtime.refreshJobs()
   runtime.selectJob('v'.repeat(32))
-  const result = await runtime.editFromOutput('extend')
+  const result = await runtime.deriveFromOutput('extend')
   assert.equal(result.ok, false)
   assert.equal(runtime.attachments.source, null)
   assert.equal(runtime.busy.preparing, false)
+})
+
+await test('deriveFromOutput routes a completed image into Qwen edit without browser upload', async () => {
+  const imageId = 'i'.repeat(32)
+  const api = fakeApi({
+    listJobs: async () => [JOB({
+      id: imageId,
+      video_url: null,
+      image_url: '/outputs/i.png',
+      request: { mode: 't2i', prompt: 'image', width: 1024, height: 1024, num_frames: 9, fps: 24, steps: 40, upscale: true },
+    })],
+    reuseOutput: async id => {
+      api.calls.push(['reuseOutput', id])
+      return { ...asset('d'.repeat(32)), kind: 'image', filename: 'source.png' }
+    },
+  })
+  const runtime = makeRuntime(api)
+  runtime.sessionNumber.value = 1
+  await runtime.refreshJobs()
+  runtime.selectJob(imageId)
+
+  const result = await runtime.deriveFromOutput('image_edit')
+  assert.equal(result.ok, true, `deriveFromOutput failed: ${runtime.notice.text}`)
+  assert.equal(runtime.draft.mode, 'image_edit')
+  assert.equal(runtime.attachments.reference0.id, 'd'.repeat(32))
+  assert.ok(api.calls.some(([name]) => name === 'reuseOutput'))
+  assert.ok(!api.calls.some(([name]) => name === 'uploadAsset'))
+})
+
+await test('deriveFromOutput routes a completed image into LTX image-to-video', async () => {
+  const imageId = 'j'.repeat(32)
+  const api = fakeApi({
+    listJobs: async () => [JOB({
+      id: imageId,
+      video_url: null,
+      image_url: '/outputs/j.png',
+      request: { mode: 't2i', prompt: 'image', width: 1024, height: 1024, num_frames: 9, fps: 24, steps: 40, upscale: true },
+    })],
+    reuseOutput: async id => {
+      api.calls.push(['reuseOutput', id])
+      return { ...asset('e'.repeat(32)), kind: 'image', filename: 'source.png' }
+    },
+  })
+  const runtime = makeRuntime(api)
+  runtime.sessionNumber.value = 1
+  await runtime.refreshJobs()
+  runtime.selectJob(imageId)
+
+  const result = await runtime.deriveFromOutput('i2v')
+  assert.equal(result.ok, true)
+  assert.equal(runtime.draft.mode, 'i2v')
+  assert.equal(runtime.attachments.first.id, 'e'.repeat(32))
 })
 
 await test('reuseJob copies parameters back into the draft', async () => {

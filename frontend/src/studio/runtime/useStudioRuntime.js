@@ -499,23 +499,44 @@ export function useStudioRuntime(options = {}) {
     }
   }
 
-  /** Enter an editing mode by copying the staged output to inputs inside Modal. */
-  async function editFromOutput(mode) {
+  /**
+   * Start a new workflow from the staged artifact without a browser round-trip.
+   *
+   * Target slot is derived from the target mode capability:
+   * - Qwen image edit -> reference0
+   * - image-to-video/refine/ref2i -> first
+   * - retake/extend -> source
+   */
+  async function deriveFromOutput(mode) {
     const job = stageJob.value
-    if (!job?.video_url) {
-      setNotice('需要先选择一个已完成的视频', 'error')
+    const capability = getModeCapabilities(mode)
+    const hasImage = Boolean(job?.image_url)
+    const hasVideo = Boolean(job?.video_url)
+    const needsVideo = capability.needsSource && capability.sourceIsVideo
+    const needsImage = capability.qwenOnly || capability.input === 'image'
+
+    if (!job || (needsVideo && !hasVideo) || (needsImage && !hasImage)) {
+      setNotice(needsVideo ? '需要先选择一个已完成的视频' : '需要先选择一个已完成的图片', 'error')
       return { ok: false }
     }
     busy.preparing = true
     setMode(mode)
     try {
-      setNotice('准备源视频：云端复用输出')
+      setNotice('准备素材：云端复用输出')
       const asset = await client.reuseOutput(job.id)
-      attachments.source = { ...asset, kind: asset.kind || 'video' }
-      setNotice(`已载入源视频，可直接${mode === 'retake' ? '重拍' : '延长'}`)
+      if (capability.multiReference) {
+        attachments.reference0 = { ...asset, kind: asset.kind || 'image' }
+      } else if (capability.needsSource) {
+        attachments.source = { ...asset, kind: asset.kind || (needsVideo ? 'video' : null) }
+      } else if (capability.input === 'image') {
+        attachments.first = { ...asset, kind: asset.kind || 'image' }
+      }
+      setNotice(`已载入输出，可继续 ${capability.label}`)
       return { ok: true }
     } catch (error) {
-      attachments.source = null
+      if (capability.multiReference) attachments.reference0 = null
+      if (capability.needsSource) attachments.source = null
+      if (capability.input === 'image') attachments.first = null
       setNotice(`载入输出失败：${error.message}`, 'error')
       return { ok: false }
     } finally {
@@ -626,7 +647,7 @@ export function useStudioRuntime(options = {}) {
     attach, detach,
     selectJob, clearSelection,
     showView, setFilter, setSortOrder, toggleQueue,
-    submit, cancelJob, deleteJob, editFromOutput, reuseJob,
+    submit, cancelJob, deleteJob, deriveFromOutput, reuseJob,
     setNotice, clearNotice,
   }
 }

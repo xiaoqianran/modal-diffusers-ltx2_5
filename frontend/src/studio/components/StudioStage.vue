@@ -4,6 +4,7 @@ import { ref } from 'vue'
 import { JOB_STATUS, isPending } from '../model/jobs.js'
 import { isStillMode } from '../model/modes.js'
 import { describeDirectorPlan, describeJob, describePerformance } from '../model/selectors.js'
+import ArtifactActions from './ArtifactActions.vue'
 
 const props = defineProps({
   job: { type: Object, default: null },
@@ -44,6 +45,9 @@ function onDrop(event) {
     <div class="canvas">
       <div class="canvas-meta">
         <span>{{ props.job ? describeJob(props.job) : 'LTX 2.5' }}</span>
+        <span v-if="props.job && describeDirectorPlan(props.job)" class="resolved-model-badge">
+          {{ describeDirectorPlan(props.job) }}
+        </span>
       </div>
 
       <div class="viewport-slot">
@@ -125,49 +129,14 @@ function onDrop(event) {
           {{ props.job.request?.prompt || '' }}
         </p>
         <div class="canvas-actions">
-          <template v-if="props.actions.canDerive">
-            <button
-              class="stage-act"
-              type="button"
-              :disabled="props.preparing"
-              @click="emit('derive', 'retake')"
-            >
-              {{ props.preparing ? '准备中…' : '重拍' }}
-            </button>
-            <button
-              class="stage-act"
-              type="button"
-              :disabled="props.preparing"
-              @click="emit('derive', 'extend')"
-            >
-              延长
-            </button>
-          </template>
-
-          <a
-            v-if="props.actions.canDownload"
-            class="stage-act"
-            :href="props.job.download_url || props.job.video_url || props.job.image_url || props.job.audio_url"
-            download
-          >下载</a>
-          <a
-            v-if="props.job.hdr_exr_url"
-            class="stage-act"
-            :href="props.job.hdr_exr_download_url || props.job.hdr_exr_url"
-            download
-          >EXR ZIP</a>
-          <button
-            v-if="props.actions.canReuse"
-            class="stage-act"
-            type="button"
-            @click="emit('reuse', props.job.id)"
-          >复用</button>
-          <button
-            v-if="props.actions.canDelete"
-            class="stage-act danger"
-            type="button"
-            @click="emit('remove', props.job.id)"
-          >删除</button>
+          <ArtifactActions
+            :job="props.job"
+            :actions="props.actions"
+            :preparing="props.preparing"
+            @derive="mode => emit('derive', mode)"
+            @reuse="id => emit('reuse', id)"
+            @remove="id => emit('remove', id)"
+          />
 
           <div class="menu-wrap" @click.stop>
             <button class="stage-act" type="button" title="详细信息" @click="infoOpen = !infoOpen">···</button>
