@@ -40,11 +40,13 @@ _EAGER = object()  # blacklist sentinel
 
 
 class ForwardGraphRunner:
-    def __init__(self, module: torch.nn.Module, warmup_iters: int = 3, max_captures: int = 8):
+    def __init__(self, module: torch.nn.Module, warmup_iters: int = 3, max_captures: int = 8, max_tokens: int = 8192):
         self._module = module
         self._orig_forward = module.forward
         self._warmup_iters = warmup_iters
         self._max_captures = max_captures
+        self._max_tokens = max(0, int(max_tokens))
+        self._warned_large = False
         self._pool = None
         self._captures: dict[tuple, Any] = {}
         self.enabled = True
@@ -126,6 +128,15 @@ class ForwardGraphRunner:
         if cap is _EAGER:
             return self._orig_forward(**kwargs)
         if cap is None:
+            hs = kwargs.get("hidden_states")
+            if (self._max_tokens > 0 and isinstance(hs, torch.Tensor)
+                    and hs.ndim >= 2 and hs.shape[1] > self._max_tokens):
+                if not self._warned_large:
+                    self._warned_large = True
+                    print(f"[ltx25] cudagraph: {hs.shape[1]} tokens > "
+                          f"max_tokens={self._max_tokens} -> eager", flush=True)
+                self._captures[key] = _EAGER
+                return self._orig_forward(**kwargs)
             n_live = sum(1 for v in self._captures.values() if v is not _EAGER)
             if n_live >= self._max_captures:
                 self.overflow_misses += 1

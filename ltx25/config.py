@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     # 1 shape あたり静的入出力バッファ+graph 中間メモリ(共有 mempool)を保持する。
     # Env: LTX25_CUDA_GRAPH_MAX_CAPTURES
     ltx25_cuda_graph_max_captures: int = 8
+    # Avoid retaining large graph pools alongside resident Qwen; 0 disables.
+    ltx25_cuda_graph_max_tokens: int = 8192
+    # Optional low-VRAM text-encoder optimizations, only with OFFLOAD_MODE=none.
+    # Optional omission of latent and temporal upsamplers for realtime-only serving.
+    ltx25_load_upsamplers: bool = True
+    ltx25_te_diet: bool = False
+    ltx25_te_stream: bool = False
+    ltx25_te_stream_window: int = 2
     # 【実験的・非推奨】transformer_blocks の per-block torch.compile
     # (ltx25/acceleration/compile.py のモジュール docstring の結論を必ず読むこと)。
     # "off"(既定)/ "islands" / "fusion"。probe では graph 単体に勝つが、

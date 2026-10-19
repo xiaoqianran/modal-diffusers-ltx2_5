@@ -479,6 +479,8 @@ class LTXGenerator(ModelLifecycle):
         else:
             # t2i / refine_image: distilled two-stage
             # (8 sigmas -> 2x latent upsample -> 3-sigma refine), probes P3 / P6.
+            if self._upsample_pipe is None:
+                raise RuntimeError("LTX25_LOAD_UPSAMPLERS=0: still-image generation requires the latent upsampler")
             num_frames = request.num_frames or 9
             use_diffusion_decoder = request.mode == "t2i" and decoder_kind == "diffusion"
             if use_diffusion_decoder and num_frames < 17:
@@ -889,6 +891,8 @@ class LTXGenerator(ModelLifecycle):
 
         decoder_kind = request.decoder or self.config.ltx25_decoder
         use_refine = request.upscale or request.temporal_upscale
+        if use_refine and self._upsample_pipe is None:
+            raise RuntimeError("LTX25_LOAD_UPSAMPLERS=0: upscale requires the latent upsampler")
         use_diffusion_decoder = use_refine and decoder_kind == "diffusion"
         final_fps = effective_fps * (2 if request.temporal_upscale else 1)
 

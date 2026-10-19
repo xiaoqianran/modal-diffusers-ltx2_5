@@ -294,3 +294,25 @@ LTX-2/LTX-2.5およびその派生物には、Lightricksの[LTX-2 Community Lice
 Gemmaテキストエンコーダーを含む第三者のモデル・ライブラリ・カーネルは、それぞれの配布元が定めるライセンスと利用規約に従います。
 
 `.env`と生成物はGit管理外です。公開サーバーとして運用する場合は、リバースプロキシ側で認証・TLS・レート制限を追加してください。
+
+
+## 2026-10 upstream inference optimizations (ported)
+
+The fork keeps its Modal Director, dual-resident LTX/Qwen worker, Vue/FastAPI
+interface and existing model/Volume lifecycle intact. The following features
+were independently adapted from upstream `animede/diffusers-ltx2_5` through
+2026-10-13. Original implementations and technical notes are preserved in
+`ltx25/acceleration/te_diet.py`, `ltx25/acceleration/te_stream.py`, and
+`docs/upstream/`; see `NOTICE` for attribution.
+
+| Environment variable | Default | Effect |
+|---|---|---|
+| `LTX25_CUDA_GRAPH_MAX_TOKENS` | `8192` | Larger transformer input shapes use eager mode instead of keeping a large CUDA Graph allocation; `0` disables this limit |
+| `LTX25_LOAD_UPSAMPLERS` | `1` | Set to `0` to omit spatial/temporal latent upsamplers for realtime video-only jobs; still-image and upscaled video requests then fail explicitly |
+| `LTX25_TE_DIET` | `0` | Optional Gemma embedding CPU bridge and logits bypass, only with `OFFLOAD_MODE=none` |
+| `LTX25_TE_STREAM` | `0` | Optional pinned-host sliding-window Gemma layer streaming, only with `OFFLOAD_MODE=none` |
+| `LTX25_TE_STREAM_WINDOW` | `2` | Look-ahead layer window |
+
+The low-VRAM optimizations are disabled in the existing RTX PRO 6000
+production configuration; enabling them requires GPU quality/latency regression
+testing. Original upstream benchmark figures are not measurements of this fork.

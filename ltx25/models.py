@@ -127,7 +127,7 @@ class ModelLifecycle:
                     "Run scripts/download_quantize_ltx25.py first."
                 )
             upsampler_dir = model_dir / "latent_upsampler"
-            if not upsampler_dir.is_dir():
+            if self.config.ltx25_load_upsamplers and not upsampler_dir.is_dir():
                 raise RuntimeError(
                     f"LTX-2.5 latent upsampler is missing under {model_dir}. "
                     "Run scripts/download_quantize_ltx25.py --component quality first."
@@ -256,39 +256,63 @@ class ModelLifecycle:
                 local_files_only=True,
             )
             pipe.vae.enable_tiling()
-            latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
-                model_dir,
-                subfolder="latent_upsampler",
-                dtype=torch.bfloat16,
-                local_files_only=True,
-            )
-            upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
+            upsample_pipe = None
             temporal_upsample_pipe = None
-            if temporal_upsampler_dir.is_dir():
-                temporal_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
+            if self.config.ltx25_load_upsamplers:
+                latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
                     model_dir,
-                    subfolder="temporal_latent_upsampler",
+                    subfolder="latent_upsampler",
                     dtype=torch.bfloat16,
                     local_files_only=True,
                 )
-                temporal_upsample_pipe = LTX2LatentUpsamplePipeline(
-                    vae=pipe.vae, latent_upsampler=temporal_upsampler
-                )
+                upsample_pipe = LTX2LatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=latent_upsampler)
+                if temporal_upsampler_dir.is_dir():
+                    temporal_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
+                        model_dir,
+                        subfolder="temporal_latent_upsampler",
+                        dtype=torch.bfloat16,
+                        local_files_only=True,
+                    )
+                    temporal_upsample_pipe = LTX2LatentUpsamplePipeline(
+                        vae=pipe.vae, latent_upsampler=temporal_upsampler
+                    )
+            else:
+                print("[ltx25] Optional upsamplers disabled by LTX25_LOAD_UPSAMPLERS=0", flush=True)
             if self.config.offload_mode == "none":
                 pipe.to("cuda")
-                upsample_pipe.to("cuda")
+                if upsample_pipe is not None:
+                    upsample_pipe.to("cuda")
                 if temporal_upsample_pipe is not None:
                     temporal_upsample_pipe.to("cuda")
             elif self.config.offload_mode == "sequential":
                 pipe.enable_sequential_cpu_offload()
-                upsample_pipe.enable_sequential_cpu_offload()
+                if upsample_pipe is not None:
+                    upsample_pipe.enable_sequential_cpu_offload()
                 if temporal_upsample_pipe is not None:
                     temporal_upsample_pipe.enable_sequential_cpu_offload()
             else:
                 pipe.enable_model_cpu_offload()
-                upsample_pipe.enable_model_cpu_offload()
+                if upsample_pipe is not None:
+                    upsample_pipe.enable_model_cpu_offload()
                 if temporal_upsample_pipe is not None:
                     temporal_upsample_pipe.enable_model_cpu_offload()
+            # Upstream TE Diet/Streaming: optional and compatible only with fully
+            # resident models; always apply Diet before Streaming.
+            if self.config.ltx25_te_diet or self.config.ltx25_te_stream:
+                if self.config.offload_mode != "none":
+                    print("[ltx25] TE optimizations ignored: require OFFLOAD_MODE=none", flush=True)
+                else:
+                    if self.config.ltx25_te_diet:
+                        from .acceleration.te_diet import apply_te_diet
+                        freed = apply_te_diet(pipe.text_encoder)
+                        print(f"[ltx25] TE Diet: freed {freed:.2f} GiB", flush=True)
+                    if self.config.ltx25_te_stream:
+                        from .acceleration.te_stream import apply_te_stream
+                        pinned = apply_te_stream(
+                            pipe.text_encoder, window=self.config.ltx25_te_stream_window
+                        )
+                        print(f"[ltx25] TE Stream: pinned {pinned:.2f} GiB", flush=True)
+                    torch.cuda.empty_cache()
             if self.config.ltx25_compile_blocks != "off":
                 # per-block torch.compile(ltx25/acceleration/compile.py)。CUDA Graph の
                 # install より前に適用する(graph は compile 済みブロックの呼び出しを
@@ -323,6 +347,7 @@ class ModelLifecycle:
                     self._graph_runner = ForwardGraphRunner(
                         pipe.transformer,
                         max_captures=self.config.ltx25_cuda_graph_max_captures,
+                        max_tokens=self.config.ltx25_cuda_graph_max_tokens,
                     )
                     self._graph_runner.install()
                     print(
